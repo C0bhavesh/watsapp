@@ -10,6 +10,10 @@ python_version = "3.12"
 strict = true
 files = ["app"]
 
+[[tool.mypy.overrides]]
+module = "asyncpg.*"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

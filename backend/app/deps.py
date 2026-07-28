@@ -7,10 +7,18 @@ from app.config.service import ConfigService
 from app.config.settings import Settings
 from app.shopify.client import ShopifyClient
 from app.shopify.token_manager import TokenManager
-from app.store.base import ConfigRepo, IngestStore
-from app.store.memory import InMemoryConfigRepo, InMemoryIngestStore
+from app.store.base import ConfigRepo, IngestStore, MessageStore
+from app.store.memory import (
+    InMemoryConfigRepo,
+    InMemoryIngestStore,
+    InMemoryMessageStore,
+)
 from app.store.pg_factory import LazyPool
-from app.store.postgres import PostgresConfigRepo, PostgresIngestStore
+from app.store.postgres import (
+    PostgresConfigRepo,
+    PostgresIngestStore,
+    PostgresMessageStore,
+)
 
 
 @dataclass
@@ -23,6 +31,7 @@ class Container:
     tokens: TokenManager
     shopify: ShopifyClient
     ingest: IngestStore
+    messages: MessageStore
 
 
 _container: Container | None = None
@@ -37,15 +46,17 @@ def get_container() -> Container:
             pool = LazyPool(settings.database_url)
             config_repo: ConfigRepo = PostgresConfigRepo(pool)
             ingest: IngestStore = PostgresIngestStore(pool)
+            messages: MessageStore = PostgresMessageStore(pool)
         else:
             config_repo = InMemoryConfigRepo()
             ingest = InMemoryIngestStore()
+            messages = InMemoryMessageStore()
         config = ConfigService(config_repo, vault)
         http = httpx.AsyncClient(follow_redirects=False)  # never replay the token to a redirect
         tokens = TokenManager(http, config, settings)
         shopify = ShopifyClient(http, tokens, settings)
         _container = Container(
-            settings, vault, config_repo, config, http, tokens, shopify, ingest
+            settings, vault, config_repo, config, http, tokens, shopify, ingest, messages
         )
     return _container
 

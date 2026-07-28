@@ -77,3 +77,17 @@ class PostgresIngestStore:
                     )
                     queued = _rows_affected(result) > 0
                 return IngestResult(duplicate=False, queued=queued)
+
+
+class PostgresMessageStore:
+    def __init__(self, pool: LazyPool) -> None:
+        self._pool = pool
+
+    async def record_if_new(self, message_id: str) -> bool:
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "INSERT INTO processed_messages (message_id) VALUES ($1) "
+                "ON CONFLICT DO NOTHING",
+                message_id,
+            )
+        return _rows_affected(result) > 0

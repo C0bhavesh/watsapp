@@ -69,6 +69,55 @@
 - **Used in:** channels.shopify_webhook.
 - **Notes:** Shopify = **base64**(HMAC-SHA256(raw body, client secret)); constant-time compare. Distinct from Meta (hex). Missing/empty header → False.
 
+## Meta webhook HMAC verifier (hex)
+- **File:** backend/app/channels/whatsapp_signature.py
+- **Purpose:** verify Meta WhatsApp Cloud API webhook signatures.
+- **Public API:** `verify_meta_hmac(raw_body: bytes, header_value: str | None, secret: str) -> bool`.
+- **Used in:** channels.whatsapp (Phase 3+).
+- **Notes:** Meta = **hex**(HMAC-SHA256(raw body, app secret)) with `sha256=` prefix; constant-time compare. Distinct from Shopify (base64). Non-ASCII header bytes → False (fail-closed). Missing/empty header → False.
+
+## WhatsAppConfig (Fernet-split secrets/plain)
+- **File:** backend/app/channels/whatsapp_config.py
+- **Purpose:** load WhatsApp Bot API credentials from ConfigService (secrets encrypted, plain values unencrypted).
+- **Public API:** frozen dataclass `WhatsAppConfig(access_token, app_secret, verify_token, phone_number_id, waba_id, api_version)`; module tuples `WHATSAPP_SECRET_FIELDS = ("access_token", "app_secret", "verify_token")`, `WHATSAPP_PLAIN_FIELDS = ("phone_number_id", "waba_id", "api_version")`; `async load_whatsapp_config(config: ConfigService) -> WhatsAppConfig | None`.
+- **Used in:** deps.Container, channels.whatsapp (Phase 3+).
+- **Notes:** returns `None` if any of the 6 keys is unset; all 6 must be present for a valid config. Secrets are fetched via `config.get_secret(f"whatsapp:{field}")`, plain via `config.get_plain(f"whatsapp:{field}")`. No hardcoded `api_version` default (ADR-005: operational values are config, not code).
+
+## WhatsApp inbound event parser
+- **File:** backend/app/channels/whatsapp_inbound.py
+- **Purpose:** parse a Meta webhook envelope into a typed inbound event.
+- **Public API:** frozen dataclasses `InboundText(message_id, wa_id, text, timestamp)`, `InboundInteractive(message_id, wa_id, button_id, button_title, timestamp)`, `InboundButton(message_id, wa_id, payload, button_text, context_message_id, timestamp)`; `InboundEvent = InboundText | InboundInteractive | InboundButton`; `extract_event(payload: dict) -> InboundEvent | None`.
+- **Used in:** channels.whatsapp (POST receive).
+- **Notes:** F4 — template quick-reply taps arrive as `type:"button"` (→ `InboundButton`), NOT `type:"interactive"` (→ `InboundInteractive`, for buttons WE sent via send_buttons). Every field type-coerced (`isinstance` guards); status callbacks / unknown types / malformed / type-confused payloads → `None`, never an exception.
+
+## WhatsApp sender (send_text / send_template / send_buttons)
+- **File:** backend/app/channels/whatsapp_sender.py
+- **Purpose:** outbound Meta Graph message sends.
+- **Public API:** `SendResult(ok, status_code, wamid, error)` (frozen); `WhatsAppSendError(Exception)`; `async send_text(http, cfg, to, body, timeout=20.0) -> SendResult`; `async send_template(http, cfg, to, template_name, language, body_params, button_payloads=(), timeout=20.0) -> SendResult`; `async send_buttons(http, cfg, to, body_text, buttons, timeout=20.0) -> SendResult` (`buttons: Sequence[tuple[id, title]]`).
+- **Used in:** scripts/smoke_whatsapp; Phase 4/5 (outbox drain, confirm/cancel).
+- **Notes:** POST to `graph.facebook.com/{api_version}/{phone_number_id}/messages`, bearer `cfg.access_token`. HTTP >=400 → `SendResult(ok=False, ...)` (not raised); transport/timeout error → `WhatsAppSendError`. `send_buttons`: 1-3 buttons, title <=20 chars else `ValueError`. `send_template` quick-reply buttons carry an explicit per-button `payload` (F4) as `type:"button"` components indexed `"0".."2"`.
+
+## Deterministic multilingual reply copy
+- **File:** backend/app/channels/copy.py
+- **Purpose:** fixed system reply strings (never LLM-generated) in en/hi/hinglish/gu.
+- **Public API:** `SUPPORTED_LANGUAGES = ("en", "hi", "hinglish", "gu")`; `copy_for(key: str, language: str) -> str`.
+- **Used in:** Phase 4 (conversation deterministic replies).
+- **Notes:** keys `order_confirmed`, `cancel_confirm_prompt`, `order_cancelled`, `order_not_found`, `refusal_other_order`, `error_fallback`. Unsupported language → English fallback; unknown key → `KeyError` (call sites internal, not user input). No emojis (CLAUDE.md). Wording is an OPEN owner/client review item before Phase 4 wires it in.
+
+## MessageStore (Protocol) + InMemoryMessageStore + PostgresMessageStore
+- **File:** backend/app/store/base.py (Protocol), backend/app/store/memory.py (in-memory), backend/app/store/postgres.py (Postgres)
+- **Purpose:** dedupe authority for inbound Meta message ids (`processed_messages`) — the Meta-side sibling of `processed_webhooks`.
+- **Public API:** `MessageStore.record_if_new(message_id: str) -> bool` (`True` iff newly recorded); `InMemoryMessageStore()` (inspectable `.seen: set[str]`); `PostgresMessageStore(pool: LazyPool)`.
+- **Used in:** channels.whatsapp (POST receive), deps.Container.
+- **Notes:** Postgres: `INSERT ... ON CONFLICT DO NOTHING`, rowcount via `_rows_affected(tag) > 0` (the existing helper, not `.endswith`). deps picks Postgres when `database_url` set, else in-memory. `processed_messages(message_id PK, received_at)` table pre-exists (schema.sql).
+
+## WhatsApp webhook router (GET verify + POST receive)
+- **File:** backend/app/channels/whatsapp.py
+- **Purpose:** Meta webhook edge — GET subscribe verification + POST receive (HMAC, dedupe, typed dispatch stub).
+- **Public API:** `router` — `GET /webhook/whatsapp`, `POST /webhook/whatsapp`.
+- **Used in:** main.app.
+- **Notes:** GET: `hub.mode==subscribe` + ASCII-safe constant-time `hub.verify_token` compare → echoes `hub.challenge`, else 403. POST: 403 on bad/unconfigured HMAC; 413 if body > 1 MiB; foreign `phone_number_id` / status callback / unparseable / non-dict / unknown-type → 200 `{"ok": true, "ignored": true}`; replay → 200 `{"ok": true, "duplicate": true}`; fresh event → 200 `{"ok": true, "duplicate": false, "event_type": <ClassName>}`. Phase 3 = pipe only: no engine/mutation dispatch — the `event_type` echo is the seam Phase 4/5 attach to.
+
 ## Subscription self-heal (ensure_subscription)
 - **File:** backend/app/shopify/subscriptions.py
 - **Purpose:** ensure the ORDERS_CREATE webhook subscription points at our callback URL AND is bound to the current Shopify API version.
@@ -114,14 +163,14 @@
 ## Container / deps (composition root)
 - **File:** backend/app/deps.py
 - **Purpose:** singleton wiring of the whole Shopify layer.
-- **Public API:** `Container` dataclass (settings, vault, config_repo, config, http, tokens, shopify, ingest); `get_container() -> Container` (module singleton); `reset_container() -> None` (tests).
+- **Public API:** `Container` dataclass (settings, vault, config_repo, config, http, tokens, shopify, ingest, messages); `get_container() -> Container` (module singleton); `reset_container() -> None` (tests).
 - **Used in:** FastAPI app / routes, tests.
-- **Notes:** when `settings.database_url` is set → `PostgresConfigRepo` + `PostgresIngestStore` over ONE shared `LazyPool` (no connection made at build time — LazyPool connects on first acquire); else `InMemoryConfigRepo` + `InMemoryIngestStore`. `http = AsyncClient(follow_redirects=False)`.
+- **Notes:** when `settings.database_url` is set → `PostgresConfigRepo` + `PostgresIngestStore` + `PostgresMessageStore` over ONE shared `LazyPool` (no connection made at build time — LazyPool connects on first acquire); else the three in-memory impls. `http = AsyncClient(follow_redirects=False)`.
 
 ## FastAPI app + GET /health + routers
 - **File:** backend/app/main.py (app), backend/api/index.py (Vercel ASGI entrypoint)
 - **Purpose:** deployable FastAPI app; liveness probe; mounts the Phase 2 routers.
-- **Public API:** `app = FastAPI(...)`; `GET /health` → `{"status": "ok", "service": "thetavas-order-bot"}`. Includes `shopify_webhook_router` and `jobs_router`.
+- **Public API:** `app = FastAPI(...)`; `GET /health` → `{"status": "ok", "service": "thetavas-order-bot"}`. Includes `shopify_webhook_router`, `whatsapp_router`, and `jobs_router`.
 - **Used in:** Vercel deploy (`vercel.json`, region bom1).
 - **Notes:** entrypoint `api/index.py` re-exports `app`; all routes → `api/index.py`. Phase 1 security fix: OpenAPI/docs/redoc are DISABLED in prod — `_docs_enabled()` reads `Settings().app_env` (docs off when `app_env == "prod"`, default on otherwise / on missing key). Preserve this construction when adding routers.
 

@@ -81,6 +81,20 @@ should either keep writing the same names or you update the filters when we swit
 - B: keep the old tag names permanently.
 - C: only the new clean tags — you confirm nothing filters on the old names.
 
+**14. Store information the assistant should know.** Beyond order status (which it reads from
+Shopify), customers ask general questions. Please send us your current answers to:
+
+- How long does delivery usually take? (and does it differ by region?)
+- Return / exchange policy — window, conditions, who pays return shipping?
+- Cash-on-Delivery rules — any extra charge, any pincode restrictions?
+- What should a customer do if a product arrives damaged or wrong?
+- Support contact (phone / email / hours) for anything the assistant cannot handle.
+- Anything else customers regularly ask.
+
+Whatever you send becomes the assistant's knowledge; it will not invent answers. You can update
+this at any time and the change applies immediately, without new software work. Also: any
+wording or tone you want it to always use (or avoid) when talking to your customers?
+
 ## Part 4 — Held items (answer whenever ready)
 
 **9. Cancel requests after the order is already shipped** — the assistant will say it can't

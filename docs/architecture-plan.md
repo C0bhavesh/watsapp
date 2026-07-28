@@ -218,6 +218,17 @@ backend/
     engine.py              # Gemini JSON-intent (order schema)     [adapt]
     memory.py, sanitize.py # windowed memory, markdown strip       [copy]
     order_resolver.py      # phone→orders chain + ownership check  [NEW]
+  app/knowledge/           # ADDED 2026-07-28 (gap found by owner) [adapt from cafe]
+    loader.py, assembler.py, cache.py   # seeds → system context, version-cached
+    seeds/brand_voice.md   # Thetavas tone: transactional, polite, multilingual
+    seeds/faq.json         # shipping times, returns/exchange, COD rules, support contact
+    seeds/business.json    # store name/hours/contact/policies  ← CONTENT FROM CLIENT (Q14)
+    seeds/patterns.json    # few-shot examples for common order questions
+    # NOTE: no menu.csv — we do NOT sell in chat (out of v1 scope)
+  app/channels/copy.py     # ADDED 2026-07-28 [NEW] deterministic reply strings
+    # confirm-success, cancel-confirm prompt, cancelled, not-found, refusal, error
+    # fallbacks — 4 languages (en/hi/hinglish/gu). NEVER LLM-generated: these follow
+    # button taps and mutations, so they must be fixed and reviewable (cafe CatalogCopy pattern).
   app/providers/           # LiteLLM adapter + registry            [copy]
   app/config/              # Settings + Fernet vault               [copy]
   app/store/               # repos: postgres + in-memory           [adapt schema]

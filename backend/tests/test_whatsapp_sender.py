@@ -1,0 +1,111 @@
+import json
+
+import httpx
+import pytest
+
+from app.channels.whatsapp_config import WhatsAppConfig
+from app.channels.whatsapp_sender import (
+    SendResult,
+    WhatsAppSendError,
+    send_buttons,
+    send_template,
+    send_text,
+)
+
+CFG = WhatsAppConfig(
+    access_token="tok", app_secret="sec", verify_token="vtok",
+    phone_number_id="123", waba_id="456", api_version="v23.0",
+)
+
+
+def client_with(handler) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def test_send_text_success() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://graph.facebook.com/v23.0/123/messages"
+        assert request.headers["Authorization"] == "Bearer tok"
+        body = json.loads(request.read())
+        assert body == {
+            "messaging_product": "whatsapp", "to": "919999999999",
+            "type": "text", "text": {"body": "hi there"},
+        }
+        return httpx.Response(200, json={"messages": [{"id": "wamid.123"}]})
+
+    result = await send_text(client_with(handler), CFG, "919999999999", "hi there")
+    assert result == SendResult(ok=True, status_code=200, wamid="wamid.123", error=None)
+
+
+async def test_send_text_4xx_is_not_ok_not_raised() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, text="Unauthorized")
+
+    result = await send_text(client_with(handler), CFG, "919999999999", "hi")
+    assert result.ok is False
+    assert result.status_code == 401
+    assert result.wamid is None
+
+
+async def test_network_error_raises_whatsapp_send_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("timed out")
+
+    with pytest.raises(WhatsAppSendError):
+        await send_text(client_with(handler), CFG, "919999999999", "hi")
+
+
+async def test_send_template_builds_body_and_button_components() -> None:
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.read())
+        return httpx.Response(200, json={"messages": [{"id": "wamid.T1"}]})
+
+    await send_template(
+        client_with(handler), CFG, "919999999999", "order_confirmation_cod", "hi",
+        body_params=["Suman", "tavas3733", "949"],
+        button_payloads=["order:confirm:gid://1", "order:cancel:gid://1"],
+    )
+    template = captured["body"]["template"]
+    assert template["name"] == "order_confirmation_cod"
+    assert template["language"] == {"code": "hi"}
+    body_component = next(c for c in template["components"] if c["type"] == "body")
+    assert [p["text"] for p in body_component["parameters"]] == ["Suman", "tavas3733", "949"]
+    button_components = [c for c in template["components"] if c["type"] == "button"]
+    assert button_components[0]["index"] == "0"
+    assert button_components[0]["parameters"][0]["payload"] == "order:confirm:gid://1"
+    assert button_components[1]["index"] == "1"
+
+
+async def test_send_buttons_success() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.read())
+        assert body["interactive"]["type"] == "button"
+        assert body["interactive"]["action"]["buttons"] == [
+            {"type": "reply", "reply": {"id": "order:cancel:confirm:1", "title": "Yes, cancel"}},
+            {"type": "reply", "reply": {"id": "order:cancel:abort:1", "title": "No, keep it"}},
+        ]
+        return httpx.Response(200, json={"messages": [{"id": "wamid.B1"}]})
+
+    result = await send_buttons(
+        client_with(handler), CFG, "919999999999", "Cancel this order?",
+        [("order:cancel:confirm:1", "Yes, cancel"), ("order:cancel:abort:1", "No, keep it")],
+    )
+    assert result.ok is True
+
+
+async def test_send_buttons_rejects_too_many() -> None:
+    with pytest.raises(ValueError):
+        await send_buttons(
+            client_with(lambda r: httpx.Response(200, json={})), CFG, "9199", "x",
+            [("a", "A"), ("b", "B"), ("c", "C"), ("d", "D")],
+        )
+
+
+async def test_send_buttons_rejects_long_title() -> None:
+    with pytest.raises(ValueError):
+        await send_buttons(
+            client_with(lambda r: httpx.Response(200, json={})), CFG, "9199", "x",
+            [("a", "This title is definitely way too long")],
+        )

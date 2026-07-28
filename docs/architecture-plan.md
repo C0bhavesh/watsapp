@@ -275,6 +275,13 @@ Secrets (Shopify client id/secret, Meta token, app secret, verify token) → Fer
 
 ## Level 6 — Step-by-step implementation plan (each phase gated)
 
+> **RE-SEQUENCED 2026-07-28 (owner correction).** The inbound conversation (customer messages →
+> LLM answers) is the CORE feature, not a late add-on. Full flow design:
+> `docs/inbound-conversation-design.md`. New order: 3 = WhatsApp channel (the pipe) ·
+> **4 = THE CONVERSATION** (providers + knowledge + engine + resolver + memory) ·
+> 5 = order-push/Confirm-Cancel automation (outbox drain + button mutations) · 6 = cutover.
+> The table below keeps the original numbering for the already-completed phases 0–2.
+
 | Phase | Deliverable | Gate to enter |
 |---|---|---|
 | **0. Verification** (no code) | ✅/❌ on: number on Cloud API + BM access · app org ownership · protected-data toggle · API 2026-07 re-test · **one real order JSON inspected (Shopflo shape)** · current-tool identity (Shopflo?) | Client answers Q7/Q12 + store/BM access |

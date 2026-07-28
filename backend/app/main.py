@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from app.channels.shopify_webhook import router as shopify_webhook_router
 from app.config.settings import Settings
+from app.jobs.router import router as jobs_router
 
 
 def _docs_enabled() -> bool:
@@ -28,6 +29,7 @@ app = FastAPI(
 )
 
 app.include_router(shopify_webhook_router)
+app.include_router(jobs_router)
 
 
 @app.get("/health")

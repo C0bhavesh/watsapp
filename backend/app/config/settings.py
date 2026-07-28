@@ -10,3 +10,4 @@ class Settings(BaseSettings):
     shopify_api_version: str = "2026-07"
     request_timeout_seconds: float = 20.0
     app_env: str = "dev"
+    cron_secret: str = ""

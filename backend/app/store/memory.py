@@ -35,3 +35,14 @@ class InMemoryIngestStore:
             self.outbound[outbound.dedupe_key] = outbound
             queued = True
         return IngestResult(duplicate=False, queued=queued)
+
+
+class InMemoryMessageStore:
+    def __init__(self) -> None:
+        self.seen: set[str] = set()
+
+    async def record_if_new(self, message_id: str) -> bool:
+        if message_id in self.seen:
+            return False
+        self.seen.add(message_id)
+        return True

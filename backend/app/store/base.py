@@ -43,3 +43,9 @@ class IngestStore(Protocol):
         mapping: MappingUpsert,
         outbound: OutboundDraft | None,
     ) -> IngestResult: ...
+
+
+class MessageStore(Protocol):
+    """Dedupe authority for inbound Meta messages (sibling of processed_webhooks)."""
+
+    async def record_if_new(self, message_id: str) -> bool: ...

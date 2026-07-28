@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from pydantic import ValidationError
 
+from app.channels.shopify_webhook import router as shopify_webhook_router
 from app.config.settings import Settings
 
 
@@ -25,6 +26,8 @@ app = FastAPI(
     redoc_url="/redoc" if _DOCS_ENABLED else None,
     openapi_url="/openapi.json" if _DOCS_ENABLED else None,
 )
+
+app.include_router(shopify_webhook_router)
 
 
 @app.get("/health")

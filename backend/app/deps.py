@@ -7,8 +7,8 @@ from app.config.service import ConfigService
 from app.config.settings import Settings
 from app.shopify.client import ShopifyClient
 from app.shopify.token_manager import TokenManager
-from app.store.base import ConfigRepo
-from app.store.memory import InMemoryConfigRepo
+from app.store.base import ConfigRepo, IngestStore
+from app.store.memory import InMemoryConfigRepo, InMemoryIngestStore
 
 
 @dataclass
@@ -20,6 +20,7 @@ class Container:
     http: httpx.AsyncClient
     tokens: TokenManager
     shopify: ShopifyClient
+    ingest: IngestStore
 
 
 _container: Container | None = None
@@ -35,7 +36,10 @@ def get_container() -> Container:
         http = httpx.AsyncClient(follow_redirects=False)  # never replay the token to a redirect
         tokens = TokenManager(http, config, settings)
         shopify = ShopifyClient(http, tokens, settings)
-        _container = Container(settings, vault, config_repo, config, http, tokens, shopify)
+        ingest: IngestStore = InMemoryIngestStore()  # Postgres switch arrives in Task 9
+        _container = Container(
+            settings, vault, config_repo, config, http, tokens, shopify, ingest
+        )
     return _container
 
 

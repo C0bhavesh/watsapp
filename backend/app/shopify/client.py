@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
@@ -9,7 +10,13 @@ from app.shopify.errors import (
     ShopifyThrottled,
     ShopifyUnavailable,
 )
-from app.shopify.models import Money, Order, normalize_order_name
+from app.shopify.models import (
+    AuthorizedOrder,
+    CancelRequested,
+    Money,
+    Order,
+    normalize_order_name,
+)
 from app.shopify.token_manager import TokenManager
 
 ORDER_FIELDS = (
@@ -121,3 +128,29 @@ class ShopifyClient:
             {"q": f"customer_id:{customer_id}"},
         )
         return [_order_from_node(e["node"]) for e in (data.get("orders") or {}).get("edges") or []]
+
+    async def add_tags(self, auth: AuthorizedOrder, tags: Sequence[str]) -> None:
+        data = await self._graphql(
+            "mutation($id: ID!, $tags: [String!]!) { tagsAdd(id: $id, tags: $tags) "
+            "{ userErrors { message } } }",
+            {"id": auth.order.gid, "tags": list(tags)},
+        )
+        errors = (data.get("tagsAdd") or {}).get("userErrors") or []
+        if errors:
+            raise ShopifyGraphQLError([str(e.get("message", "")) for e in errors])
+
+    async def cancel_order(
+        self, auth: AuthorizedOrder, *, reason: str = "CUSTOMER", restock: bool = True
+    ) -> CancelRequested:
+        data = await self._graphql(
+            "mutation($orderId: ID!, $reason: OrderCancelReason!, $restock: Boolean!) "
+            "{ orderCancel(orderId: $orderId, reason: $reason, restock: $restock) "
+            "{ job { id } orderCancelUserErrors { message } } }",
+            {"orderId": auth.order.gid, "reason": reason, "restock": restock},
+        )
+        node = data.get("orderCancel") or {}
+        errors = node.get("orderCancelUserErrors") or []
+        if errors:
+            raise ShopifyGraphQLError([str(e.get("message", "")) for e in errors])
+        job = node.get("job") or {}
+        return CancelRequested(job_id=job.get("id"))

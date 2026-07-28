@@ -9,7 +9,36 @@ from app.shopify.errors import (
     ShopifyThrottled,
     ShopifyUnavailable,
 )
+from app.shopify.models import Money, Order, normalize_order_name
 from app.shopify.token_manager import TokenManager
+
+ORDER_FIELDS = (
+    "id name email phone tags paymentGatewayNames displayFinancialStatus "
+    "displayFulfillmentStatus cancelledAt customerLocale "
+    "totalPriceSet { shopMoney { amount currencyCode } } "
+    "shippingAddress { phone } billingAddress { phone }"
+)
+
+
+def _order_from_node(node: dict[str, Any]) -> Order:
+    total_node = (node.get("totalPriceSet") or {}).get("shopMoney")
+    return Order(
+        gid=str(node["id"]),
+        name=str(node["name"]),
+        email=node.get("email"),
+        phone=node.get("phone"),
+        shipping_phone=(node.get("shippingAddress") or {}).get("phone"),
+        billing_phone=(node.get("billingAddress") or {}).get("phone"),
+        financial_status=node.get("displayFinancialStatus"),
+        fulfillment_status=node.get("displayFulfillmentStatus"),
+        cancelled_at=node.get("cancelledAt"),
+        tags=tuple(node.get("tags") or ()),
+        payment_gateway_names=tuple(node.get("paymentGatewayNames") or ()),
+        total=Money(str(total_node["amount"]), str(total_node["currencyCode"]))
+        if total_node
+        else None,
+        customer_locale=node.get("customerLocale"),
+    )
 
 
 class ShopifyClient:
@@ -54,3 +83,41 @@ class ShopifyClient:
                 raise ShopifyGraphQLError(["empty response data"])
             return dict(data)
         raise ShopifyAuthError("unreachable")  # pragma: no cover
+
+    async def get_order(self, gid: str) -> Order | None:
+        query = f"query($id: ID!) {{ node(id: $id) {{ ... on Order {{ {ORDER_FIELDS} }} }} }}"
+        data = await self._graphql(query, {"id": gid})
+        node = data.get("node")
+        return _order_from_node(node) if node else None
+
+    async def find_order_by_name(self, raw_name: str) -> Order | None:
+        name = normalize_order_name(raw_name)
+        query = (
+            f"query($q: String!) {{ orders(first: 1, query: $q) "
+            f"{{ edges {{ node {{ {ORDER_FIELDS} }} }} }} }}"
+        )
+        data = await self._graphql(query, {"q": f"name:{name}"})
+        edges = (data.get("orders") or {}).get("edges") or []
+        return _order_from_node(edges[0]["node"]) if edges else None
+
+    async def find_customer_orders_by_phone(self, phone_e164: str) -> list[Order]:
+        try:
+            cust = await self._graphql(
+                'query($q: String!) { customers(first: 1, query: $q) '
+                '{ edges { node { id } } } }',
+                {"q": f"phone:{phone_e164}"},
+            )
+        except ShopifyGraphQLError as exc:
+            if any("access denied" in m.lower() for m in exc.messages):
+                return []
+            raise
+        edges = (cust.get("customers") or {}).get("edges") or []
+        if not edges:
+            return []
+        customer_id = str(edges[0]["node"]["id"]).rsplit("/", 1)[-1]
+        data = await self._graphql(
+            f"query($q: String!) {{ orders(first: 10, query: $q, sortKey: CREATED_AT, "
+            f"reverse: true) {{ edges {{ node {{ {ORDER_FIELDS} }} }} }} }}",
+            {"q": f"customer_id:{customer_id}"},
+        )
+        return [_order_from_node(e["node"]) for e in (data.get("orders") or {}).get("edges") or []]

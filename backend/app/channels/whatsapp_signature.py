@@ -9,6 +9,8 @@ def verify_meta_hmac(raw_body: bytes, header_value: str | None, secret: str) -> 
 
     NOT base64 like Shopify.
     """
+    if not secret:
+        return False
     if not header_value or not header_value.startswith(_PREFIX):
         return False
     expected = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()

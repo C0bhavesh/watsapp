@@ -5,6 +5,7 @@ from app.channels.whatsapp_inbound import (
     InboundInteractive,
     InboundText,
     extract_event,
+    extract_events,
 )
 
 
@@ -96,6 +97,81 @@ def test_type_confused_fields_are_none_not_exception() -> None:
         "from": 919664290413, "id": None, "timestamp": 1700000000,
         "type": "text", "text": {"body": "hi"},
     })) is None
+
+
+def test_extract_events_single_message() -> None:
+    events = extract_events(envelope({
+        "from": "919664290413", "id": "wamid.S1", "timestamp": "1",
+        "type": "text", "text": {"body": "hi"},
+    }))
+    assert len(events) == 1
+    assert isinstance(events[0], InboundText)
+    assert events[0].message_id == "wamid.S1"
+
+
+def test_extract_events_batch_of_two_keeps_both() -> None:
+    # Meta can batch multiple messages into one delivery; none may be dropped.
+    payload = {
+        "entry": [{
+            "changes": [{
+                "value": {
+                    "metadata": {"phone_number_id": "1298805403309058"},
+                    "messages": [
+                        {"from": "919664290413", "id": "wamid.M1", "timestamp": "1",
+                         "type": "text", "text": {"body": "cancel my order"}},
+                        {"from": "919664290413", "id": "wamid.M2", "timestamp": "2",
+                         "type": "text", "text": {"body": "please"}},
+                    ],
+                },
+            }],
+        }],
+    }
+    events = extract_events(payload)
+    assert [e.message_id for e in events] == ["wamid.M1", "wamid.M2"]
+
+
+def test_extract_events_across_multiple_entries_and_changes() -> None:
+    payload = {
+        "entry": [
+            {"changes": [{"value": {"messages": [
+                {"from": "91", "id": "wamid.E1", "timestamp": "1",
+                 "type": "text", "text": {"body": "a"}},
+            ]}}]},
+            {"changes": [
+                {"value": {"messages": [
+                    {"from": "91", "id": "wamid.E2", "timestamp": "2",
+                     "type": "text", "text": {"body": "b"}},
+                ]}},
+                {"value": {"messages": [
+                    {"from": "91", "id": "wamid.E3", "timestamp": "3",
+                     "type": "text", "text": {"body": "c"}},
+                ]}},
+            ]},
+        ],
+    }
+    events = extract_events(payload)
+    assert [e.message_id for e in events] == ["wamid.E1", "wamid.E2", "wamid.E3"]
+
+
+def test_extract_events_skips_unparseable_messages_in_batch() -> None:
+    # A batch mixing a valid text message with a status/unknown item keeps the valid one.
+    payload = {
+        "entry": [{"changes": [{"value": {"messages": [
+            {"from": "91", "id": "wamid.OK", "timestamp": "1",
+             "type": "text", "text": {"body": "ok"}},
+            "not-a-dict",
+            {"from": "91", "id": "wamid.IMG", "timestamp": "2",
+             "type": "image", "image": {"id": "m"}},
+        ]}}]}],
+    }
+    events = extract_events(payload)
+    assert [e.message_id for e in events] == ["wamid.OK"]
+
+
+def test_extract_events_malformed_returns_empty_not_exception() -> None:
+    assert extract_events({}) == []
+    assert extract_events({"entry": "not-a-list"}) == []
+    assert extract_events({"entry": [42]}) == []
 
 
 @pytest.mark.parametrize("bad_message", ["not-a-dict", 42, ["nested", "list"], None, True])

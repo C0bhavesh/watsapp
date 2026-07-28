@@ -39,3 +39,10 @@ def test_base64_encoding_is_rejected() -> None:
 
 def test_non_ascii_header_fails_closed() -> None:
     assert not verify_meta_hmac(BODY, "sha256=\xe9\xe9", SECRET)
+
+
+def test_empty_secret_is_rejected() -> None:
+    # An empty secret must never validate: a signature computed with an empty key
+    # would otherwise pass. Defend at the verifier, not only at the call site.
+    empty_sig = "sha256=" + hmac_lib.new(b"", BODY, hashlib.sha256).hexdigest()
+    assert not verify_meta_hmac(BODY, empty_sig, "")

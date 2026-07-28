@@ -78,6 +78,83 @@ async def test_send_template_builds_body_and_button_components() -> None:
     assert button_components[1]["index"] == "1"
 
 
+async def test_error_body_does_not_leak_bearer_token() -> None:
+    # Meta OAuth errors routinely echo the offending token in the message text.
+    leaky = {
+        "error": {
+            "message": "Invalid OAuth access token EAAsecrettoken123456789",
+            "type": "OAuthException",
+            "code": 190,
+            "error_subcode": 460,
+        }
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json=leaky)
+
+    result = await send_text(client_with(handler), CFG, "919999999999", "hi")
+    assert result.ok is False
+    assert result.status_code == 401
+    assert result.error is not None
+    assert "EAAsecrettoken123456789" not in result.error
+    # Structured code/type/subcode are safe to keep for diagnostics.
+    assert "190" in result.error
+
+
+async def test_error_body_redacts_configured_access_token() -> None:
+    cfg = WhatsAppConfig(
+        access_token="my-secret-access-token", app_secret="sec", verify_token="vtok",
+        phone_number_id="123", waba_id="456", api_version="v23.0",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400, json={"error": {"message": "bad token my-secret-access-token", "code": 100}}
+        )
+
+    result = await send_text(client_with(handler), cfg, "919999999999", "hi")
+    assert result.error is not None
+    assert "my-secret-access-token" not in result.error
+
+
+async def test_non_json_error_body_falls_back_to_placeholder() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="<html>Internal Server Error EAAtoken</html>")
+
+    result = await send_text(client_with(handler), CFG, "919999999999", "hi")
+    assert result.ok is False
+    assert result.error == "non-JSON error response"
+
+
+async def test_2xx_non_json_body_degrades_to_ok() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="not-json")
+
+    result = await send_text(client_with(handler), CFG, "919999999999", "hi")
+    assert result == SendResult(ok=True, status_code=200, wamid=None, error=None)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"messages": "not-a-list"},
+        {"messages": [1]},
+        {"messages": [{}]},
+        {},
+        [],
+    ],
+)
+async def test_2xx_unexpected_shape_degrades_to_ok(body: object) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=body)
+
+    result = await send_text(client_with(handler), CFG, "919999999999", "hi")
+    assert result.ok is True
+    assert result.status_code == 200
+    assert result.wamid is None
+    assert result.error is None
+
+
 async def test_send_buttons_success() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.read())

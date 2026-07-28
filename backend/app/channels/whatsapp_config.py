@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.config.service import ConfigService
 
@@ -8,9 +8,11 @@ WHATSAPP_PLAIN_FIELDS = ("phone_number_id", "waba_id", "api_version")
 
 @dataclass(frozen=True)
 class WhatsAppConfig:
-    access_token: str
-    app_secret: str
-    verify_token: str
+    # Secrets are excluded from repr so a traceback/log/Sentry capture with locals
+    # never leaks them. repr=False preserves __eq__ (still compared by value).
+    access_token: str = field(repr=False)
+    app_secret: str = field(repr=False)
+    verify_token: str = field(repr=False)
     phone_number_id: str
     waba_id: str
     api_version: str

@@ -92,7 +92,13 @@ async def test_post_new_text_event_acknowledged() -> None:
     )).encode()
     resp = await post(body, {"X-Hub-Signature-256": sign(body)})
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "duplicate": False, "event_type": "InboundText"}
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["processed"] == 1
+    assert data["duplicate"] == 0
+    assert data["results"] == [
+        {"message_id": "wamid.1", "duplicate": False, "event_type": "InboundText"}
+    ]
 
 
 async def test_post_replay_is_duplicate() -> None:
@@ -103,7 +109,9 @@ async def test_post_replay_is_duplicate() -> None:
     headers = {"X-Hub-Signature-256": sign(body)}
     await post(body, headers)
     resp = await post(body, headers)
-    assert resp.json() == {"ok": True, "duplicate": True}
+    data = resp.json()
+    assert data["processed"] == 0
+    assert data["duplicate"] == 1
 
 
 async def test_post_status_callback_ignored() -> None:
@@ -124,13 +132,95 @@ async def test_post_foreign_phone_number_id_ignored() -> None:
     assert resp.json() == {"ok": True, "ignored": True}
 
 
+async def test_post_missing_metadata_not_processed() -> None:
+    # No metadata block at all: the tenant guard must fail CLOSED, not process it.
+    body = json.dumps({
+        "entry": [{"changes": [{"value": {
+            "messages": [{"from": "919999999999", "id": "wamid.nm", "timestamp": "1",
+                          "type": "text", "text": {"body": "hi"}}],
+        }}]}],
+    }).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "ignored": True}
+
+
+async def test_post_non_str_phone_number_id_not_processed() -> None:
+    # phone_number_id present but not a str: fail CLOSED.
+    body = json.dumps({
+        "entry": [{"changes": [{"value": {
+            "metadata": {"phone_number_id": 1298805403309058},
+            "messages": [{"from": "919999999999", "id": "wamid.ns", "timestamp": "1",
+                          "type": "text", "text": {"body": "hi"}}],
+        }}]}],
+    }).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "ignored": True}
+
+
+async def test_post_mismatched_phone_number_id_not_processed() -> None:
+    body = json.dumps(envelope(
+        {"from": "919999999999", "id": "wamid.mm", "timestamp": "1",
+         "type": "text", "text": {"body": "hi"}},
+        phone_number_id="9999999999999",
+    )).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "ignored": True}
+
+
+async def test_post_batch_of_two_both_processed() -> None:
+    # Meta may batch multiple messages; neither may be dropped.
+    body = json.dumps({
+        "entry": [{"changes": [{"value": {
+            "metadata": {"phone_number_id": PHONE_NUMBER_ID},
+            "messages": [
+                {"from": "919999999999", "id": "wamid.b1", "timestamp": "1",
+                 "type": "text", "text": {"body": "cancel my order"}},
+                {"from": "919999999999", "id": "wamid.b2", "timestamp": "2",
+                 "type": "text", "text": {"body": "please"}},
+            ],
+        }}]}],
+    }).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["processed"] == 2
+    assert data["duplicate"] == 0
+    assert {r["message_id"] for r in data["results"]} == {"wamid.b1", "wamid.b2"}
+
+
+async def test_post_batch_dedupe_second_delivery() -> None:
+    body = json.dumps({
+        "entry": [{"changes": [{"value": {
+            "metadata": {"phone_number_id": PHONE_NUMBER_ID},
+            "messages": [
+                {"from": "919999999999", "id": "wamid.d1", "timestamp": "1",
+                 "type": "text", "text": {"body": "one"}},
+                {"from": "919999999999", "id": "wamid.d2", "timestamp": "2",
+                 "type": "text", "text": {"body": "two"}},
+            ],
+        }}]}],
+    }).encode()
+    headers = {"X-Hub-Signature-256": sign(body)}
+    await post(body, headers)
+    resp = await post(body, headers)
+    data = resp.json()
+    assert data["processed"] == 0
+    assert data["duplicate"] == 2
+
+
 async def test_post_button_tap_event_type() -> None:
     body = json.dumps(envelope({
         "from": "919999999999", "id": "wamid.4", "timestamp": "1", "type": "button",
         "button": {"text": "Confirm Order", "payload": "order:confirm:gid://1"},
     })).encode()
     resp = await post(body, {"X-Hub-Signature-256": sign(body)})
-    assert resp.json() == {"ok": True, "duplicate": False, "event_type": "InboundButton"}
+    data = resp.json()
+    assert data["processed"] == 1
+    assert data["results"][0]["event_type"] == "InboundButton"
 
 
 async def test_post_garbage_body_ignored() -> None:

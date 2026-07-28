@@ -1,3 +1,4 @@
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -8,6 +9,40 @@ from app.channels.whatsapp_config import WhatsAppConfig
 
 MAX_BUTTONS = 3
 MAX_BUTTON_TITLE_LEN = 20
+
+# Meta OAuth error bodies routinely echo the offending bearer token (e.g.
+# "Invalid OAuth access token EAA..."). Never persist that verbatim.
+_EAA_TOKEN_RE = re.compile(r"EAA[A-Za-z0-9]+")
+
+
+def _safe_error(resp: httpx.Response, access_token: str) -> str:
+    """Build a secret-free error string for a >=400 response.
+
+    Keeps only Meta's structured error fields (code/type/error_subcode) plus the
+    message with any token-shaped substring or the configured access token redacted.
+    Falls back to a generic placeholder for non-JSON / unexpected shapes.
+    """
+    try:
+        data = resp.json()
+    except ValueError:
+        return "non-JSON error response"
+    if not isinstance(data, dict):
+        return "non-JSON error response"
+    err = data.get("error")
+    if not isinstance(err, dict):
+        return "non-JSON error response"
+    parts: list[str] = []
+    for key in ("code", "type", "error_subcode"):
+        value = err.get(key)
+        if isinstance(value, (str, int)):
+            parts.append(f"{key}={value}")
+    message = err.get("message")
+    if isinstance(message, str):
+        redacted = _EAA_TOKEN_RE.sub("[redacted]", message)
+        if access_token:
+            redacted = redacted.replace(access_token, "[redacted]")
+        parts.append(f"message={redacted[:300]}")
+    return "; ".join(parts) if parts else "non-JSON error response"
 
 
 class WhatsAppSendError(Exception):
@@ -41,11 +76,35 @@ async def _post_message(
         raise WhatsAppSendError(str(exc)) from exc
     if resp.status_code >= 400:
         return SendResult(
-            ok=False, status_code=resp.status_code, wamid=None, error=resp.text[:500]
+            ok=False,
+            status_code=resp.status_code,
+            wamid=None,
+            error=_safe_error(resp, cfg.access_token),
         )
-    data = resp.json()
-    wamid = (data.get("messages") or [{}])[0].get("id")
+    wamid = _extract_wamid(resp)
     return SendResult(ok=True, status_code=resp.status_code, wamid=wamid, error=None)
+
+
+def _extract_wamid(resp: httpx.Response) -> str | None:
+    """Pull messages[0].id from a 2xx body, tolerating any unexpected shape.
+
+    A malformed-but-2xx Meta response must degrade to wamid=None, never raise
+    (a future outbox-drain cron would otherwise 500 on it).
+    """
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    messages = data.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return None
+    first = messages[0]
+    if not isinstance(first, dict):
+        return None
+    wamid = first.get("id")
+    return wamid if isinstance(wamid, str) else None
 
 
 async def send_text(

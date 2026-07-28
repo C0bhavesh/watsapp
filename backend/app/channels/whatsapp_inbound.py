@@ -33,20 +33,80 @@ InboundEvent = InboundText | InboundInteractive | InboundButton
 
 
 def extract_event(payload: dict[str, Any]) -> InboundEvent | None:
-    """Parse a Meta webhook envelope into a typed inbound event, or None.
+    """Parse the FIRST inbound message of a Meta webhook envelope, or None.
+
+    Retained for callers that only need one message. Prefer ``extract_events``
+    for webhook handling: Meta can batch several messages into one delivery and
+    everything after index 0 must not be dropped.
+    """
+    events = extract_events(payload)
+    return events[0] if events else None
+
+
+def extract_events(
+    payload: dict[str, Any], expected_phone_number_id: str | None = None
+) -> list[InboundEvent]:
+    """Parse EVERY inbound message across all entries/changes into typed events.
 
     Every field is treated as attacker-typed: a malformed/type-confused payload
-    yields None, never an exception. Template quick-reply taps (type "button")
-    are a distinct variant from interactive button replies (type "interactive").
+    or an unparseable individual message is skipped, never raised. A batched
+    delivery (multiple messages in one webhook) yields one event per message so
+    none is silently lost.
+
+    When ``expected_phone_number_id`` is provided the tenant guard fails CLOSED:
+    a change is processed only if its ``metadata.phone_number_id`` is present, a
+    ``str``, and exactly equal to the expected id. Absent, wrong-typed, or
+    mismatched metadata drops that change's messages entirely.
     """
-    try:
-        value = payload["entry"][0]["changes"][0]["value"]
-        messages = value.get("messages")
-        if not messages:
-            return None
-        msg = messages[0]
-    except (KeyError, IndexError, TypeError, AttributeError):
-        return None
+    events: list[InboundEvent] = []
+    entries = payload.get("entry")
+    if not isinstance(entries, list):
+        return events
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        changes = entry.get("changes")
+        if not isinstance(changes, list):
+            continue
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            value = change.get("value")
+            if not isinstance(value, dict):
+                continue
+            if expected_phone_number_id is not None and not _tenant_matches(
+                value, expected_phone_number_id
+            ):
+                continue
+            messages = value.get("messages")
+            if not isinstance(messages, list):
+                continue
+            for msg in messages:
+                event = _parse_message(msg)
+                if event is not None:
+                    events.append(event)
+    return events
+
+
+def _tenant_matches(value: dict[str, Any], expected_phone_number_id: str) -> bool:
+    """Fail-closed tenant check on a change's value.
+
+    Requires metadata.phone_number_id to be present, a str, and exactly equal to
+    the configured id. Anything else (absent, wrong type, mismatched) is rejected.
+    """
+    metadata = value.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    phone_id = metadata.get("phone_number_id")
+    return isinstance(phone_id, str) and phone_id == expected_phone_number_id
+
+
+def _parse_message(msg: Any) -> InboundEvent | None:
+    """Parse a single message object into a typed event, or None if unparseable.
+
+    Template quick-reply taps (type "button") are a distinct variant from
+    interactive button replies (type "interactive").
+    """
     if not isinstance(msg, dict):
         return None
 

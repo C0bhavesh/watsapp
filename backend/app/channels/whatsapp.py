@@ -6,7 +6,7 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from app.channels.whatsapp_config import load_whatsapp_config
-from app.channels.whatsapp_inbound import extract_event
+from app.channels.whatsapp_inbound import extract_events
 from app.channels.whatsapp_signature import verify_meta_hmac
 from app.config.crypto import VaultError
 from app.deps import get_container
@@ -22,15 +22,6 @@ def _ascii_compare(expected: str, provided: str) -> bool:
     except UnicodeEncodeError:
         return False
     return hmac.compare_digest(expected.encode("ascii"), provided_bytes)
-
-
-def _incoming_phone_number_id(payload: dict[str, Any]) -> str | None:
-    try:
-        value = payload["entry"][0]["changes"][0]["value"]
-        phone_id = (value.get("metadata") or {}).get("phone_number_id")
-    except (KeyError, IndexError, TypeError):
-        return None
-    return phone_id if isinstance(phone_id, str) else None
 
 
 @router.get("/webhook/whatsapp")
@@ -82,22 +73,35 @@ async def receive_webhook(request: Request) -> Response:
     if not isinstance(payload, dict):
         return JSONResponse({"ok": True, "ignored": True})
 
-    # Defensive check mirroring the Shopify shop-domain guard: ignore deliveries for a
-    # phone number we are not configured to serve.
-    incoming_phone_id = _incoming_phone_number_id(payload)
-    if incoming_phone_id is not None and incoming_phone_id != cfg.phone_number_id:
+    # Tenant guard fails CLOSED: only messages from a change whose metadata
+    # phone_number_id is present, a str, and equal to ours are extracted. Meta may
+    # batch several messages into one delivery, so every message is processed and
+    # deduped independently -- dropping any (and still 200-acking) is permanent
+    # data loss, since Meta will not retry an acked delivery.
+    events = extract_events(payload, expected_phone_number_id=cfg.phone_number_id)
+    if not events:
         return JSONResponse({"ok": True, "ignored": True})
 
-    event = extract_event(payload)
-    if event is None:
-        return JSONResponse({"ok": True, "ignored": True})
+    results: list[dict[str, Any]] = []
+    processed = 0
+    duplicate = 0
+    for event in events:
+        is_new = await c.messages.record_if_new(event.message_id)
+        if is_new:
+            processed += 1
+        else:
+            duplicate += 1
+        results.append(
+            {
+                "message_id": event.message_id,
+                "duplicate": not is_new,
+                "event_type": type(event).__name__,
+            }
+        )
 
-    is_new = await c.messages.record_if_new(event.message_id)
-    if not is_new:
-        return JSONResponse({"ok": True, "duplicate": True})
-
-    # Routing a fresh event to the deterministic button dispatcher (Phase 5) and the
-    # conversation engine / order_resolver (Phase 4) attaches here. Phase 3 is the pipe only.
+    # Routing each fresh event to the deterministic button dispatcher (Phase 5) and
+    # the conversation engine / order_resolver (Phase 4) attaches here. Phase 3 is
+    # the pipe only.
     return JSONResponse(
-        {"ok": True, "duplicate": False, "event_type": type(event).__name__}
+        {"ok": True, "processed": processed, "duplicate": duplicate, "results": results}
     )

@@ -30,6 +30,36 @@ async def test_fully_configured_loads(master_key: str) -> None:
     )
 
 
+def test_repr_does_not_leak_secrets() -> None:
+    cfg = WhatsAppConfig(
+        access_token="EAAsecrettoken",
+        app_secret="app-secret-value",
+        verify_token="verify-secret-value",
+        phone_number_id="1298805403309058",
+        waba_id="2454816495000045",
+        api_version="v23.0",
+    )
+    text = repr(cfg)
+    assert "EAAsecrettoken" not in text
+    assert "app-secret-value" not in text
+    assert "verify-secret-value" not in text
+    # Non-secret fields remain useful for debugging.
+    assert "1298805403309058" in text
+    assert "v23.0" in text
+
+
+def test_frozen_equality_still_works() -> None:
+    a = WhatsAppConfig(
+        access_token="tok", app_secret="sec", verify_token="vtok",
+        phone_number_id="123", waba_id="456", api_version="v23.0",
+    )
+    b = WhatsAppConfig(
+        access_token="tok", app_secret="sec", verify_token="vtok",
+        phone_number_id="123", waba_id="456", api_version="v23.0",
+    )
+    assert a == b
+
+
 @pytest.mark.parametrize(
     "missing_key",
     [

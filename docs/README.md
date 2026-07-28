@@ -12,6 +12,8 @@ free-text understanding; our backend talks to the Shopify Admin GraphQL API.
 | [reference-project-ai-whatsapp-agent.md](reference-project-ai-whatsapp-agent.md) | Full exploration of D:\ai_whatsapp_agent (cafe bot) — what to copy (webhook/HMAC, sender, LLM JSON-intent engine, memory, secret vault) and what's missing (templates, Shopify side). |
 | [open-questions.md](open-questions.md) | Round-1 questions — ANSWERED 2026-07-28, kept for history. |
 | [theme-exploration-thetavas.md](theme-exploration-thetavas.md) | Client theme scan — no vendor traces in theme; **Shopflo checkout is live** (key constraint); cleanup notes. |
+| **[SESSION-HANDOFF.md](SESSION-HANDOFF.md)** | **START HERE in a new session** — full state: what's built, what's pending, blockers, rules, reading order. |
+| [inbound-conversation-design.md](inbound-conversation-design.md) | **THE CORE FEATURE** — customer messages → bot answers: 10-step flow, module map, phase re-sequencing. |
 | [architecture-plan.md](architecture-plan.md) | **The architecture plan (v1.1)** — Levels 0–6 + accepted review amendments (outbox, kill switch, InboundButton, AuthorizedOrder…); gated 7-phase implementation plan. |
 | [architecture-review-2026-07-28.md](architecture-review-2026-07-28.md) | Independent review report — SOUND WITH FIXES; 24 findings (F1–F24), confirmations, forward-compat matrix, ADR list. |
 | [architecture-decisions.md](architecture-decisions.md) | **ADRs 001–005** — outbox, send-policy kill switch, DB-persisted token, mutation safety, config-driven client decisions. |

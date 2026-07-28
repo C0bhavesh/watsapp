@@ -45,3 +45,13 @@
 **Mistake/Issue:** `Settings()` (values loaded from env/.env at runtime) fails mypy strict with `Missing named argument "app_master_key" [call-arg]`, because the required field has no default and the pydantic mypy plugin isn't enabled.
 **Correct:** annotate the call site with `# type: ignore[call-arg]` (the plan already does this in `test_settings.py` for `Settings(_env_file=None)`). Used in `app/deps.py` and `scripts/smoke_shopify.py`.
 **Pattern:** required-without-default BaseSettings fields are "required" to mypy even though env supplies them — expect a `call-arg` ignore at every no-arg `Settings()` construction.
+
+## [2026-07-28] asyncpg ships no py.typed — mypy strict rejects `import asyncpg` in app code
+**Mistake/Issue:** asyncpg (0.31.0 here) has no `py.typed` marker, so `mypy --strict` flags `import-untyped` on `import asyncpg` in `app/store/pg_factory.py` and `postgres.py`, breaking the `mypy app` gate.
+**Correct:** add a per-module override to `backend/pyproject.toml`: `[[tool.mypy.overrides]]` `module = "asyncpg.*"`, `ignore_missing_imports = true`. Added alongside the dependency in Task 2.
+**Pattern:** when adding an untyped third-party dep under a `strict` mypy config, expect to add an `ignore_missing_imports` override for it — the dep being installed is not enough.
+
+## [2026-07-28] Plan-verbatim code can exceed the repo's ruff line-length; lint tests too, not just app/
+**Mistake/Issue:** Several lines copied verbatim from the Phase 2 plan (a docstring, a ternary, and inline test comments) exceeded ruff `line-length = 100`, and one plan test imported `get_container` unused (F401). Linting only the per-task `app/` files (as the compliance step lists) let the test-file violations reach a later whole-project `ruff check .`.
+**Correct:** behaviour-preserving reflow (split the line / move the comment above the statement) and drop the unused import. Run `ruff check .` (whole project, incl. `tests/`) per task, not just on the app files touched.
+**Pattern:** a plan's inline code is not guaranteed lint-clean against this repo's config — run the full-project linter each task, and treat test files as first-class lint targets.

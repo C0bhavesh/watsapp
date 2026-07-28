@@ -38,7 +38,8 @@ async def test_outbox_dedupe_key_unique_across_webhook_ids() -> None:
     store = InMemoryIngestStore()
     await store.ingest_order_created("wh1", "orders/create", mapping(), outbound())
     result = await store.ingest_order_created("wh2", "orders/create", mapping(), outbound())
-    assert result == IngestResult(duplicate=False, queued=False)  # mapping upserted, push already queued once
+    # mapping upserted, push already queued once
+    assert result == IngestResult(duplicate=False, queued=False)
     assert len(store.outbound) == 1
 
 

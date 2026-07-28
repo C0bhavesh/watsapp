@@ -9,6 +9,8 @@ from app.shopify.client import ShopifyClient
 from app.shopify.token_manager import TokenManager
 from app.store.base import ConfigRepo, IngestStore
 from app.store.memory import InMemoryConfigRepo, InMemoryIngestStore
+from app.store.pg_factory import LazyPool
+from app.store.postgres import PostgresConfigRepo, PostgresIngestStore
 
 
 @dataclass
@@ -31,12 +33,17 @@ def get_container() -> Container:
     if _container is None:
         settings = Settings()  # type: ignore[call-arg]  # app_master_key comes from env/.env
         vault = SecretVault(settings.app_master_key)
-        config_repo: ConfigRepo = InMemoryConfigRepo()  # Phase 2: Postgres when database_url set
+        if settings.database_url:
+            pool = LazyPool(settings.database_url)
+            config_repo: ConfigRepo = PostgresConfigRepo(pool)
+            ingest: IngestStore = PostgresIngestStore(pool)
+        else:
+            config_repo = InMemoryConfigRepo()
+            ingest = InMemoryIngestStore()
         config = ConfigService(config_repo, vault)
         http = httpx.AsyncClient(follow_redirects=False)  # never replay the token to a redirect
         tokens = TokenManager(http, config, settings)
         shopify = ShopifyClient(http, tokens, settings)
-        ingest: IngestStore = InMemoryIngestStore()  # Postgres switch arrives in Task 9
         _container = Container(
             settings, vault, config_repo, config, http, tokens, shopify, ingest
         )

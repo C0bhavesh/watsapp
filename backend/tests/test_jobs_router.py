@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from app.deps import get_container, reset_container
+from app.deps import reset_container
 
 
 @pytest.fixture(autouse=True)

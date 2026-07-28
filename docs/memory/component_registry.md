@@ -76,6 +76,13 @@
 - **Used in:** channels.whatsapp (Phase 3+).
 - **Notes:** Meta = **hex**(HMAC-SHA256(raw body, app secret)) with `sha256=` prefix; constant-time compare. Distinct from Shopify (base64). Non-ASCII header bytes → False (fail-closed). Missing/empty header → False.
 
+## WhatsAppConfig (Fernet-split secrets/plain)
+- **File:** backend/app/channels/whatsapp_config.py
+- **Purpose:** load WhatsApp Bot API credentials from ConfigService (secrets encrypted, plain values unencrypted).
+- **Public API:** frozen dataclass `WhatsAppConfig(access_token, app_secret, verify_token, phone_number_id, waba_id, api_version)`; module tuples `WHATSAPP_SECRET_FIELDS = ("access_token", "app_secret", "verify_token")`, `WHATSAPP_PLAIN_FIELDS = ("phone_number_id", "waba_id", "api_version")`; `async load_whatsapp_config(config: ConfigService) -> WhatsAppConfig | None`.
+- **Used in:** deps.Container, channels.whatsapp (Phase 3+).
+- **Notes:** returns `None` if any of the 6 keys is unset; all 6 must be present for a valid config. Secrets are fetched via `config.get_secret(f"whatsapp:{field}")`, plain via `config.get_plain(f"whatsapp:{field}")`.
+
 ## Subscription self-heal (ensure_subscription)
 - **File:** backend/app/shopify/subscriptions.py
 - **Purpose:** ensure the ORDERS_CREATE webhook subscription points at our callback URL AND is bound to the current Shopify API version.

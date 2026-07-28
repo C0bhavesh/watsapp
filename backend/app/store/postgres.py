@@ -2,6 +2,12 @@ from app.store.base import IngestResult, MappingUpsert, OutboundDraft
 from app.store.pg_factory import LazyPool
 
 
+def _rows_affected(tag: str) -> int:
+    """Rows from an asyncpg command tag, e.g. 'INSERT 0 10' -> 10 (parse suffix, not endswith)."""
+    last = tag.rsplit(" ", 1)[-1]
+    return int(last) if last.isdigit() else 0
+
+
 class PostgresConfigRepo:
     def __init__(self, pool: LazyPool) -> None:
         self._pool = pool
@@ -40,7 +46,7 @@ class PostgresIngestStore:
                     webhook_id,
                     topic,
                 )
-                if inserted.endswith("0"):
+                if _rows_affected(inserted) == 0:
                     return IngestResult(duplicate=True, queued=False)
                 await conn.execute(
                     "INSERT INTO order_mappings (order_gid, order_name, order_number_int, "
@@ -69,5 +75,5 @@ class PostgresIngestStore:
                         outbound.phone_e164,
                         outbound.payload_json,
                     )
-                    queued = not result.endswith("0")
+                    queued = _rows_affected(result) > 0
                 return IngestResult(duplicate=False, queued=queued)

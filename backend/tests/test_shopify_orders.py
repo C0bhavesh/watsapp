@@ -56,6 +56,41 @@ def test_choose_language() -> None:
     assert choose_language(None) == "en"
 
 
+def test_choose_language_tolerates_non_str_locale() -> None:
+    assert choose_language(5) == "en"  # type: ignore[arg-type]
+
+
+def _base(**extra: object) -> dict:
+    return {"admin_graphql_api_id": "gid://shopify/Order/9", "name": "tavas9", **extra}
+
+
+def test_int_phone_coerced_to_none() -> None:
+    order = parse_order_created(_base(phone=919664290413))
+    assert order is not None and order.phone_e164 is None
+
+
+def test_str_customer_does_not_crash() -> None:
+    order = parse_order_created(_base(customer="pwn"))
+    assert order is not None and order.customer_name is None
+
+
+def test_int_payment_gateway_names_is_empty() -> None:
+    order = parse_order_created(_base(payment_gateway_names=5))
+    assert order is not None and order.gateways == ()
+
+
+def test_int_customer_locale_is_none() -> None:
+    order = parse_order_created(_base(customer_locale=5))
+    assert order is not None and order.locale is None
+
+
+def test_non_str_email_and_financial_status_become_none() -> None:
+    order = parse_order_created(_base(email={"x": 1}, financial_status=5))
+    assert order is not None
+    assert order.email is None
+    assert order.financial_status is None
+
+
 def make_order(created_delta_hours: float, cod: bool) -> IncomingOrder:
     parsed = parse_order_created(PAYLOAD)
     assert parsed is not None

@@ -9,4 +9,9 @@ def verify_shopify_hmac(raw_body: bytes, header_value: str | None, secret: str) 
         return False
     digest = hmac.new(secret.encode(), raw_body, hashlib.sha256).digest()
     expected = base64.b64encode(digest).decode()
-    return hmac.compare_digest(expected, header_value.strip())
+    candidate = header_value.strip()
+    try:
+        provided = candidate.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return hmac.compare_digest(expected.encode("ascii"), provided)

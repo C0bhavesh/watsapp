@@ -17,7 +17,11 @@ class LazyPool:
         if self._pool is None:
             async with self._lock:
                 if self._pool is None:
-                    self._pool = await asyncpg.create_pool(self._dsn, min_size=0, max_size=5)
+                    # statement_cache_size=0: Supabase's transaction-mode pooler (6543)
+                    # breaks asyncpg prepared statements; harmless on direct connections.
+                    self._pool = await asyncpg.create_pool(
+                        self._dsn, min_size=0, max_size=5, statement_cache_size=0
+                    )
         return self._pool
 
     @asynccontextmanager
@@ -27,6 +31,7 @@ class LazyPool:
             yield conn
 
     async def close(self) -> None:
-        if self._pool is not None:
-            await self._pool.close()
-            self._pool = None
+        async with self._lock:
+            if self._pool is not None:
+                await self._pool.close()
+                self._pool = None

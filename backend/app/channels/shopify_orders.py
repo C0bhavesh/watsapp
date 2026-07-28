@@ -6,6 +6,18 @@ from app.core.phone import normalize_phone
 SUPPORTED_LANGUAGES = frozenset({"en", "hi", "gu"})
 
 
+def _s(v: object) -> str | None:
+    return v if isinstance(v, str) else None
+
+
+def _d(v: object) -> dict[str, object]:
+    return v if isinstance(v, dict) else {}
+
+
+def _seq(v: object) -> tuple[object, ...]:
+    return tuple(v) if isinstance(v, (list, tuple)) else ()
+
+
 @dataclass(frozen=True)
 class IncomingOrder:
     gid: str
@@ -18,6 +30,7 @@ class IncomingOrder:
     gateways: tuple[str, ...]
     created_at: datetime | None
     locale: str | None
+    financial_status: str | None
 
     def is_cod(self) -> bool:
         if any("cash on delivery" in g.lower() for g in self.gateways):
@@ -40,40 +53,41 @@ def parse_order_created(payload: dict) -> IncomingOrder | None:  # type: ignore[
     name = payload.get("name")
     if not isinstance(gid, str) or not isinstance(name, str) or not gid or not name:
         return None
-    customer = payload.get("customer") or {}
-    shipping = payload.get("shipping_address") or {}
-    billing = payload.get("billing_address") or {}
+    customer = _d(payload.get("customer"))
+    shipping = _d(payload.get("shipping_address"))
+    billing = _d(payload.get("billing_address"))
     phone = (
-        normalize_phone(payload.get("phone"))
-        or normalize_phone(customer.get("phone"))
-        or normalize_phone(shipping.get("phone"))
-        or normalize_phone(billing.get("phone"))
+        normalize_phone(_s(payload.get("phone")))
+        or normalize_phone(_s(customer.get("phone")))
+        or normalize_phone(_s(shipping.get("phone")))
+        or normalize_phone(_s(billing.get("phone")))
     )
-    first = str(customer.get("first_name") or shipping.get("first_name") or "").strip()
-    last = str(customer.get("last_name") or shipping.get("last_name") or "").strip()
+    first = (_s(customer.get("first_name")) or _s(shipping.get("first_name")) or "").strip()
+    last = (_s(customer.get("last_name")) or _s(shipping.get("last_name")) or "").strip()
     customer_name = f"{first} {last}".strip() or None
-    raw_tags = payload.get("tags") or ""
+    raw_tags = payload.get("tags")
     tags: tuple[str, ...] = ()
     if isinstance(raw_tags, str):
         tags = tuple(t.strip() for t in raw_tags.split(",") if t.strip())
-    gateways = tuple(str(g) for g in payload.get("payment_gateway_names") or ())
+    gateways = tuple(str(g) for g in _seq(payload.get("payment_gateway_names")))
     number = payload.get("order_number")
     return IncomingOrder(
         gid=gid,
         name=name,
         order_number=int(number) if isinstance(number, int) else None,
-        email=payload.get("email"),
+        email=_s(payload.get("email")),
         phone_e164=phone,
         customer_name=customer_name,
         tags=tags,
         gateways=gateways,
         created_at=_parse_created_at(payload.get("created_at")),
-        locale=payload.get("customer_locale"),
+        locale=_s(payload.get("customer_locale")),
+        financial_status=_s(payload.get("financial_status")),
     )
 
 
 def choose_language(locale: str | None, default: str = "en") -> str:
-    if locale:
+    if isinstance(locale, str) and locale:
         code = locale[:2].lower()
         if code in SUPPORTED_LANGUAGES:
             return code

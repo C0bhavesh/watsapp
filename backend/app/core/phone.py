@@ -3,7 +3,7 @@ import re
 
 def normalize_phone(raw: str | None) -> str | None:
     """Normalize to E.164. Default country: India (+91) for bare 10-digit numbers."""
-    if not raw:
+    if not isinstance(raw, str):
         return None
     digits = re.sub(r"\D", "", raw)
     if digits.startswith("00"):

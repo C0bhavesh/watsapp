@@ -22,3 +22,8 @@ from app.core.phone import normalize_phone
 )
 def test_normalize_phone(raw: str | None, expected: str | None) -> None:
     assert normalize_phone(raw) == expected
+
+
+def test_non_str_phone_is_none_not_typeerror() -> None:
+    # Shopify may send phone as a bare int (919664290413) on a signed payload.
+    assert normalize_phone(919664290413) is None  # type: ignore[arg-type]

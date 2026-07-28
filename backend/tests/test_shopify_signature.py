@@ -28,3 +28,9 @@ def test_missing_header_fails() -> None:
 def test_hex_encoding_is_rejected() -> None:
     hex_header = hmac_lib.new(SECRET.encode(), BODY, hashlib.sha256).hexdigest()
     assert not verify_shopify_hmac(BODY, hex_header, SECRET)
+
+
+def test_non_ascii_header_returns_false_without_raising() -> None:
+    # Starlette decodes headers latin-1, so a non-ASCII byte reaches us as a str.
+    # hmac.compare_digest raises TypeError on non-ASCII str — must be caught, not 500.
+    assert verify_shopify_hmac(BODY, "\xe9", SECRET) is False

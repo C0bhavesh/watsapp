@@ -108,3 +108,69 @@ async def test_garbage_body_with_valid_hmac_ignored() -> None:
     resp = await post(body, headers(body))
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "ignored": True}
+
+
+async def test_type_confused_signed_payload_does_not_500() -> None:
+    p = {
+        "admin_graphql_api_id": "gid://shopify/Order/poison",
+        "name": "tavasX",
+        "phone": 919664290413,
+        "customer": "pwn",
+        "payment_gateway_names": 5,
+        "customer_locale": 5,
+        "email": {"x": 1},
+    }
+    body = json.dumps(p).encode()
+    resp = await post(body, headers(body, webhook_id="wh-poison"))
+    assert resp.status_code == 200
+
+
+async def test_deeply_nested_json_with_valid_hmac_ignored() -> None:
+    body = ("[" * 3000 + "]" * 3000).encode()
+    resp = await post(body, headers(body, webhook_id="wh-nested"))
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "ignored": True}
+
+
+async def test_oversized_body_413_and_nothing_ingested() -> None:
+    body = b"x" * (1_048_576 + 1)
+    resp = await post(
+        body,
+        {"X-Shopify-Topic": "orders/create", "X-Shopify-Webhook-Id": "wh-big"},
+    )
+    assert resp.status_code == 413
+    assert not get_container().ingest.webhooks  # type: ignore[attr-defined]
+
+
+async def test_corrupt_secret_fails_closed_403() -> None:
+    await get_container().config_repo.set("shopify:client_secret", "gAAAAAcorrupt")
+    body = json.dumps(payload()).encode()
+    resp = await post(body, headers(body))
+    assert resp.status_code == 403
+
+
+async def test_foreign_shop_domain_403_and_nothing_ingested() -> None:
+    body = json.dumps(payload()).encode()
+    resp = await post(
+        body, {**headers(body), "X-Shopify-Shop-Domain": "evil.myshopify.com"}
+    )
+    assert resp.status_code == 403
+    assert not get_container().ingest.webhooks  # type: ignore[attr-defined]
+
+
+async def test_matching_shop_domain_allowed() -> None:
+    body = json.dumps(payload()).encode()
+    resp = await post(
+        body, {**headers(body), "X-Shopify-Shop-Domain": "thetavas.myshopify.com"}
+    )
+    assert resp.status_code == 200
+
+
+async def test_oversized_field_is_clipped_to_256() -> None:
+    p = payload("gid://shopify/Order/longname")
+    p["name"] = "n" * 200_000
+    body = json.dumps(p).encode()
+    resp = await post(body, headers(body, webhook_id="wh-long"))
+    assert resp.status_code == 200
+    stored = get_container().ingest.mappings["gid://shopify/Order/longname"]  # type: ignore[attr-defined]
+    assert len(stored.order_name) == 256

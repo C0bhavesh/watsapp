@@ -55,3 +55,13 @@
 **Mistake/Issue:** Several lines copied verbatim from the Phase 2 plan (a docstring, a ternary, and inline test comments) exceeded ruff `line-length = 100`, and one plan test imported `get_container` unused (F401). Linting only the per-task `app/` files (as the compliance step lists) let the test-file violations reach a later whole-project `ruff check .`.
 **Correct:** behaviour-preserving reflow (split the line / move the comment above the statement) and drop the unused import. Run `ruff check .` (whole project, incl. `tests/`) per task, not just on the app files touched.
 **Pattern:** a plan's inline code is not guaranteed lint-clean against this repo's config — run the full-project linter each task, and treat test files as first-class lint targets.
+
+## [2026-07-28] hmac.compare_digest raises TypeError on non-ASCII str — compare bytes for header values
+**Mistake/Issue:** `hmac.compare_digest(a, b)` with two `str` raises `TypeError` if either contains a non-ASCII char. Starlette decodes HTTP headers latin-1, so an attacker header byte `\xe9` reaches the verifier as a non-ASCII str → 500 on the Shopify HMAC check and the cron `X-Cron-Secret` check.
+**Correct:** encode both sides to bytes before comparing — `candidate.encode("ascii")` inside `try/except UnicodeEncodeError: return False` (fail closed), then `compare_digest(expected.encode("ascii"), provided)`.
+**Pattern:** any secret/signature compare on a value that originated in an HTTP header must be a bytes compare guarded against non-ASCII input — never `compare_digest` on two raw strs.
+
+## [2026-07-28] Webhook payload fields must be type-coerced — a 500 on a signed delivery deletes the subscription
+**Mistake/Issue:** JSON fields were read with the wrong shape assumed (`payload.get("phone")` an int → `normalize_phone` TypeError; `customer` a str → `.get` AttributeError; `payment_gateway_names` an int → not iterable; unvalidated `email`/`financial_status` into asyncpg text params → DataError). Each is a 500 on a signature-valid delivery, and Shopify deletes a webhook subscription after 19 consecutive failures — so one poison-but-signed payload can silently unhook order ingestion.
+**Correct:** coerce every field read with `_s`/`_d`/`_seq` helpers (str/dict/list-or-empty) before use, guard `normalize_phone`/`choose_language` against non-str, and route optional DB fields through the parser so a bad value becomes `None`, not a crash.
+**Pattern:** on a signed webhook, treat every payload field as attacker-typed — a 500 is not a transient error, it burns the provider's retry budget and can tear down the integration.

@@ -26,14 +26,21 @@ JOBS: dict[str, JobFn] = {
 }
 
 
-@router.api_route("/internal/jobs/{name}", methods=["GET", "POST"])
+MIN_CRON_SECRET_LEN = 16
+
+
+@router.api_route("/internal/jobs/{name}", methods=["POST"])
 async def run_job(name: str, request: Request) -> JSONResponse:
     c = get_container()
     secret = c.settings.cron_secret
-    if not secret:
+    if not secret or len(secret) < MIN_CRON_SECRET_LEN:
         return JSONResponse({"error": "jobs disabled"}, status_code=503)
     provided = request.headers.get("X-Cron-Secret", "")
-    if not hmac.compare_digest(provided, secret):
+    try:
+        provided_bytes = provided.encode("ascii")
+    except UnicodeEncodeError:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    if not hmac.compare_digest(secret.encode("ascii"), provided_bytes):
         return JSONResponse({"error": "forbidden"}, status_code=403)
     job = JOBS.get(name)
     if job is None:

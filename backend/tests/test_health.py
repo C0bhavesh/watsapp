@@ -45,6 +45,19 @@ def test_container_uses_postgres_when_database_url_set(
     reset_container()
 
 
+def test_container_uses_postgres_message_store_when_database_url_set(
+    master_key: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.store.postgres import PostgresMessageStore
+
+    monkeypatch.setenv("APP_MASTER_KEY", master_key)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@localhost:5432/db")
+    reset_container()
+    c = get_container()
+    assert isinstance(c.messages, PostgresMessageStore)
+    reset_container()
+
+
 def test_openapi_docs_disabled_in_prod(monkeypatch: pytest.MonkeyPatch) -> None:
     import importlib
 

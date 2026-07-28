@@ -17,3 +17,7 @@ node_modules/
 
 # Claude local settings
 .claude/settings.local.json
+
+# Git worktrees + SDD scratch workspaces (never repo content)
+.claude/worktrees/
+.superpowers/

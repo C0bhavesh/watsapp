@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 from collections.abc import Callable
 
@@ -72,9 +73,12 @@ class TokenManager:
             raise TokenGrantError("token endpoint unreachable") from exc
         if resp.status_code != 200:
             raise TokenGrantError(f"token grant rejected (HTTP {resp.status_code})")
-        payload = resp.json()
-        token = str(payload["access_token"])
-        expires_at = self._now() + float(payload.get("expires_in", 86399))
+        try:
+            payload = resp.json()
+            token = str(payload["access_token"])
+            expires_at = self._now() + float(payload.get("expires_in", 86399))
+        except (KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise TokenGrantError("malformed token response") from exc
         await self._config.set_secret(TOKEN_KEY, token)
         await self._config.set_plain(EXPIRES_KEY, str(expires_at))
         self._cached_token = token

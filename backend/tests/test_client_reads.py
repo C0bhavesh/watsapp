@@ -68,6 +68,21 @@ async def test_find_order_by_name_none_found(settings, master_key) -> None:
     assert await client.find_order_by_name("9999") is None
 
 
+async def test_find_order_by_name_rejects_search_operators(settings, master_key) -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if request.url.path.endswith("/oauth/access_token"):
+            return httpx.Response(200, json={"access_token": "shpat_t1", "expires_in": 86399})
+        return httpx.Response(200, json={"data": {"orders": {"edges": [{"node": ORDER_NODE}]}}})
+
+    client, config = make_client(settings, master_key, handler)
+    await seed(config)
+    assert await client.find_order_by_name("3733 OR email:*") is None
+    assert calls == []
+
+
 async def test_customer_search_access_denied_returns_empty(settings, master_key) -> None:
     def gql(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={

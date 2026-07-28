@@ -120,3 +120,33 @@ async def test_network_error_maps_to_unavailable(settings, master_key) -> None:
     await seed(config)
     with pytest.raises(ShopifyUnavailable):
         await client._graphql("{ shop { name } }")
+
+
+async def test_http_500_maps_to_unavailable(settings, master_key) -> None:
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="<html>Internal Server Error</html>")
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    with pytest.raises(ShopifyUnavailable):
+        await client._graphql("{ shop { name } }")
+
+
+async def test_http_429_maps_to_throttled(settings, master_key) -> None:
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, text="Too Many Requests")
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    with pytest.raises(ShopifyThrottled):
+        await client._graphql("{ shop { name } }")
+
+
+async def test_http_200_non_json_maps_to_unavailable(settings, master_key) -> None:
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>maintenance</html>")
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    with pytest.raises(ShopifyUnavailable):
+        await client._graphql("{ shop { name } }")

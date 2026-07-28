@@ -1,3 +1,5 @@
+import json
+import re
 from collections.abc import Sequence
 from typing import Any
 
@@ -76,7 +78,16 @@ class ShopifyClient:
                     await self._tokens.force_refresh()
                     continue
                 raise ShopifyAuthError("Shopify rejected the token after refresh")
-            payload = resp.json()
+            if resp.status_code >= 500:
+                raise ShopifyUnavailable(f"Shopify returned HTTP {resp.status_code}")
+            if resp.status_code == 429:
+                raise ShopifyThrottled("Shopify throttled the request (HTTP 429)")
+            if resp.status_code != 200:
+                raise ShopifyUnavailable(f"Shopify returned HTTP {resp.status_code}")
+            try:
+                payload = resp.json()
+            except (ValueError, json.JSONDecodeError) as exc:
+                raise ShopifyUnavailable("non-JSON response") from exc
             errors = payload.get("errors")
             data = payload.get("data")
             if errors:
@@ -99,6 +110,8 @@ class ShopifyClient:
 
     async def find_order_by_name(self, raw_name: str) -> Order | None:
         name = normalize_order_name(raw_name)
+        if re.fullmatch(r"[a-z0-9]+", name) is None:
+            return None
         query = (
             f"query($q: String!) {{ orders(first: 1, query: $q) "
             f"{{ edges {{ node {{ {ORDER_FIELDS} }} }} }} }}"

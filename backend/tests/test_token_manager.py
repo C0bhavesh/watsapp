@@ -7,6 +7,7 @@ from app.config.crypto import SecretVault
 from app.config.service import ConfigService
 from app.shopify.errors import TokenGrantError
 from app.shopify.token_manager import TokenManager
+from app.store.memory import InMemoryConfigRepo
 
 
 def make_manager(settings, master_key, responder, now=lambda: 1_000_000.0):
@@ -17,8 +18,7 @@ def make_manager(settings, master_key, responder, now=lambda: 1_000_000.0):
         return responder(request)
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    config = ConfigService(__import__("app.store.memory", fromlist=["m"]).InMemoryConfigRepo(),
-                           SecretVault(master_key))
+    config = ConfigService(InMemoryConfigRepo(), SecretVault(master_key))
     return TokenManager(http, config, settings, now=now), config, calls
 
 
@@ -75,5 +75,25 @@ async def test_grant_failure_raises_without_leaking_secret(settings, master_key)
 
 async def test_missing_credentials_raise(settings, master_key) -> None:
     mgr, _config, _ = make_manager(settings, master_key, ok_grant)
+    with pytest.raises(TokenGrantError):
+        await mgr.get_token()
+
+
+async def test_grant_non_json_response_raises(settings, master_key) -> None:
+    def bad(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>not json</html>")
+
+    mgr, config, _ = make_manager(settings, master_key, bad)
+    await seed(config)
+    with pytest.raises(TokenGrantError):
+        await mgr.get_token()
+
+
+async def test_grant_missing_access_token_raises(settings, master_key) -> None:
+    def bad(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"expires_in": 86399})
+
+    mgr, config, _ = make_manager(settings, master_key, bad)
+    await seed(config)
     with pytest.raises(TokenGrantError):
         await mgr.get_token()

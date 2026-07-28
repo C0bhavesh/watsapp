@@ -45,7 +45,9 @@ def extract_event(payload: dict[str, Any]) -> InboundEvent | None:
         if not messages:
             return None
         msg = messages[0]
-    except (KeyError, IndexError, TypeError):
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return None
+    if not isinstance(msg, dict):
         return None
 
     message_id = msg.get("id")
@@ -57,7 +59,8 @@ def extract_event(payload: dict[str, Any]) -> InboundEvent | None:
     msg_type = msg.get("type")
 
     if msg_type == "text":
-        text = (msg.get("text") or {}).get("body")
+        text_obj = msg.get("text")
+        text = text_obj.get("body") if isinstance(text_obj, dict) else None
         if not isinstance(text, str):
             return None
         return InboundText(
@@ -65,11 +68,14 @@ def extract_event(payload: dict[str, Any]) -> InboundEvent | None:
         )
 
     if msg_type == "button":
-        button = msg.get("button") or {}
+        button = msg.get("button")
+        if not isinstance(button, dict):
+            return None
         button_payload = button.get("payload")
         if not isinstance(button_payload, str):
             return None
-        context_id = (msg.get("context") or {}).get("id")
+        context = msg.get("context")
+        context_id = context.get("id") if isinstance(context, dict) else None
         return InboundButton(
             message_id=message_id,
             wa_id=wa_id,
@@ -80,10 +86,12 @@ def extract_event(payload: dict[str, Any]) -> InboundEvent | None:
         )
 
     if msg_type == "interactive":
-        interactive = msg.get("interactive") or {}
-        if interactive.get("type") != "button_reply":
+        interactive = msg.get("interactive")
+        if not isinstance(interactive, dict) or interactive.get("type") != "button_reply":
             return None
-        reply = interactive.get("button_reply") or {}
+        reply = interactive.get("button_reply")
+        if not isinstance(reply, dict):
+            return None
         button_id = reply.get("id")
         if not isinstance(button_id, str):
             return None

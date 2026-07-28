@@ -138,3 +138,25 @@ async def test_post_garbage_body_ignored() -> None:
     resp = await post(body, {"X-Hub-Signature-256": sign(body)})
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "ignored": True}
+
+
+async def test_get_verify_corrupt_secret_fails_closed_403() -> None:
+    # Master key rotated / stored secret corrupt -> vault.decrypt raises VaultError.
+    # The GET verify route must fail closed to 403, never surface a 500.
+    await get_container().config_repo.set("whatsapp:app_secret", "gAAAAAcorrupt")
+    resp = await get(
+        "/webhook/whatsapp",
+        {"hub.mode": "subscribe", "hub.verify_token": VERIFY_TOKEN, "hub.challenge": "xyz123"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_post_corrupt_secret_fails_closed_403() -> None:
+    # Same scenario on the POST receive route: VaultError -> 403, not 500.
+    await get_container().config_repo.set("whatsapp:app_secret", "gAAAAAcorrupt")
+    body = json.dumps(envelope(
+        {"from": "919999999999", "id": "wamid.9", "timestamp": "1",
+         "type": "text", "text": {"body": "hi"}}
+    )).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+    assert resp.status_code == 403

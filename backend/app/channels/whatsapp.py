@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from app.channels.whatsapp_config import load_whatsapp_config
 from app.channels.whatsapp_inbound import extract_event
 from app.channels.whatsapp_signature import verify_meta_hmac
+from app.config.crypto import VaultError
 from app.deps import get_container
 
 router = APIRouter()
@@ -34,7 +35,11 @@ def _incoming_phone_number_id(payload: dict[str, Any]) -> str | None:
 
 @router.get("/webhook/whatsapp")
 async def verify_webhook(request: Request) -> Response:
-    cfg = await load_whatsapp_config(get_container().config)
+    # Fail closed if a stored secret can't be decrypted (rotated/corrupt master key).
+    try:
+        cfg = await load_whatsapp_config(get_container().config)
+    except VaultError:
+        return PlainTextResponse("forbidden", status_code=403)
     if cfg is None:
         return PlainTextResponse("forbidden", status_code=403)
     mode = request.query_params.get("hub.mode")
@@ -60,7 +65,11 @@ async def receive_webhook(request: Request) -> Response:
         return PlainTextResponse("payload too large", status_code=413)
 
     c = get_container()
-    cfg = await load_whatsapp_config(c.config)
+    # Fail closed if a stored secret can't be decrypted (rotated/corrupt master key).
+    try:
+        cfg = await load_whatsapp_config(c.config)
+    except VaultError:
+        return PlainTextResponse("forbidden", status_code=403)
     if cfg is None or not verify_meta_hmac(
         raw, request.headers.get("X-Hub-Signature-256"), cfg.app_secret
     ):

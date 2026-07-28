@@ -1,3 +1,5 @@
+import pytest
+
 from app.channels.whatsapp_inbound import (
     InboundButton,
     InboundInteractive,
@@ -93,4 +95,47 @@ def test_type_confused_fields_are_none_not_exception() -> None:
     assert extract_event(envelope({
         "from": 919664290413, "id": None, "timestamp": 1700000000,
         "type": "text", "text": {"body": "hi"},
+    })) is None
+
+
+@pytest.mark.parametrize("bad_message", ["not-a-dict", 42, ["nested", "list"], None, True])
+def test_non_dict_messages_item_is_none_not_exception(bad_message: object) -> None:
+    # messages[0] itself is not a dict — must not crash on msg.get(...).
+    assert extract_event(envelope(bad_message)) is None
+
+
+@pytest.mark.parametrize("bad_field", ["not-a-dict", 42, ["x"], True])
+def test_non_dict_nested_button_is_none_not_exception(bad_field: object) -> None:
+    # A truthy non-dict `button` must not crash on button.get("payload").
+    assert extract_event(envelope({
+        "from": "919664290413", "id": "wamid.B", "timestamp": "1",
+        "type": "button", "button": bad_field,
+    })) is None
+
+
+@pytest.mark.parametrize("bad_field", ["not-a-dict", 42, ["x"], True])
+def test_non_dict_nested_interactive_is_none_not_exception(bad_field: object) -> None:
+    # A truthy non-dict `interactive` must not crash on interactive.get("type").
+    assert extract_event(envelope({
+        "from": "919664290413", "id": "wamid.I", "timestamp": "1",
+        "type": "interactive", "interactive": bad_field,
+    })) is None
+
+
+@pytest.mark.parametrize("bad_field", ["not-a-dict", 42, ["x"], True])
+def test_non_dict_nested_text_is_none_not_exception(bad_field: object) -> None:
+    # A truthy non-dict `text` must not crash on text.get("body").
+    assert extract_event(envelope({
+        "from": "919664290413", "id": "wamid.T", "timestamp": "1",
+        "type": "text", "text": bad_field,
+    })) is None
+
+
+@pytest.mark.parametrize("bad_field", ["not-a-dict", 42, ["x"], True])
+def test_non_dict_nested_button_reply_is_none_not_exception(bad_field: object) -> None:
+    # A truthy non-dict `button_reply` must not crash on reply.get("id").
+    assert extract_event(envelope({
+        "from": "919664290413", "id": "wamid.IR", "timestamp": "1",
+        "type": "interactive",
+        "interactive": {"type": "button_reply", "button_reply": bad_field},
     })) is None

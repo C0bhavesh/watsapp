@@ -37,10 +37,19 @@ class Order:
 
 @dataclass(frozen=True)
 class AuthorizedOrder:
-    """Only core.order_resolver may construct this in production code (ADR-004)."""
+    """Only core.order_resolver may construct this in production code (ADR-004).
+
+    The invariant is enforced at runtime, not just by convention: a value of this
+    type guarantees ``verified_phone`` matches one of the order's phones.
+    """
 
     order: Order
     verified_phone: str
+
+    def __post_init__(self) -> None:
+        phones = (self.order.phone, self.order.shipping_phone, self.order.billing_phone)
+        if not self.verified_phone or self.verified_phone not in phones:
+            raise ValueError("AuthorizedOrder: verified_phone does not match the order")
 
 
 @dataclass(frozen=True)

@@ -94,6 +94,48 @@ async def test_customer_search_access_denied_returns_empty(settings, master_key)
     assert await client.find_customer_orders_by_phone("+919999999999") == []
 
 
+async def test_customer_search_rejects_search_operators(settings, master_key) -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if request.url.path.endswith("/oauth/access_token"):
+            return httpx.Response(200, json={"access_token": "shpat_t1", "expires_in": 86399})
+        return httpx.Response(200, json={"data": {"customers": {"edges": []}}})
+
+    client, config = make_client(settings, master_key, handler)
+    await seed(config)
+    assert await client.find_customer_orders_by_phone("+910000000000 OR email:x@y.z") == []
+    assert calls == []
+
+
+async def test_customer_search_non_numeric_id_skips_second_query(settings, master_key) -> None:
+    gql_calls = {"n": 0}
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        gql_calls["n"] += 1
+        return httpx.Response(200, json={"data": {"customers": {"edges": [
+            {"node": {"id": "gid://shopify/Customer/not-a-number"}}
+        ]}}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    assert await client.find_customer_orders_by_phone("+919999999999") == []
+    assert gql_calls["n"] == 1
+
+
+async def test_customer_search_access_denied_code_non_english(settings, master_key) -> None:
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "errors": [{"message": "अनुमति अस्वीकृत", "extensions": {"code": "ACCESS_DENIED"}}],
+            "data": None,
+        })
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    assert await client.find_customer_orders_by_phone("+919999999999") == []
+
+
 async def test_customer_search_two_step(settings, master_key) -> None:
     step = {"n": 0}
 

@@ -43,10 +43,15 @@ class TokenManager:
                 return self._cached_token
             stored = await self._config.get_secret(TOKEN_KEY)
             expires_raw = await self._config.get_plain(EXPIRES_KEY)
-            if stored is not None and expires_raw is not None and self._fresh(float(expires_raw)):
-                self._cached_token = stored
-                self._cached_expires_at = float(expires_raw)
-                return stored
+            if stored is not None and expires_raw is not None:
+                try:
+                    expires_at = float(expires_raw)
+                except (ValueError, TypeError):
+                    expires_at = None
+                if expires_at is not None and self._fresh(expires_at):
+                    self._cached_token = stored
+                    self._cached_expires_at = expires_at
+                    return stored
             return await self._grant()
 
     async def force_refresh(self) -> str:

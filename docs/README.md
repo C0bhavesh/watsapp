@@ -14,6 +14,8 @@ free-text understanding; our backend talks to the Shopify Admin GraphQL API.
 | [theme-exploration-thetavas.md](theme-exploration-thetavas.md) | Client theme scan — no vendor traces in theme; **Shopflo checkout is live** (key constraint); cleanup notes. |
 | [architecture-plan.md](architecture-plan.md) | **The architecture plan (v1.1)** — Levels 0–6 + accepted review amendments (outbox, kill switch, InboundButton, AuthorizedOrder…); gated 7-phase implementation plan. |
 | [architecture-review-2026-07-28.md](architecture-review-2026-07-28.md) | Independent review report — SOUND WITH FIXES; 24 findings (F1–F24), confirmations, forward-compat matrix, ADR list. |
+| [architecture-decisions.md](architecture-decisions.md) | **ADRs 001–005** — outbox, send-policy kill switch, DB-persisted token, mutation safety, config-driven client decisions. |
+| [security-review-2026-07-28-phase1.md](security-review-2026-07-28-phase1.md) | Phase 1 security review — PASS WITH NOTES; 2 HIGH (PoC-verified) fixed, deferred items tracked for Phase 2/3. |
 | [whatsapp-templates.md](whatsapp-templates.md) | Template drafts (UTILITY, en/hi/gu, Confirm/Cancel buttons) + API-creation JSON + design notes. |
 | [phase0-verification-results.md](phase0-verification-results.md) | **Live API test results (2026-07-28)** — token/reads/mutation-schemas verified on 2026-07 against the real store; Shopflo order shape; `read_customers` scope gap. |
 | [current-wati-bridge-analysis.md](current-wati-bridge-analysis.md) | Analysis of the owner's existing WATI bridge repo — how today's flow works, conventions we reuse, gaps we fix. |

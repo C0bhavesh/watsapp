@@ -32,7 +32,7 @@ def get_container() -> Container:
         vault = SecretVault(settings.app_master_key)
         config_repo: ConfigRepo = InMemoryConfigRepo()  # Phase 2: Postgres when database_url set
         config = ConfigService(config_repo, vault)
-        http = httpx.AsyncClient()
+        http = httpx.AsyncClient(follow_redirects=False)  # never replay the token to a redirect
         tokens = TokenManager(http, config, settings)
         shopify = ShopifyClient(http, tokens, settings)
         _container = Container(settings, vault, config_repo, config, http, tokens, shopify)

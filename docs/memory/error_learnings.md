@@ -36,6 +36,11 @@
 **Correct:** it resolves itself as soon as our `app/<module>.py` exists (PathFinder finds ours first). No action needed if you create the module before importing it. If ever isolation is required: `pip uninstall beyond-loaf-agent` in this env, or run tests with `PYTHONPATH` scoping — but do NOT modify the shared env as part of feature work.
 **Pattern:** a confusing cross-project ImportError under a same-named top-level package usually means an editable install is shadowing missing submodules — check `site-packages/__editable__*.pth` + `*_finder.py` before suspecting your own code.
 
+## [2026-07-28] A docstring is not an invariant — `AuthorizedOrder` (ADR-004) forged in a PoC
+**Mistake/Issue:** `AuthorizedOrder` only *documented* "verified_phone matches the order" — security review forged one for a victim order and `cancel_order` accepted it; the mutation-safety gate was enforcement-in-name-only.
+**Correct:** add `__post_init__` that raises `ValueError` unless `verified_phone` is truthy and equals one of the order's phones; fix ripple fixtures (tests/smoke) to build genuinely consistent orders instead of relaxing the check.
+**Pattern:** a type that asserts an invariant must validate it at construction — if the guarantee lives only in a docstring/convention, treat it as unenforced.
+
 ## [2026-07-28] pydantic-settings `Settings()` no-arg call trips mypy strict
 **Mistake/Issue:** `Settings()` (values loaded from env/.env at runtime) fails mypy strict with `Missing named argument "app_master_key" [call-arg]`, because the required field has no default and the pydantic mypy plugin isn't enabled.
 **Correct:** annotate the call site with `# type: ignore[call-arg]` (the plan already does this in `test_settings.py` for `Settings(_env_file=None)`). Used in `app/deps.py` and `scripts/smoke_shopify.py`.

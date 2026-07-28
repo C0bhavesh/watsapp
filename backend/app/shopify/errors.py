@@ -19,6 +19,7 @@ class TokenGrantError(ShopifyError):
 
 
 class ShopifyGraphQLError(ShopifyError):
-    def __init__(self, messages: list[str]) -> None:
+    def __init__(self, messages: list[str], codes: tuple[str, ...] = ()) -> None:
         super().__init__("; ".join(messages))
         self.messages = messages
+        self.codes = codes

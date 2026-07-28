@@ -89,6 +89,16 @@ async def test_grant_non_json_response_raises(settings, master_key) -> None:
         await mgr.get_token()
 
 
+async def test_corrupt_expires_at_falls_through_to_grant(settings, master_key) -> None:
+    mgr, config, calls = make_manager(settings, master_key, ok_grant)
+    await seed(config)
+    await config.set_secret("shopify:access_token", "shpat_stale")
+    await config.set_plain("shopify:token_expires_at", "not-a-float")
+    token = await mgr.get_token()
+    assert token == "shpat_test_token"
+    assert len(calls) == 1
+
+
 async def test_grant_missing_access_token_raises(settings, master_key) -> None:
     def bad(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"expires_in": 86399})

@@ -96,7 +96,7 @@ class ShopifyClient:
                 if "THROTTLED" in codes:
                     raise ShopifyThrottled("; ".join(messages))
                 if data is None:
-                    raise ShopifyGraphQLError(messages)
+                    raise ShopifyGraphQLError(messages, tuple(c for c in codes if c))
             if data is None:
                 raise ShopifyGraphQLError(["empty response data"])
             return dict(data)
@@ -121,6 +121,8 @@ class ShopifyClient:
         return _order_from_node(edges[0]["node"]) if edges else None
 
     async def find_customer_orders_by_phone(self, phone_e164: str) -> list[Order]:
+        if re.fullmatch(r"\+[1-9]\d{7,14}", phone_e164) is None:
+            return []
         try:
             cust = await self._graphql(
                 'query($q: String!) { customers(first: 1, query: $q) '
@@ -128,13 +130,17 @@ class ShopifyClient:
                 {"q": f"phone:{phone_e164}"},
             )
         except ShopifyGraphQLError as exc:
-            if any("access denied" in m.lower() for m in exc.messages):
+            if "ACCESS_DENIED" in exc.codes or any(
+                "access denied" in m.lower() for m in exc.messages
+            ):
                 return []
             raise
         edges = (cust.get("customers") or {}).get("edges") or []
         if not edges:
             return []
         customer_id = str(edges[0]["node"]["id"]).rsplit("/", 1)[-1]
+        if re.fullmatch(r"\d+", customer_id) is None:
+            return []
         data = await self._graphql(
             f"query($q: String!) {{ orders(first: 10, query: $q, sortKey: CREATED_AT, "
             f"reverse: true) {{ edges {{ node {{ {ORDER_FIELDS} }} }} }} }}",

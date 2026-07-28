@@ -21,7 +21,7 @@ from app.store.memory import InMemoryConfigRepo
 
 def _bogus_auth() -> AuthorizedOrder:
     order = Order(
-        gid="gid://shopify/Order/1", name="tavas0", email=None, phone=None,
+        gid="gid://shopify/Order/1", name="tavas0", email=None, phone="+910000000000",
         shipping_phone=None, billing_phone=None, financial_status=None,
         fulfillment_status=None, cancelled_at=None, tags=(), payment_gateway_names=(),
         total=None, customer_locale=None,
@@ -37,23 +37,29 @@ async def main() -> None:
     async with httpx.AsyncClient() as http:
         client = ShopifyClient(http, TokenManager(http, config, settings), settings)
         token = await client._tokens.get_token()  # noqa: SLF001
-        print(f"token: {token[:10]}... OK")
+        print(f"token: acquired (len={len(token)}) OK")
         latest = await client.find_order_by_name("tavas3733")
         print(f"find_order_by_name: {'OK ' + latest.name if latest else 'NOT FOUND'}")
         if latest:
             refetched = await client.get_order(latest.gid)
             print(f"get_order: {'OK' if refetched and refetched.gid == latest.gid else 'FAIL'}")
         fallback = await client.find_customer_orders_by_phone("+910000000000")
-        print(f"customer fallback (expect [] until read_customers granted): {fallback}")
-        for label, call in (
-            ("tagsAdd bogus-gid", client.add_tags(_bogus_auth(), ["smoke-test"])),
-            ("orderCancel bogus-gid", client.cancel_order(_bogus_auth())),
-        ):
-            try:
-                await call
-                print(f"{label}: UNEXPECTED SUCCESS")
-            except ShopifyGraphQLError as exc:
-                print(f"{label}: OK (userError as expected: {exc.messages[0]})")
+        print(
+            f"customer fallback (expect 0 until read_customers granted): "
+            f"count={len(fallback)} names={[o.name for o in fallback]}"
+        )
+        if os.getenv("SMOKE_ALLOW_MUTATIONS") == "1":
+            for label, call in (
+                ("tagsAdd bogus-gid", client.add_tags(_bogus_auth(), ["smoke-test"])),
+                ("orderCancel bogus-gid", client.cancel_order(_bogus_auth())),
+            ):
+                try:
+                    await call
+                    print(f"{label}: UNEXPECTED SUCCESS")
+                except ShopifyGraphQLError as exc:
+                    print(f"{label}: OK (userError as expected: {exc.messages[0]})")
+        else:
+            print("mutation checks: SKIPPED (set SMOKE_ALLOW_MUTATIONS=1)")
 
 
 if __name__ == "__main__":

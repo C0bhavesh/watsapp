@@ -69,6 +69,13 @@
 - **Used in:** channels.shopify_webhook.
 - **Notes:** Shopify = **base64**(HMAC-SHA256(raw body, client secret)); constant-time compare. Distinct from Meta (hex). Missing/empty header → False.
 
+## Meta webhook HMAC verifier (hex)
+- **File:** backend/app/channels/whatsapp_signature.py
+- **Purpose:** verify Meta WhatsApp Cloud API webhook signatures.
+- **Public API:** `verify_meta_hmac(raw_body: bytes, header_value: str | None, secret: str) -> bool`.
+- **Used in:** channels.whatsapp (Phase 3+).
+- **Notes:** Meta = **hex**(HMAC-SHA256(raw body, app secret)) with `sha256=` prefix; constant-time compare. Distinct from Shopify (base64). Non-ASCII header bytes → False (fail-closed). Missing/empty header → False.
+
 ## Subscription self-heal (ensure_subscription)
 - **File:** backend/app/shopify/subscriptions.py
 - **Purpose:** ensure the ORDERS_CREATE webhook subscription points at our callback URL AND is bound to the current Shopify API version.

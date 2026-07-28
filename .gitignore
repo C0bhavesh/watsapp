@@ -1,0 +1,19 @@
+# Secrets & local env — never commit
+.env
+.env.*
+*.pem
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# Vercel / Node
+.vercel/
+node_modules/
+
+# Claude local settings
+.claude/settings.local.json

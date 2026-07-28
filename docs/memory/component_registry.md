@@ -71,10 +71,10 @@
 
 ## Subscription self-heal (ensure_subscription)
 - **File:** backend/app/shopify/subscriptions.py
-- **Purpose:** ensure the ORDERS_CREATE webhook subscription points at our callback URL.
+- **Purpose:** ensure the ORDERS_CREATE webhook subscription points at our callback URL AND is bound to the current Shopify API version.
 - **Public API:** `async ensure_subscription(client: ShopifyClient, callback_url: str) -> str` → `"ok" | "created" | "updated"`.
 - **Used in:** jobs.router (`ensure_subscription` job).
-- **Notes:** lists ORDERS_CREATE subs; matching callbackUrl → ok; drifted URL → webhookSubscriptionUpdate; none → webhookSubscriptionCreate (format JSON). userErrors → `ShopifyGraphQLError`.
+- **Notes:** F20 version-aware — a sub is `"ok"` ONLY when callbackUrl matches AND `apiVersion.handle == client.api_version`; a drifted URL **or** a stale API version → `webhookSubscriptionUpdate` (`"updated"`); none → `webhookSubscriptionCreate` (format JSON) → `"created"`. Both create and update pass `apiVersion: $apiVersion` (read via the `ShopifyClient.api_version` accessor, never the private settings attr). `_LIST_QUERY` requests `apiVersion { handle }` per node. userErrors → `ShopifyGraphQLError`.
 
 ## ConfigService
 - **File:** backend/app/config/service.py
@@ -107,7 +107,7 @@
 ## ShopifyClient (5 ops)
 - **File:** backend/app/shopify/client.py
 - **Purpose:** Admin GraphQL client — transport + 3 reads + 2 mutations.
-- **Public API:** `ShopifyClient(http, tokens, settings)`; async `get_order(gid) -> Order | None`, `find_order_by_name(raw_name) -> Order | None`, `find_customer_orders_by_phone(phone_e164) -> list[Order]`, `add_tags(auth: AuthorizedOrder, tags) -> None`, `cancel_order(auth: AuthorizedOrder, *, reason="CUSTOMER", restock=True) -> CancelRequested`. Module: `ORDER_FIELDS`, `_order_from_node`.
+- **Public API:** `ShopifyClient(http, tokens, settings)`; `@property api_version -> str` (read-only accessor for `settings.shopify_api_version`; used by subscriptions self-heal instead of reaching into the private attr); async `get_order(gid) -> Order | None`, `find_order_by_name(raw_name) -> Order | None`, `find_customer_orders_by_phone(phone_e164) -> list[Order]`, `add_tags(auth: AuthorizedOrder, tags) -> None`, `cancel_order(auth: AuthorizedOrder, *, reason="CUSTOMER", restock=True) -> CancelRequested`. Module: `ORDER_FIELDS`, `_order_from_node`.
 - **Used in:** deps.Container, scripts/smoke_shopify, core (Phase 2+).
 - **Notes:** URL uses `settings.shopify_api_version` (2026-07). HTTP 401 → force_refresh + retry once → `ShopifyAuthError`. THROTTLED → `ShopifyThrottled`; errors+null data → `ShopifyGraphQLError`; partial data+errors → returns data. Mutations accept ONLY `AuthorizedOrder` (ADR-004); userErrors raise `ShopifyGraphQLError`. Direct order-by-phone is NOT supported by Shopify — customer→orders fallback used, returns `[]` on access-denied (read_customers scope may be absent).
 
@@ -130,4 +130,4 @@
 - **Purpose:** single authenticated cron/self-invoke endpoint running a named-job registry.
 - **Public API:** `router` — `GET|POST /internal/jobs/{name}`; `JOBS: dict[str, JobFn]` registry; `JobFn = Callable[[Container], Awaitable[dict[str, Any]]]`. Registered: `ensure_subscription` (reads config `public_base_url`, calls subscriptions.ensure_subscription against `{base}/webhooks/shopify`).
 - **Used in:** main.app, Vercel cron (future).
-- **Notes:** `settings.cron_secret` empty → 503 (never an open endpoint, F11); header `X-Cron-Secret` constant-time compared → 403 on mismatch/missing; unknown job → 404; `ensure_subscription` with no `public_base_url` → 200 `{"error": "public_base_url not configured"}`.
+- **Notes:** `settings.cron_secret` empty → 503 (never an open endpoint, F11); header `X-Cron-Secret` constant-time compared → 403 on mismatch/missing; unknown job → 404; `ensure_subscription` with no `public_base_url` → 200 `{"error": "public_base_url not configured"}`. A job raising any `ShopifyError` (base class) → 502 `{"job": name, "error": "job failed"}` — exception text is NEVER echoed (may carry vendor detail); non-`ShopifyError` exceptions still propagate as raw 500.

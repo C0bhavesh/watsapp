@@ -79,3 +79,19 @@ async def test_ensure_subscription_without_base_url_reports_error() -> None:
         "job": "ensure_subscription",
         "result": {"error": "public_base_url not configured"},
     }
+
+
+async def test_shopify_failure_returns_502_without_leaking_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.jobs import router as jobs_router
+    from app.shopify.errors import ShopifyUnavailable
+
+    async def boom(_c: object) -> dict:
+        raise ShopifyUnavailable("internal vendor detail must not leak")
+
+    monkeypatch.setitem(jobs_router.JOBS, "boom", boom)
+    resp = await call("boom", SECRET)
+    assert resp.status_code == 502
+    assert resp.json() == {"job": "boom", "error": "job failed"}
+    assert "vendor detail" not in resp.text

@@ -142,6 +142,19 @@ async def test_oversized_body_413_and_nothing_ingested() -> None:
     assert not get_container().ingest.webhooks  # type: ignore[attr-defined]
 
 
+async def test_unset_secret_fails_closed_403() -> None:
+    # Ops-error path: the client secret was never configured (fresh, unseeded container ->
+    # get_secret returns None -> the `not secret` short-circuit). A validly-signed request
+    # still gets 403 — intentionally indistinguishable from a bad-signature attack; giving
+    # ops visibility into "misconfigured vs attacked" is deferred to the F13 observability work.
+    reset_container()
+    c = get_container()  # rebuilt WITHOUT seeding shopify:client_secret
+    body = json.dumps(payload()).encode()
+    resp = await post(body, headers(body))
+    assert resp.status_code == 403
+    assert not c.ingest.webhooks  # type: ignore[attr-defined]
+
+
 async def test_corrupt_secret_fails_closed_403() -> None:
     await get_container().config_repo.set("shopify:client_secret", "gAAAAAcorrupt")
     body = json.dumps(payload()).encode()

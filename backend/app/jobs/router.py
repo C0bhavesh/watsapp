@@ -6,6 +6,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from app.deps import Container, get_container
+from app.shopify.errors import ShopifyError
 from app.shopify.subscriptions import ensure_subscription
 
 router = APIRouter()
@@ -45,5 +46,10 @@ async def run_job(name: str, request: Request) -> JSONResponse:
     job = JOBS.get(name)
     if job is None:
         return JSONResponse({"error": "unknown job"}, status_code=404)
-    result = await job(c)
+    # A Shopify-layer failure is an upstream (502) condition, not a bug in this service.
+    # Never echo the exception text — it can carry vendor detail. Other errors propagate.
+    try:
+        result = await job(c)
+    except ShopifyError:
+        return JSONResponse({"job": name, "error": "job failed"}, status_code=502)
     return JSONResponse({"job": name, "result": result})

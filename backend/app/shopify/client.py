@@ -57,6 +57,10 @@ class ShopifyClient:
         self._settings = settings
 
     @property
+    def api_version(self) -> str:
+        return self._settings.shopify_api_version
+
+    @property
     def _url(self) -> str:
         s = self._settings
         return f"https://{s.shop_domain}/admin/api/{s.shopify_api_version}/graphql.json"

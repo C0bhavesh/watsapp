@@ -1,0 +1,33 @@
+<section class="section">
+  <div class="container">
+    <div class="section__heading">
+      <div>
+        <p class="eyebrow">{{ 'collection_list.eyebrow' | t }}</p>
+        <h1>{{ 'collection_list.heading' | t }}</h1>
+      </div>
+    </div>
+
+    <div class="grid-cards grid-cards--four">
+      {%- for collection in collections -%}
+        <a class="collection-card" href="{{ collection.url }}">
+          <div class="collection-card__media">
+            {%- if collection.featured_image != blank -%}
+              {{ collection.featured_image | image_url: width: 900 | image_tag: loading: 'lazy', alt: collection.title }}
+            {%- endif -%}
+          </div>
+          <div class="collection-card__body">
+            <h3 class="collection-card__title">{{ collection.title }}</h3>
+            <p class="collection-card__text">{{ collection.products_count }} {{ 'collection_list.products' | t }}</p>
+          </div>
+        </a>
+      {%- endfor -%}
+    </div>
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "Collection list",
+  "settings": []
+}
+{% endschema %}

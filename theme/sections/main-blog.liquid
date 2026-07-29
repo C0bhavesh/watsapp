@@ -1,0 +1,33 @@
+<section class="section">
+  <div class="container">
+    <div class="section__heading">
+      <div>
+        <p class="eyebrow">{{ blog.title }}</p>
+        <h1>{{ blog.title }}</h1>
+      </div>
+    </div>
+
+    <div class="grid-cards grid-cards--four">
+      {%- for article in blog.articles -%}
+        <a class="collection-card" href="{{ article.url }}">
+          <div class="collection-card__media">
+            {%- if article.image != blank -%}
+              {{ article.image | image_url: width: 900 | image_tag: loading: 'lazy', alt: article.title }}
+            {%- endif -%}
+          </div>
+          <div class="collection-card__body">
+            <h3 class="collection-card__title">{{ article.title }}</h3>
+            <p class="collection-card__text">{{ article.excerpt_or_content | strip_html | truncate: 90 }}</p>
+          </div>
+        </a>
+      {%- endfor -%}
+    </div>
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "Blog",
+  "settings": []
+}
+{% endschema %}

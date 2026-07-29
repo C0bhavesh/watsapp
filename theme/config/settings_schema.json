@@ -1,0 +1,52 @@
+[
+  {
+    "name": "Colors",
+    "settings": [
+      {
+        "type": "color",
+        "id": "color_primary",
+        "label": "Primary",
+        "default": "#63182F"
+      },
+      {
+        "type": "color",
+        "id": "color_secondary",
+        "label": "Secondary",
+        "default": "#8A5F5A"
+      },
+      {
+        "type": "color",
+        "id": "color_tertiary",
+        "label": "Tertiary",
+        "default": "#B08D57"
+      },
+      {
+        "type": "color",
+        "id": "color_body_bg",
+        "label": "Body background",
+        "default": "#EDE2D0"
+      },
+      {
+        "type": "color",
+        "id": "color_body_color",
+        "label": "Body text",
+        "default": "#3D2F2A"
+      }
+    ]
+  },
+  {
+    "name": "General",
+    "settings": [
+      {
+        "type": "image_picker",
+        "id": "logo",
+        "label": "Logo"
+      },
+      {
+        "type": "image_picker",
+        "id": "favicon",
+        "label": "Favicon"
+      }
+    ]
+  }
+]

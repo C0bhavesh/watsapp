@@ -1,0 +1,23 @@
+{% doc %}
+Renders a minimal product card.
+
+@param {product} product - The product to display.
+{% enddoc %}
+
+<a class="product-card" href="{{ product.url }}">
+  <div class="product-card__media">
+    {%- if product.featured_image -%}
+      {{ product.featured_image | image_url: width: 900 | image_tag: loading: 'lazy', alt: product.title }}
+    {%- endif -%}
+  </div>
+  <div class="product-card__body">
+    <p class="product-card__vendor">{{ product.vendor }}</p>
+    <h3 class="product-card__title">{{ product.title }}</h3>
+    <div class="product-card__price">
+      <span>{{ product.price_min | money }}</span>
+      {%- if product.compare_at_price_max > product.price_max -%}
+        <s class="product-card__compare">{{ product.compare_at_price_max | money }}</s>
+      {%- endif -%}
+    </div>
+  </div>
+</a>

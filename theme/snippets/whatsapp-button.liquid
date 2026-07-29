@@ -1,0 +1,15 @@
+{% doc %}
+Renders the floating WhatsApp chat button.
+
+@param {string} [phone] - WhatsApp number in international format without the plus sign.
+@param {string} [message] - Prefilled chat message.
+{% enddoc %}
+
+{%- assign whatsapp_phone = phone | default: '8758871805' -%}
+{%- assign whatsapp_message = message | default: 'Hi TAVAS, I need help with an order.' -%}
+
+<a class="whatsapp-button" href="https://wa.me/91{{ whatsapp_phone }}?text={{ whatsapp_message | url_encode }}" aria-label="{{ 'general.whatsapp' | t }}" title="{{ 'general.whatsapp' | t }}" target="_blank" rel="noopener">
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="currentColor">
+    <path d="M20.52 3.48A11.92 11.92 0 0 0 12.06 0C5.42 0 .02 5.4 0 12.04c0 2.12.56 4.18 1.63 5.98L0 24l6.16-1.62a11.93 11.93 0 0 0 5.8 1.48h.01c6.64 0 12.04-5.4 12.04-12.04 0-3.21-1.25-6.23-3.49-8.34ZM12 21.82h-.01a9.92 9.92 0 0 1-5.05-1.39l-.36-.21-3.66.96.98-3.57-.23-.37a9.94 9.94 0 1 1 8.33 4.58Zm5.78-7.02c-.32-.16-1.9-.94-2.2-1.05-.3-.11-.52-.16-.74.16-.22.32-.85 1.05-1.04 1.27-.19.21-.38.24-.71.08-.32-.16-1.36-.5-2.6-1.58-.97-.87-1.63-1.95-1.82-2.27-.19-.32-.02-.49.14-.65.15-.15.32-.38.48-.56.16-.19.21-.32.32-.54.11-.22.05-.41-.03-.58-.08-.16-.74-1.77-1.01-2.42-.27-.64-.55-.55-.74-.56h-.63c-.22 0-.58.08-.89.41s-1.16 1.13-1.16 2.76c0 1.62 1.19 3.2 1.36 3.42.16.22 2.34 3.57 5.67 5.01.79.34 1.41.54 1.89.69.79.25 1.5.21 2.07.13.63-.09 1.9-.78 2.17-1.53.27-.76.27-1.41.19-1.53-.08-.13-.3-.21-.63-.37Z"/>
+  </svg>
+</a>

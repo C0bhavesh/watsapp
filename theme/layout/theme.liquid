@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="{{ request.locale.iso_code }}" class="{% if request.design_mode %}design-mode{% endif %}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="{{ settings.color_primary }}">
+  <link rel="canonical" href="{{ canonical_url }}">
+  <title>
+    {{ page_title }}
+    {%- if current_tags -%} - {{ current_tags | join: ', ' }}{%- endif -%}
+    {%- if current_page != 1 -%} - {{ 'general.page' | t }} {{ current_page }}{%- endif -%}
+    {%- unless page_title contains shop.name -%} - {{ shop.name }}{%- endunless -%}
+  </title>
+  {%- if page_description -%}
+    <meta name="description" content="{{ page_description | escape }}">
+  {%- endif -%}
+  {% render 'theme-styles' %}
+  {{ content_for_header }}
+</head>
+<body class="template-{{ request.page_type }}">
+  <a class="skip-link" href="#MainContent">{{ 'general.accessibility.skip_content' | t }}</a>
+  <div id="HeaderGroup">{% section 'header' %}</div>
+  <main id="MainContent" tabindex="-1">
+    {{ content_for_layout }}
+  </main>
+  <div id="FooterGroup">{% section 'footer' %}</div>
+  {% render 'whatsapp-button', phone: '8758871805', message: 'Hi TAVAS, I need help with a product or order.' %}
+</body>
+</html>

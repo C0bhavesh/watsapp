@@ -1,0 +1,136 @@
+/*
+ * ------------------------------------------------------------
+ * IMPORTANT: The contents of this file are auto-generated.
+ *
+ * This file may be updated by the Shopify admin theme editor
+ * or related systems. Please exercise caution as any changes
+ * made to this file may be overwritten.
+ * ------------------------------------------------------------
+ */
+{
+  "sections": {
+    "hero": {
+      "type": "main-hero",
+      "settings": {
+        "eyebrow": "Old money minimal",
+        "heading": "Everyday ethnic wear, made to feel refined.",
+        "text": "<p>Minimal silhouettes, soft tones and affordable pieces for daily wear.</p>",
+        "primary_label": "Shop new arrivals",
+        "primary_link": "/collections/new-arrivals",
+        "secondary_label": "Browse under 2500",
+        "secondary_link": "/collections/under-2500"
+      }
+    },
+    "categories": {
+      "type": "category-grid",
+      "blocks": {
+        "coord": {
+          "type": "card",
+          "settings": {
+            "label": "Collection",
+            "title": "Co-ord Set",
+            "text": "Easy everyday dressing.",
+            "link": "/collections/coord-set"
+          }
+        },
+        "kurta": {
+          "type": "card",
+          "settings": {
+            "label": "Collection",
+            "title": "Kurta Set",
+            "text": "Polished and practical.",
+            "link": "/collections/kurta-set"
+          }
+        },
+        "short": {
+          "type": "card",
+          "settings": {
+            "label": "Collection",
+            "title": "Trending Kurti",
+            "text": "Simple styles for daily wear.",
+            "link": "/collections/trending-kurti"
+          }
+        },
+        "new": {
+          "type": "card",
+          "settings": {
+            "label": "Edit",
+            "title": "New Arrivals",
+            "text": "Fresh pieces, first look.",
+            "link": "/collections/new-arrivals"
+          }
+        },
+        "value": {
+          "type": "card",
+          "settings": {
+            "label": "Price",
+            "title": "Under 2500",
+            "text": "Best value picks.",
+            "link": "/collections/under-2500"
+          }
+        }
+      },
+      "block_order": [
+        "coord",
+        "kurta",
+        "short",
+        "new",
+        "value"
+      ],
+      "settings": {
+        "eyebrow": "Shop by category",
+        "heading": "Simple categories, easy browsing.",
+        "text": "<p>Use these shortcuts to move straight into the styles people actually ask for.</p>"
+      }
+    },
+    "featured_new": {
+      "type": "featured-collection",
+      "settings": {
+        "eyebrow": "Featured drop",
+        "heading": "New arrivals",
+        "text": "<p>Focus on clean fits, accessible pricing and repeat wear.</p>",
+        "collection": "new-arrivals",
+        "button_label": "View collection",
+        "limit": 4
+      }
+    },
+    "featured_under": {
+      "type": "featured-collection",
+      "settings": {
+        "eyebrow": "Value edit",
+        "heading": "Under 2500",
+        "text": "<p>Affordable picks for the everyday cart.</p>",
+        "collection": "under-2500",
+        "button_label": "View collection",
+        "limit": 4
+      }
+    },
+    "props": {
+      "type": "value-props",
+      "settings": {
+        "eyebrow": "Why TAVAS",
+        "heading": "A quiet store that still sells.",
+        "text": "<p>Minimal design, helpful support and clear value.</p>",
+        "prop_1_label": "Style",
+        "prop_1_title": "Old money minimal",
+        "prop_1_text": "<p>Soft colours and clean layouts that feel premium without shouting.</p>",
+        "prop_2_label": "Price",
+        "prop_2_title": "Affordable everyday picks",
+        "prop_2_text": "<p>We keep the buying decision simple with value-focused edits.</p>",
+        "prop_3_label": "Support",
+        "prop_3_title": "WhatsApp help",
+        "prop_3_text": "<p>Fast support through a single chat button on every page.</p>",
+        "prop_4_label": "Range",
+        "prop_4_title": "Built for daily wear",
+        "prop_4_text": "<p>Pieces you can actually wear often, not just once.</p>"
+      }
+    }
+  },
+  "order": [
+    "hero",
+    "categories",
+    "featured_new",
+    "featured_under",
+    "props"
+  ]
+}

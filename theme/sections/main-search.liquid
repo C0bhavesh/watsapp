@@ -1,0 +1,40 @@
+<section class="section">
+  <div class="container">
+    <div class="section__heading">
+      <div>
+        <p class="eyebrow">{{ 'search.eyebrow' | t }}</p>
+        <h1>{{ 'search.heading' | t }}</h1>
+      </div>
+    </div>
+
+    <form action="{{ routes.search_url }}" method="get" class="main-content-card" style="display:grid;gap:1rem;margin-bottom:1.5rem">
+      <input type="hidden" name="type" value="product">
+      <div class="field">
+        <label for="SearchInput">{{ 'search.placeholder' | t }}</label>
+        <input id="SearchInput" type="search" name="q" value="{{ search.terms | escape }}" placeholder="{{ 'search.placeholder' | t }}">
+      </div>
+      <button class="button" type="submit">{{ 'search.submit' | t }}</button>
+    </form>
+
+    {%- if search.performed -%}
+      {%- if search.results_count > 0 -%}
+        <div class="product-grid">
+          {%- for item in search.results -%}
+            {%- if item.object_type == 'product' -%}
+              {% render 'product-card', product: item %}
+            {%- endif -%}
+          {%- endfor -%}
+        </div>
+      {%- else -%}
+        <div class="main-content-card">{{ 'search.empty' | t }}</div>
+      {%- endif -%}
+    {%- endif -%}
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "Search",
+  "settings": []
+}
+{% endschema %}

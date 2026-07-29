@@ -1,0 +1,70 @@
+/*
+ * ------------------------------------------------------------
+ * IMPORTANT: The contents of this file are auto-generated.
+ *
+ * This file may be updated by the Shopify admin language editor
+ * or related systems. Please exercise caution as any changes
+ * made to this file may be overwritten.
+ * ------------------------------------------------------------
+ */
+{
+  "general": {
+    "accessibility": {
+      "skip_content": "Skip to content"
+    },
+    "navigation": "Navigation",
+    "menu": "Menu",
+    "search": "Search",
+    "cart": "Cart",
+    "whatsapp": "Chat on WhatsApp",
+    "page": "Page"
+  },
+  "footer": {
+    "links": "Links",
+    "policies": "Policies",
+    "rights": "{{ year }} {{ shop_name }}. All rights reserved."
+  },
+  "featured_collection": {
+    "empty": "Choose a collection in the theme editor."
+  },
+  "product": {
+    "variant": "Variant",
+    "sold_out": "Sold out",
+    "quantity": "Quantity",
+    "add_to_cart": "Add to cart"
+  },
+  "collection_list": {
+    "eyebrow": "Collections",
+    "heading": "Browse all collections",
+    "products": "products"
+  },
+  "cart": {
+    "eyebrow": "Cart",
+    "heading": "Your bag",
+    "quantity": "Quantity",
+    "subtotal": "Subtotal",
+    "update": "Update cart",
+    "checkout": "Checkout",
+    "empty": "Your cart is empty.",
+    "continue": "Continue shopping"
+  },
+  "search": {
+    "eyebrow": "Search",
+    "heading": "Search the store",
+    "placeholder": "Search products",
+    "submit": "Search",
+    "empty": "No products matched your search."
+  },
+  "error": {
+    "eyebrow": "Not found",
+    "heading": "We could not find that page.",
+    "text": "Go back to the homepage and keep browsing.",
+    "button": "Back to home"
+  },
+  "password": {
+    "heading": "This store is opening soon.",
+    "text": "Enter the password to continue.",
+    "label": "Password",
+    "button": "Enter"
+  }
+}

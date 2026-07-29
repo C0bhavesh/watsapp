@@ -1,0 +1,144 @@
+<section class="section">
+  <div class="container">
+    <div class="section__heading">
+      <div>
+        {%- if section.settings.eyebrow != blank -%}
+          <p class="eyebrow">{{ section.settings.eyebrow }}</p>
+        {%- endif -%}
+        <h2>{{ section.settings.heading }}</h2>
+      </div>
+      <div class="rte">{{ section.settings.text }}</div>
+    </div>
+
+    <div class="grid-cards grid-cards--five">
+      {%- for block in section.blocks -%}
+        <a class="category-card" href="{{ block.settings.link }}" {{ block.shopify_attributes }}>
+          <div class="category-card__media">
+            {%- if block.settings.image != blank -%}
+              {{ block.settings.image | image_url: width: 900 | image_tag: loading: 'lazy', alt: block.settings.title }}
+            {%- endif -%}
+          </div>
+          <div class="category-card__body">
+            <p class="eyebrow">{{ block.settings.label }}</p>
+            <h3 class="category-card__title">{{ block.settings.title }}</h3>
+            <p class="category-card__text">{{ block.settings.text }}</p>
+          </div>
+        </a>
+      {%- endfor -%}
+    </div>
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "Category grid",
+  "settings": [
+    {
+      "type": "text",
+      "id": "eyebrow",
+      "label": "Eyebrow",
+      "default": "Shop by category"
+    },
+    {
+      "type": "text",
+      "id": "heading",
+      "label": "Heading",
+      "default": "Simple categories, easy browsing."
+    },
+    {
+      "type": "richtext",
+      "id": "text",
+      "label": "Text",
+      "default": "<p>Use these shortcuts to move straight into the styles people actually ask for.</p>"
+    }
+  ],
+  "blocks": [
+    {
+      "type": "card",
+      "name": "Card",
+      "settings": [
+        {
+          "type": "text",
+          "id": "label",
+          "label": "Label",
+          "default": "Collection"
+        },
+        {
+          "type": "text",
+          "id": "title",
+          "label": "Title",
+          "default": "Co-ord Set"
+        },
+        {
+          "type": "text",
+          "id": "text",
+          "label": "Text",
+          "default": "Easy everyday dressing."
+        },
+        {
+          "type": "url",
+          "id": "link",
+          "label": "Link"
+        },
+        {
+          "type": "image_picker",
+          "id": "image",
+          "label": "Image"
+        }
+      ]
+    }
+  ],
+  "presets": [
+    {
+      "name": "Category grid",
+      "blocks": [
+        {
+          "type": "card",
+          "settings": {
+            "label": "Collection",
+            "title": "Co-ord Set",
+            "text": "Easy everyday dressing.",
+            "link": "/collections/coord-set"
+          }
+        },
+        {
+          "type": "card",
+          "settings": {
+            "label": "Collection",
+            "title": "Kurta Set",
+            "text": "Polished and practical.",
+            "link": "/collections/kurta-set"
+          }
+        },
+        {
+          "type": "card",
+          "settings": {
+            "label": "Collection",
+            "title": "Trending Kurti",
+            "text": "Simple styles for daily wear.",
+            "link": "/collections/trending-kurti"
+          }
+        },
+        {
+          "type": "card",
+          "settings": {
+            "label": "Edit",
+            "title": "New Arrivals",
+            "text": "Fresh pieces, first look.",
+            "link": "/collections/new-arrivals"
+          }
+        },
+        {
+          "type": "card",
+          "settings": {
+            "label": "Price",
+            "title": "Under 2500",
+            "text": "Best value picks.",
+            "link": "/collections/under-2500"
+          }
+        }
+      ]
+    }
+  ]
+}
+{% endschema %}

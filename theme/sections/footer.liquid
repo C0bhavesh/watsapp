@@ -1,0 +1,90 @@
+<footer class="site-footer">
+  <div class="container">
+    <div class="site-footer__grid">
+      <div>
+        <p class="eyebrow">{{ shop.name }}</p>
+        <p>{{ section.settings.description }}</p>
+        {%- if section.settings.email != blank -%}
+          <p><a href="mailto:{{ section.settings.email }}">{{ section.settings.email }}</a></p>
+        {%- endif -%}
+        {%- if section.settings.phone != blank -%}
+          <p><a href="tel:{{ section.settings.phone | remove: ' ' }}">{{ section.settings.phone }}</a></p>
+        {%- endif -%}
+        {%- if section.settings.address != blank -%}
+          <p>{{ section.settings.address }}</p>
+        {%- endif -%}
+      </div>
+
+      <div>
+        <h2 class="site-footer__heading">{{ 'footer.links' | t }}</h2>
+        <nav class="site-footer__links" aria-label="{{ 'footer.links' | t }}">
+          {%- if section.settings.menu != blank -%}
+            {%- for link in section.settings.menu.links -%}
+              <a href="{{ link.url }}">{{ link.title }}</a>
+            {%- endfor -%}
+          {%- endif -%}
+        </nav>
+      </div>
+
+      <div>
+        <h2 class="site-footer__heading">{{ 'footer.policies' | t }}</h2>
+        <nav class="site-footer__links" aria-label="{{ 'footer.policies' | t }}">
+          <a href="/pages/privacy-policy">Privacy Policy</a>
+          <a href="/pages/shipping-policy">Shipping Policy</a>
+          <a href="/pages/refund-policy">Refund Policy</a>
+          <a href="/pages/return-policy">Return Policy</a>
+          <a href="/pages/exchange-policy">Exchange Policy</a>
+          <a href="/pages/terms-conditions">Terms &amp; Conditions</a>
+        </nav>
+      </div>
+    </div>
+
+    {%- assign current_year = 'now' | date: '%Y' -%}
+    <div class="site-footer__bottom">
+      {{ 'footer.rights' | t: year: current_year, shop_name: shop.name }}
+    </div>
+  </div>
+</footer>
+
+{% schema %}
+{
+  "name": "Footer",
+  "settings": [
+    {
+      "type": "textarea",
+      "id": "description",
+      "label": "Description",
+      "default": "Minimal ethnic and everyday wear made for effortless dressing."
+    },
+    {
+      "type": "link_list",
+      "id": "menu",
+      "label": "Links",
+      "default": "footer"
+    },
+    {
+      "type": "link_list",
+      "id": "policy_menu",
+      "label": "Policies"
+    },
+    {
+      "type": "text",
+      "id": "email",
+      "label": "Email",
+      "default": "support@thetavas.com"
+    },
+    {
+      "type": "text",
+      "id": "phone",
+      "label": "Phone",
+      "default": "+91 8758871805"
+    },
+    {
+      "type": "textarea",
+      "id": "address",
+      "label": "Address",
+      "default": "Corporate office address, Mumbai, India"
+    }
+  ]
+}
+{% endschema %}

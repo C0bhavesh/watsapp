@@ -1,0 +1,20 @@
+/*
+ * ------------------------------------------------------------
+ * IMPORTANT: The contents of this file are auto-generated.
+ *
+ * This file may be updated by the Shopify admin theme editor
+ * or related systems. Please exercise caution as any changes
+ * made to this file may be overwritten.
+ * ------------------------------------------------------------
+ */
+{
+  "current": {
+    "color_primary": "#63182F",
+    "color_secondary": "#8A5F5A",
+    "color_tertiary": "#B08D57",
+    "color_body_bg": "#EDE2D0",
+    "color_body_color": "#3D2F2A",
+    "logo": "",
+    "favicon": ""
+  }
+}

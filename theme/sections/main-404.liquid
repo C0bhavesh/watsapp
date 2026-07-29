@@ -1,0 +1,17 @@
+<section class="section">
+  <div class="container">
+    <div class="main-content-card">
+      <p class="eyebrow">{{ 'error.eyebrow' | t }}</p>
+      <h1>{{ 'error.heading' | t }}</h1>
+      <p>{{ 'error.text' | t }}</p>
+      <a class="button" href="{{ routes.root_url }}">{{ 'error.button' | t }}</a>
+    </div>
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "404",
+  "settings": []
+}
+{% endschema %}

@@ -1,0 +1,55 @@
+<section class="section">
+  <div class="container">
+    <div class="section__heading">
+      <div>
+        <p class="eyebrow">{{ 'cart.eyebrow' | t }}</p>
+        <h1>{{ 'cart.heading' | t }}</h1>
+      </div>
+    </div>
+
+    {%- if cart.item_count > 0 -%}
+      {% form 'cart', cart %}
+        <div class="grid-cards" style="gap:1.25rem">
+          {%- for item in cart.items -%}
+            <div class="main-content-card" style="display:grid;gap:1rem;grid-template-columns:120px minmax(0,1fr);align-items:center">
+              <div class="surface" style="aspect-ratio:4/5;overflow:hidden">
+                {%- if item.image -%}
+                  {{ item.image | image_url: width: 420 | image_tag: loading: 'lazy', alt: item.product.title }}
+                {%- endif -%}
+              </div>
+              <div>
+                <p class="eyebrow">{{ item.product.vendor }}</p>
+                <h2 style="margin-bottom:0.4rem;font-size:1.25rem">{{ item.product.title }}</h2>
+                <div class="field" style="max-width:8rem">
+                  <label for="Updates_{{ item.key }}">{{ 'cart.quantity' | t }}</label>
+                  <input id="Updates_{{ item.key }}" type="number" name="updates[]" value="{{ item.quantity }}" min="0">
+                </div>
+                <p style="margin-top:0.75rem">{{ item.final_line_price | money }}</p>
+              </div>
+            </div>
+          {%- endfor -%}
+        </div>
+
+        <div class="main-content-card" style="margin-top:1.25rem">
+          <p><strong>{{ 'cart.subtotal' | t }}:</strong> {{ cart.items_subtotal_price | money }}</p>
+          <div class="hero__actions">
+            <button class="button" type="submit" name="update">{{ 'cart.update' | t }}</button>
+            <button class="button button--secondary" type="submit" name="checkout">{{ 'cart.checkout' | t }}</button>
+          </div>
+        </div>
+      {% endform %}
+    {%- else -%}
+      <div class="main-content-card">
+        <p>{{ 'cart.empty' | t }}</p>
+        <a class="button" href="{{ routes.all_products_collection_url }}">{{ 'cart.continue' | t }}</a>
+      </div>
+    {%- endif -%}
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "Cart",
+  "settings": []
+}
+{% endschema %}

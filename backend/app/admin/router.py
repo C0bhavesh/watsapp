@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, ValidationError
 from starlette.responses import PlainTextResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.admin.auth import check_password, issue_token, verify_token
 from app.admin.controls import AdminControls, load_controls, save_controls
@@ -83,6 +83,55 @@ def _has_body_method(scope: Scope) -> bool:
     return isinstance(method, str) and method in _BODY_METHODS
 
 
+_ADMIN_SECURITY_HEADERS: tuple[tuple[bytes, bytes], ...] = (
+    (
+        b"content-security-policy",
+        b"default-src 'self'; style-src 'self' 'unsafe-inline'; "
+        b"base-uri 'none'; frame-ancestors 'none'",
+    ),
+    (b"x-frame-options", b"DENY"),
+    (b"x-content-type-options", b"nosniff"),
+    (b"referrer-policy", b"no-referrer"),
+    (b"cache-control", b"no-store"),
+)
+_ADMIN_SECURITY_HEADER_NAMES: frozenset[bytes] = frozenset(
+    name for name, _ in _ADMIN_SECURITY_HEADERS
+)
+
+
+class AdminSecurityHeadersMiddleware:
+    """Attach CSP + framing/sniffing/referrer/no-store headers to every ``/admin`` response.
+
+    Covers the JSON API and the static panel. The CSP matches the panel: ``default-src 'self'``
+    allows the same-origin ``admin.js``; ``style-src 'self' 'unsafe-inline'`` covers the inline
+    ``<style>`` block and ``style="..."`` attributes; scripts stay ``'self'`` only (no inline
+    ``'unsafe-inline'``). ``Cache-Control: no-store`` matters because the mappings/outbox views
+    return customer phone PII that must never be cached by a browser or proxy.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self._app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        path = scope.get("path", "")
+        if scope["type"] != "http" or not (isinstance(path, str) and path.startswith("/admin")):
+            await self._app(scope, receive, send)
+            return
+
+        async def send_with_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                kept = [
+                    (name, value)
+                    for name, value in (message.get("headers") or [])
+                    if name.lower() not in _ADMIN_SECURITY_HEADER_NAMES
+                ]
+                kept.extend(_ADMIN_SECURITY_HEADERS)
+                message["headers"] = kept
+            await send(message)
+
+        await self._app(scope, receive, send_with_headers)
+
+
 admin_router = APIRouter(prefix="/admin")
 
 
@@ -110,13 +159,14 @@ async def login(request: Request, req: LoginRequest, response: Response) -> dict
     if not check_password(req.password, settings.admin_password):
         raise HTTPException(status_code=401, detail="invalid password")
     token = issue_token(settings.app_master_key, _now())
-    forwarded_proto = request.headers.get("x-forwarded-proto", request.url.scheme)
     response.set_cookie(
         "admin_session",
         token,
         httponly=True,
         samesite="strict",
-        secure=forwarded_proto == "https",  # Vercel terminates TLS
+        # Secure derived from server config, never a client header: prod (TLS-terminated at
+        # Vercel) always forces Secure; dev/tests over http stay usable (app_env defaults to dev).
+        secure=settings.app_env == "prod",
         max_age=12 * 3600,  # keep in sync with issue_token ttl_hours
         path="/admin",
     )
@@ -149,7 +199,13 @@ async def put_knowledge(kind: str, payload: dict[str, object]) -> dict[str, bool
     try:
         content = validate_and_serialize(kind, payload)
     except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=exc.errors(include_url=False)) from exc
+        # Drop url/input/context: a custom field_validator's ValueError leaves a raw,
+        # non-JSON-serializable object in ctx["error"] (→ 500 on render); input may carry
+        # user data. Same three flags as the global RequestValidationError handler.
+        raise HTTPException(
+            status_code=422,
+            detail=exc.errors(include_url=False, include_input=False, include_context=False),
+        ) from exc
     repo = get_container().config_repo
     await repo.set_knowledge_override(kind, content)
     await repo.bump_config_int("knowledge_version")
@@ -201,11 +257,15 @@ _WA_ALL_FIELDS: tuple[str, ...] = WHATSAPP_SECRET_FIELDS + WHATSAPP_PLAIN_FIELDS
 
 
 class WhatsAppCredsRequest(BaseModel):
-    """All optional: blank/omitted keeps the stored value; first-time needs all six."""
+    """All optional: blank/omitted keeps the stored value; first-time needs all six.
 
-    phone_number_id: str | None = Field(default=None, max_length=64)
-    waba_id: str | None = Field(default=None, max_length=64)
-    api_version: str | None = Field(default=None, max_length=16)
+    ``phone_number_id``/``waba_id`` are digits-only and ``api_version`` is ``vNN.N`` so
+    path-like junk cannot be stored and interpolated into the Graph API URL.
+    """
+
+    phone_number_id: str | None = Field(default=None, max_length=64, pattern=r"^\d{5,20}$")
+    waba_id: str | None = Field(default=None, max_length=64, pattern=r"^\d{5,20}$")
+    api_version: str | None = Field(default=None, max_length=16, pattern=r"^v\d+\.\d+$")
     access_token: str | None = Field(default=None, max_length=1024)
     app_secret: str | None = Field(default=None, max_length=256)
     verify_token: str | None = Field(default=None, max_length=256)
@@ -255,6 +315,8 @@ _KIND_MESSAGES: dict[ProviderErrorKind, str] = {
         "The key looks valid, but the configured model is not available to this key."
     ),
     ProviderErrorKind.TIMEOUT: "Could not reach the provider to verify the key. Please retry.",
+    # Generic, never the raw litellm/vendor exception text (matches jobs/router.py posture).
+    ProviderErrorKind.UNKNOWN: "Could not verify the key with the provider.",
 }
 
 _RATE_LIMIT_SAVE_WARNING = (

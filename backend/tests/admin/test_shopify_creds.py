@@ -43,3 +43,11 @@ def test_secrets_never_echoed(client: TestClient) -> None:
     client.post("/admin/shopify", json={"client_id": "id1", "client_secret": "sec1"})
     body = client.get("/admin/shopify").text
     assert "id1" not in body and "sec1" not in body
+
+
+def test_over_long_client_secret_not_echoed(client: TestClient) -> None:
+    login(client)
+    secret = "S" * 300  # over the 256-char max_length
+    r = client.post("/admin/shopify", json={"client_id": "x", "client_secret": secret})
+    assert r.status_code == 422
+    assert secret not in r.text  # validation handler must not echo the submitted secret

@@ -1,12 +1,18 @@
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
-from app.admin.router import AdminBodyCapMiddleware, admin_router
+from app.admin.router import (
+    AdminBodyCapMiddleware,
+    AdminSecurityHeadersMiddleware,
+    admin_router,
+)
 from app.channels.shopify_webhook import router as shopify_webhook_router
 from app.channels.whatsapp import router as whatsapp_router
 from app.config.settings import Settings
@@ -40,9 +46,28 @@ app.include_router(shopify_webhook_router)
 app.include_router(whatsapp_router)
 app.include_router(jobs_router)
 
+_VALIDATION_ERROR_DROP = ("input", "url", "ctx")
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Return 422 WITHOUT echoing ``input`` — over-length creds (api_key/client_secret/
+    access_token/password) would otherwise be serialized verbatim into the error body
+    (browser devtools/HAR, proxies, error monitors). ``ctx`` is dropped too (may hold a
+    non-JSON-serializable ValueError from a custom validator); ``url`` is a noise doc link.
+
+    FastAPI's ``RequestValidationError.errors()`` takes no kwargs, so filter the dicts by hand.
+    """
+    detail = [
+        {k: v for k, v in err.items() if k not in _VALIDATION_ERROR_DROP} for err in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": detail})
+
+
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 app.add_middleware(AdminBodyCapMiddleware)
+app.add_middleware(AdminSecurityHeadersMiddleware)
 app.include_router(admin_router)
 app.mount(
     "/admin/ui",

@@ -45,26 +45,26 @@
 ## [admin] Auth — POST /admin/login, GET /admin/session
 - **Handler:** backend/app/admin/router.py (`login()`, `session()`)
 - **Request:** login `{"password": str≤256}`; session none (cookie only).
-- **Response:** login 503 if `ADMIN_PASSWORD` unset, 401 on wrong password, 429 over 5/min, 200 `{"ok": true}` + httponly `admin_session` cookie (SameSite=strict, Secure when x-forwarded-proto=https, path=/admin, 12h); session 401 without a valid cookie, 200 `{"ok": true}`.
-- **Notes:** password compared constant-time (`check_password`); empty stored password never grants access. Cookie is an HMAC-signed expiring token (`app_master_key`), verified by `require_admin`. `GET /admin/session` does NO DB access (a DB hiccup can't log anyone out). Rate limit via slowapi keyed on remote address. All `/admin` requests >1 MiB Content-Length → 413 (`AdminBodyCapMiddleware`, before body parse).
+- **Response:** login 503 if `ADMIN_PASSWORD` unset, 401 on wrong password, 429 over 5/min, 200 `{"ok": true}` + httponly `admin_session` cookie (SameSite=strict, **Secure when `settings.app_env == "prod"`** — server config, NOT the client `x-forwarded-proto`; path=/admin, 12h); session 401 without a valid cookie, 200 `{"ok": true}`.
+- **Notes:** password compared constant-time (`check_password`); empty stored password never grants access. Cookie is an HMAC-signed expiring token (`app_master_key`), verified by `require_admin`. `GET /admin/session` does NO DB access (a DB hiccup can't log anyone out). Rate limit via slowapi keyed on remote address. All `/admin` requests >1 MiB Content-Length → 413 (`AdminBodyCapMiddleware`, before body parse). **Security-review (2026-07-30):** (a) cookie Secure from `app_env`, prod always forces it; (b) EVERY `/admin` response (JSON API + `/admin/ui`) carries `Content-Security-Policy` / `X-Frame-Options: DENY` / `X-Content-Type-Options: nosniff` / `Referrer-Policy: no-referrer` / `Cache-Control: no-store` (`AdminSecurityHeadersMiddleware`); (c) a body-validation 422 (any route) NO LONGER echoes the submitted `input` — a global `RequestValidationError` handler strips `input`/`url`/`ctx`, so over-length creds (password/api_key/client_secret/access_token) never reach the error body.
 
 ## [admin] Credentials — GET|POST /admin/shopify, GET|POST /admin/whatsapp
 - **Handler:** backend/app/admin/router.py (`shopify_status`/`set_shopify`, `whatsapp_status`/`set_whatsapp`)
 - **Request:** shopify `{"client_id"?, "client_secret"?}` (≤256); whatsapp `{"phone_number_id"?, "waba_id"?, "api_version"?, "access_token"?, "app_secret"?, "verify_token"?}`.
 - **Response:** shopify GET `{"configured": bool}` (both secrets set); whatsapp GET `{"configured": bool, "phone_number_id", "waba_id", "api_version"}` (NON-secret fields only); POST 422 if first-time setup is missing a required field, 200 `{"ok": true}`.
-- **Notes:** require_admin (401). **Secrets are NEVER echoed** — GETs return status/non-secret only. Partial update: blank/omitted keeps the stored value; first-time setup requires the full set. Secrets Fernet-encrypted at rest under `shopify:{client_id,client_secret}` / `whatsapp:{access_token,app_secret,verify_token}` (secret) + `whatsapp:{phone_number_id,waba_id,api_version}` (plain).
+- **Notes:** require_admin (401). **Secrets are NEVER echoed** — GETs return status/non-secret only. Partial update: blank/omitted keeps the stored value; first-time setup requires the full set. Secrets Fernet-encrypted at rest under `shopify:{client_id,client_secret}` / `whatsapp:{access_token,app_secret,verify_token}` (secret) + `whatsapp:{phone_number_id,waba_id,api_version}` (plain). **Format validation (security-review 2026-07-30):** whatsapp `phone_number_id`/`waba_id` digits-only (`^\d{5,20}$`), `api_version` `^v\d+\.\d+$` — a bad value → 422 (input not echoed), so path-like junk can't be interpolated into the Graph API URL.
 
 ## [admin] LLM provider — GET /admin/providers, GET /admin/config, POST /admin/provider
 - **Handler:** backend/app/admin/router.py (`providers`, `provider_config`, `set_provider`)
 - **Request:** provider `{"provider": str≤64, "api_key"?: str≤512}`.
 - **Response:** providers `[{"key","label","default_model"}]`; config `{"configured": bool, "provider": str|null}` (NEVER the key); provider 400 unknown provider / missing key / verification failed, 200 `{"ok": true}` (or `{"ok": true, "warning": ...}` when a rate-limited-but-authenticated key is accepted).
-- **Notes:** require_admin (401). **Verify-key-before-save** — the key is checked against the provider (LiteLLMProvider) BEFORE it is Fernet-encrypted to `llm:api_key:{provider}` and `llm:active_provider` (plain) is set. Verify never leaks the key; on failure nothing is persisted. Kind→message mapping gives a friendly reason (auth/quota/model/timeout).
+- **Notes:** require_admin (401). **Verify-key-before-save** — the key is checked against the provider (LiteLLMProvider) BEFORE it is Fernet-encrypted to `llm:api_key:{provider}` and `llm:active_provider` (plain) is set. Verify never leaks the key; on failure nothing is persisted. Kind→message mapping gives a friendly reason (auth/quota/model/timeout); **`UNKNOWN` kind → generic "Could not verify the key with the provider." (security-review 2026-07-30), never the raw litellm/vendor exception text**.
 
 ## [admin] Knowledge — GET|PUT /admin/knowledge/{kind}
 - **Handler:** backend/app/admin/router.py (`get_knowledge`, `put_knowledge`)
 - **Request:** kind ∈ {brand_voice, faq, business, patterns}; PUT body is kind-specific (brand_voice `{content}`; faq `{items:[{q,a}]}`; patterns `{items:[{pattern,examples,reply}]}`; business `{store_name,website,...,extra}`).
-- **Response:** GET `{"kind", "content"}` (DB override else seed file, raw string); PUT 400 unknown kind, 422 malformed body, 200 `{"ok": true}`.
-- **Notes:** require_admin (401). Validated by `validate_and_serialize` into cafe-loader-compatible stored formats (faq/patterns JSON list, business JSON object). Each PUT stores the override in `knowledge_overrides` and bumps `knowledge_version` (Phase 4 cache invalidation).
+- **Response:** GET `{"kind", "content"}` (DB override else seed file, raw string); PUT 400 unknown kind, 422 malformed body (incl. business `extra` over-length key/value and patterns over-length example — **422 not 500 after security-review 2026-07-30**), 200 `{"ok": true}`.
+- **Notes:** require_admin (401). Validated by `validate_and_serialize` into cafe-loader-compatible stored formats (faq/patterns JSON list, business JSON object). Each PUT stores the override in `knowledge_overrides` and bumps `knowledge_version` (Phase 4 cache invalidation). A custom field_validator's `ValueError` lands in pydantic `ctx` (non-serializable); the handler drops url/input/context so the response is a clean 422.
 
 ## [admin] Controls — GET|PUT /admin/controls
 - **Handler:** backend/app/admin/router.py (`get_controls`, `put_controls`)
@@ -82,7 +82,7 @@
 - **Handler:** backend/app/main.py (`StaticFiles(directory=app/admin/static, html=True)` mounted at `/admin/ui`)
 - **Request:** browser GET.
 - **Response:** `index.html` + `admin.js` (vanilla, no build step); 200 text/html.
-- **Notes:** login screen → panel (Shopify, WhatsApp, LLM, Knowledge ×4, Controls, Views). Uses the `/admin/*` JSON API with the session cookie (`credentials: same-origin`). No secrets ever rendered — status badges only.
+- **Notes:** login screen → panel (Shopify, WhatsApp, LLM, Knowledge ×4, Controls, Views). Uses the `/admin/*` JSON API with the session cookie (`credentials: same-origin`). No secrets ever rendered — status badges only. Carries the `AdminSecurityHeadersMiddleware` headers (CSP etc.); the CSP is panel-compatible — external same-origin `admin.js` via `default-src 'self'`, inline `<style>`/`style="..."` via `style-src 'unsafe-inline'`, no inline scripts.
 
 ## [external] Shopify Admin token endpoint (client_credentials)
 - **Caller:** backend/app/shopify/token_manager.py (`TokenManager._grant`)

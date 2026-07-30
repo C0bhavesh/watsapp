@@ -1,4 +1,9 @@
+import asyncio
+import json
+
 from fastapi.testclient import TestClient
+
+from app.deps import get_container
 
 
 def login(client: TestClient) -> None:
@@ -57,6 +62,27 @@ def test_put_rejects_bad_values(client: TestClient) -> None:
         ).status_code
         == 422
     )
+
+
+def test_over_long_tag_rejected(client: TestClient) -> None:
+    login(client)
+    doc = {"tags": {"pending": ["x" * 100], "confirmed": [], "cancelled": []}}
+    # Shopify caps tags at 255 chars; our per-tag cap rejects an over-long tag before it
+    # could fail at runtime inside tagsAdd.
+    assert client.put("/admin/controls", json=doc).status_code == 422
+
+
+def test_schema_invalid_stored_value_returns_defaults_not_500(client: TestClient) -> None:
+    login(client)
+
+    async def _seed_bad() -> None:
+        # Valid JSON but fails the model (some other writer path) — GET must not 500.
+        await get_container().config_repo.set("reveal_fields", json.dumps(["phone"]))
+
+    asyncio.run(_seed_bad())
+    r = client.get("/admin/controls")
+    assert r.status_code == 200
+    assert r.json()["reveal_fields"] == ["order_number", "email", "status"]
 
 
 def test_requires_auth(client: TestClient) -> None:

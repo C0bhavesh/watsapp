@@ -6,6 +6,7 @@ validated into these models before serialization.
 """
 
 import json
+from typing import Annotated
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -25,7 +26,8 @@ class FaqBody(BaseModel):
 
 class PatternItem(BaseModel):
     pattern: str = Field(min_length=1, max_length=100)
-    examples: list[str] = Field(min_length=1, max_length=20)
+    # Per-element cap so one giant example cannot inflate the Phase-4 assembled prompt.
+    examples: list[Annotated[str, Field(max_length=200)]] = Field(min_length=1, max_length=20)
     reply: str = Field(min_length=1, max_length=2000)
 
 

@@ -6,9 +6,9 @@ eligibility, jobs, future outbox drain) keep reading the keys they already use.
 
 import json
 import re
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.config.service import ConfigService
 
@@ -16,11 +16,15 @@ _E164_RE = re.compile(r"^\+\d{7,15}$")
 
 REVEAL_ALLOWED: tuple[str, ...] = ("order_number", "email", "status")
 
+# Per-tag cap: Shopify tags max out at 255 chars, so an over-long tag would fail at runtime
+# inside tagsAdd — reject it at the edge instead.
+_Tag = Annotated[str, Field(max_length=64)]
+
 
 class TagLists(BaseModel):
-    pending: list[str] = Field(default_factory=list, max_length=10)
-    confirmed: list[str] = Field(default_factory=list, max_length=10)
-    cancelled: list[str] = Field(default_factory=list, max_length=10)
+    pending: list[_Tag] = Field(default_factory=list, max_length=10)
+    confirmed: list[_Tag] = Field(default_factory=list, max_length=10)
+    cancelled: list[_Tag] = Field(default_factory=list, max_length=10)
 
 
 class AdminControls(BaseModel):
@@ -100,7 +104,12 @@ async def load_controls(config: ConfigService) -> AdminControls:
                 data[key] = json.loads(raw)
             except ValueError:
                 pass  # corrupt stored value -> default (never crash the panel)
-    return AdminControls.model_validate(data)
+    try:
+        return AdminControls.model_validate(data)
+    except ValidationError:
+        # Valid JSON but schema-invalid (e.g. an out-of-vocabulary reveal field written by
+        # another path) must not brick the panel — fall back to all defaults.
+        return AdminControls()
 
 
 async def save_controls(config: ConfigService, controls: AdminControls) -> None:

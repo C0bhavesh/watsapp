@@ -73,3 +73,27 @@ def test_put_business_extra_dict_capped_at_50(client: TestClient) -> None:
     assert client.put("/admin/knowledge/business", json=over).status_code == 422
     ok = {"extra": {f"k{i}": "v" for i in range(50)}}
     assert client.put("/admin/knowledge/business", json=ok).status_code == 200
+
+
+def test_put_business_extra_over_long_value_is_422_not_500(client: TestClient) -> None:
+    login(client)
+    # One over-length VALUE trips BusinessBody._cap_extra_entry_lengths — a custom
+    # field_validator raising ValueError, which leaves a raw ValueError in ctx["error"].
+    # errors() must drop that non-serializable ctx so the response is a clean 422, not a
+    # 500 (json.dumps TypeError while rendering the HTTPException detail).
+    r = client.put("/admin/knowledge/business", json={"extra": {"k": "v" * 3000}})
+    assert r.status_code == 422
+
+
+def test_put_business_extra_over_long_key_is_422_not_500(client: TestClient) -> None:
+    login(client)
+    r = client.put("/admin/knowledge/business", json={"extra": {"x" * 300: "v"}})
+    assert r.status_code == 422
+
+
+def test_put_patterns_rejects_over_long_example(client: TestClient) -> None:
+    login(client)
+    # A single 300-char example must be rejected (per-element cap), else a huge example
+    # inflates the Phase-4 assembled prompt (DoS surface).
+    bad = {"items": [{"pattern": "p", "examples": ["x" * 300], "reply": "r"}]}
+    assert client.put("/admin/knowledge/patterns", json=bad).status_code == 422

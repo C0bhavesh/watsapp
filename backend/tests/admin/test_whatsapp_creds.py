@@ -11,8 +11,8 @@ def login(client: TestClient) -> None:
 
 
 FULL = {
-    "phone_number_id": "111",
-    "waba_id": "222",
+    "phone_number_id": "123456789012345",
+    "waba_id": "234567890123456",
     "api_version": "v23.0",
     "access_token": "tokenA",
     "app_secret": "secretA",
@@ -26,9 +26,16 @@ def test_requires_auth(client: TestClient) -> None:
 
 def test_first_time_requires_all_six(client: TestClient) -> None:
     login(client)
-    r = client.post("/admin/whatsapp", json={"phone_number_id": "111"})
+    r = client.post("/admin/whatsapp", json={"phone_number_id": "123456789012345"})
     assert r.status_code == 422
     assert "waba_id" in r.text  # names the missing fields
+
+
+def test_rejects_path_like_phone_number_id(client: TestClient) -> None:
+    login(client)
+    # A non-digit id (path-like junk) must not be stored and interpolated into the Graph URL.
+    bad = {**FULL, "phone_number_id": "../../evil"}
+    assert client.post("/admin/whatsapp", json=bad).status_code == 422
 
 
 def test_save_status_and_partial_update(client: TestClient) -> None:
@@ -37,8 +44,8 @@ def test_save_status_and_partial_update(client: TestClient) -> None:
     status = client.get("/admin/whatsapp").json()
     assert status == {
         "configured": True,
-        "phone_number_id": "111",
-        "waba_id": "222",
+        "phone_number_id": "123456789012345",
+        "waba_id": "234567890123456",
         "api_version": "v23.0",
     }
     # rotate ONE secret; everything else survives

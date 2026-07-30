@@ -65,3 +65,27 @@ def test_missing_api_key_400(client: TestClient) -> None:
     login(client)
     r = client.post("/admin/provider", json={"provider": "gemini", "api_key": ""})
     assert r.status_code == 400
+
+
+def test_over_long_api_key_not_echoed(client: TestClient) -> None:
+    login(client)
+    secret = "A" * 600  # over the 512-char max_length
+    r = client.post("/admin/provider", json={"provider": "gemini", "api_key": secret})
+    assert r.status_code == 422
+    assert secret not in r.text  # validation handler must not echo the submitted key
+
+
+def test_unknown_error_kind_returns_generic_message(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    login(client)
+    leak = "litellm-internal-detail-should-not-surface"
+
+    async def fake_verify(*args: object, **kwargs: object) -> VerifyResult:
+        return VerifyResult(ok=False, error=leak, kind=ProviderErrorKind.UNKNOWN)
+
+    monkeypatch.setattr("app.admin.router.verify_key", fake_verify)
+    r = client.post("/admin/provider", json={"provider": "gemini", "api_key": "k"})
+    assert r.status_code == 400
+    assert leak not in r.text  # never forward raw provider/internal exception text
+    assert r.json()["detail"] == "Could not verify the key with the provider."

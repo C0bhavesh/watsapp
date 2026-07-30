@@ -60,6 +60,51 @@ def test_body_cap_413(client: TestClient) -> None:
     assert r.status_code == 413
 
 
+def test_login_cookie_not_secure_in_dev(client: TestClient) -> None:
+    r = client.post("/admin/login", json={"password": "test-admin-pass"})
+    assert r.status_code == 200
+    set_cookie = r.headers.get("set-cookie", "")
+    assert "admin_session=" in set_cookie
+    # app_env defaults to "dev" → cookie is NOT Secure so local http dev/tests keep working.
+    assert "Secure" not in set_cookie
+
+
+def test_login_cookie_secure_in_prod_ignores_forwarded_proto(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_MASTER_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("ADMIN_PASSWORD", "test-admin-pass")
+    monkeypatch.setenv("APP_ENV", "prod")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    from app.deps import reset_container
+    from app.ratelimit import limiter
+
+    reset_container()
+    limiter.reset()
+    from app.main import app
+
+    with TestClient(app) as c:
+        # A client-supplied x-forwarded-proto: http must NOT downgrade the cookie — the
+        # Secure flag is derived from server config (app_env), never a client header.
+        r = c.post(
+            "/admin/login",
+            json={"password": "test-admin-pass"},
+            headers={"x-forwarded-proto": "http"},
+        )
+        assert r.status_code == 200
+        assert "Secure" in r.headers.get("set-cookie", "")
+    reset_container()
+
+
+def test_login_over_long_password_not_echoed(client: TestClient) -> None:
+    secret = "P" * 300  # over the 256-char max_length
+    r = client.post("/admin/login", json={"password": secret})
+    assert r.status_code == 422
+    # The global RequestValidationError handler drops `input`, so the submitted password
+    # never lands in the 422 body (browser devtools/HAR, proxies, error monitors).
+    assert secret not in r.text
+
+
 def test_body_cap_chunked_no_length_411(client: TestClient) -> None:
     # A generator body makes httpx use chunked transfer-encoding with NO Content-Length,
     # which would bypass a header-only size cap pre-auth. Middleware must 411 (length required).

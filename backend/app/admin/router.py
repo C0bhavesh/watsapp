@@ -117,3 +117,44 @@ async def put_knowledge(kind: str, payload: dict[str, object]) -> dict[str, bool
     await repo.set_knowledge_override(kind, content)
     await repo.bump_config_int("knowledge_version")
     return {"ok": True}
+
+
+class ShopifyCredsRequest(BaseModel):
+    """Blank/omitted field = keep the stored value (first-time setup requires both)."""
+
+    client_id: str | None = Field(default=None, max_length=256)
+    client_secret: str | None = Field(default=None, max_length=256)
+
+
+def _clean(v: str | None) -> str | None:
+    if v is None:
+        return None
+    stripped = v.strip()
+    return stripped if stripped else None
+
+
+@admin_router.get("/shopify", dependencies=[Depends(require_admin)])
+async def shopify_status() -> dict[str, bool]:
+    cfg = get_container().config
+    has_id = await cfg.get_secret("shopify:client_id") is not None
+    has_secret = await cfg.get_secret("shopify:client_secret") is not None
+    return {"configured": has_id and has_secret}
+
+
+@admin_router.post("/shopify", dependencies=[Depends(require_admin)])
+async def set_shopify(req: ShopifyCredsRequest) -> dict[str, bool]:
+    cfg = get_container().config
+    client_id, client_secret = _clean(req.client_id), _clean(req.client_secret)
+    existing_id = await cfg.get_secret("shopify:client_id")
+    existing_secret = await cfg.get_secret("shopify:client_secret")
+    if (existing_id is None and client_id is None) or (
+        existing_secret is None and client_secret is None
+    ):
+        raise HTTPException(
+            status_code=422, detail="first-time setup requires client_id and client_secret"
+        )
+    if client_id is not None:
+        await cfg.set_secret("shopify:client_id", client_id)
+    if client_secret is not None:
+        await cfg.set_secret("shopify:client_secret", client_secret)
+    return {"ok": True}

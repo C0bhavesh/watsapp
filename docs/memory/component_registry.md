@@ -16,7 +16,7 @@
 ## Settings
 - **File:** backend/app/config/settings.py
 - **Purpose:** pydantic-settings config; fail-fast on missing `APP_MASTER_KEY`.
-- **Public API:** `Settings(BaseSettings)` — `app_master_key: str` (required, from env/.env), `database_url: str = ""`, `shop_domain: str = "thetavas.myshopify.com"`, `shopify_api_version: str = "2026-07"`, `request_timeout_seconds: float = 20.0`, `app_env: str = "dev"`, `cron_secret: str = ""` (env `CRON_SECRET`; empty disables the jobs endpoint).
+- **Public API:** `Settings(BaseSettings)` — `app_master_key: str` (required, from env/.env), `database_url: str = ""`, `shop_domain: str = "thetavas.myshopify.com"`, `shopify_api_version: str = "2026-07"`, `request_timeout_seconds: float = 20.0`, `app_env: str = "dev"`, `cron_secret: str = ""` (env `CRON_SECRET`; empty disables the jobs endpoint), `admin_password: str = ""` (env `ADMIN_PASSWORD`; empty → admin login returns 503, never grants access — Rule 1 third env exception, approved 2026-07-30).
 - **Used in:** deps.Container, TokenManager, ShopifyClient, scripts/smoke_shopify.
 - **Notes:** Shopify API version is read ONLY from `shopify_api_version` — never hardcode in URLs. Calling `Settings()` with no args needs `# type: ignore[call-arg]` (mypy strict; value loaded from env at runtime).
 
@@ -30,15 +30,15 @@
 ## ConfigRepo (Protocol) + InMemoryConfigRepo + PostgresConfigRepo
 - **File:** backend/app/store/base.py (Protocol), backend/app/store/memory.py (in-memory), backend/app/store/postgres.py (Postgres)
 - **Purpose:** async key→value string store for config/secrets.
-- **Public API:** `ConfigRepo.get(key) -> str | None`, `.set(key, value) -> None`; `InMemoryConfigRepo()` (dict-backed); `PostgresConfigRepo(pool: LazyPool)` (UPSERT into `app_config` on set).
-- **Used in:** ConfigService, deps.Container.
-- **Notes:** `core` depends on the Protocol, never the concrete repo. deps picks Postgres when `database_url` is set, else in-memory.
+- **Public API:** `ConfigRepo.get(key) -> str | None`, `.set(key, value) -> None`; knowledge-override methods (Phase 3.5): `.get_knowledge_override(kind) -> str | None`, `.set_knowledge_override(kind, content) -> None`, `.get_knowledge_overrides(kinds: list[str]) -> dict[str, str | None]`, `.bump_config_int(key) -> None`; `InMemoryConfigRepo()` (dict-backed); `PostgresConfigRepo(pool: LazyPool)` (UPSERT into `app_config` on set).
+- **Used in:** ConfigService, deps.Container, knowledge.KnowledgeLoader, admin.router (knowledge PUT).
+- **Notes:** `core` depends on the Protocol, never the concrete repo. deps picks Postgres when `database_url` is set, else in-memory. Knowledge overrides live in a separate `knowledge_overrides(kind PK, content, updated_at)` table (survives Vercel deploys, unlike seed files); `bump_config_int` writes a decimal-int string to `app_config` (`knowledge_version` → cache invalidation), created at "1" then `+1` (Postgres uses `(value::bigint + 1)::text`).
 
 ## IngestStore (Protocol) + InMemoryIngestStore + PostgresIngestStore + dataclasses
 - **File:** backend/app/store/base.py (Protocol + dataclasses), backend/app/store/memory.py (in-memory), backend/app/store/postgres.py (Postgres)
 - **Purpose:** ADR-001 atomic order ingest — dedupe (processed_webhooks) + mapping upsert (order_mappings) + outbox row (outbound_messages) in ONE transaction.
-- **Public API:** `IngestStore.ingest_order_created(webhook_id, topic, mapping: MappingUpsert, outbound: OutboundDraft | None) -> IngestResult`. Frozen dataclasses: `MappingUpsert(order_gid, order_name, order_number_int, phone_e164, customer_name, email, language, financial_status_at_create, is_cod)`; `OutboundDraft(dedupe_key, kind, phone_e164, payload_json)`; `IngestResult(duplicate, queued)`. In-memory exposes `.webhooks/.mappings/.outbound` for assertions.
-- **Used in:** channels.shopify_webhook, deps.Container.
+- **Public API:** `IngestStore.ingest_order_created(webhook_id, topic, mapping: MappingUpsert, outbound: OutboundDraft | None) -> IngestResult`; read-only views (Phase 3.5): `.recent_mappings(limit) -> list[MappingView]`, `.recent_outbound(limit) -> list[OutboundView]`. Frozen dataclasses: `MappingUpsert(order_gid, order_name, order_number_int, phone_e164, customer_name, email, language, financial_status_at_create, is_cod)`; `OutboundDraft(dedupe_key, kind, phone_e164, payload_json)`; `IngestResult(duplicate, queued)`; `MappingView(order_gid, order_name, phone_e164, status, is_cod, created_at)`; `OutboundView(dedupe_key, state, kind, phone_e164, attempts, last_error_code, created_at)`. In-memory exposes `.webhooks/.mappings/.outbound` for assertions.
+- **Used in:** channels.shopify_webhook, deps.Container, admin.router (mappings/outbox views).
 - **Notes:** duplicate `(webhook_id, topic)` → `duplicate=True, queued=False` (short-circuit). `dedupe_key` UNIQUE (`order_created:{order_gid}`) = one push per order ever; re-seen dedupe_key → `queued=False`. `outbound=None` (ineligible/backfill) maps without queueing. Postgres detects rowcount via command-tag `.endswith("0")`.
 
 ## LazyPool (asyncpg)
@@ -170,9 +170,9 @@
 ## FastAPI app + GET /health + routers
 - **File:** backend/app/main.py (app), backend/api/index.py (Vercel ASGI entrypoint)
 - **Purpose:** deployable FastAPI app; liveness probe; mounts the Phase 2 routers.
-- **Public API:** `app = FastAPI(...)`; `GET /health` → `{"status": "ok", "service": "thetavas-order-bot"}`. Includes `shopify_webhook_router`, `whatsapp_router`, and `jobs_router`.
+- **Public API:** `app = FastAPI(...)`; `GET /health` → `{"status": "ok", "service": "thetavas-order-bot"}`. Includes `shopify_webhook_router`, `whatsapp_router`, `jobs_router`, and `admin_router`; registers slowapi (`app.state.limiter` + `RateLimitExceeded` handler), `AdminBodyCapMiddleware`, and mounts the static admin panel at `/admin/ui` (`StaticFiles(..., html=True)`).
 - **Used in:** Vercel deploy (`vercel.json`, region bom1).
-- **Notes:** entrypoint `api/index.py` re-exports `app`; all routes → `api/index.py`. Phase 1 security fix: OpenAPI/docs/redoc are DISABLED in prod — `_docs_enabled()` reads `Settings().app_env` (docs off when `app_env == "prod"`, default on otherwise / on missing key). Preserve this construction when adding routers.
+- **Notes:** entrypoint `api/index.py` re-exports `app`; all routes → `api/index.py`. Phase 1 security fix: OpenAPI/docs/redoc are DISABLED in prod — `_docs_enabled()` reads `Settings().app_env` (docs off when `app_env == "prod"`, default on otherwise / on missing key). Preserve this construction when adding routers. `AdminBodyCapMiddleware` must be added at module import (before first request) — it 413s oversized `/admin` requests by Content-Length before FastAPI parses the body.
 
 ## Jobs dispatcher (internal, authenticated)
 - **File:** backend/app/jobs/router.py
@@ -180,3 +180,59 @@
 - **Public API:** `router` — `GET|POST /internal/jobs/{name}`; `JOBS: dict[str, JobFn]` registry; `JobFn = Callable[[Container], Awaitable[dict[str, Any]]]`. Registered: `ensure_subscription` (reads config `public_base_url`, calls subscriptions.ensure_subscription against `{base}/webhooks/shopify`).
 - **Used in:** main.app, Vercel cron (future).
 - **Notes:** `settings.cron_secret` empty → 503 (never an open endpoint, F11); header `X-Cron-Secret` constant-time compared → 403 on mismatch/missing; unknown job → 404; `ensure_subscription` with no `public_base_url` → 200 `{"error": "public_base_url not configured"}`. A job raising any `ShopifyError` (base class) → 502 `{"job": name, "error": "job failed"}` — exception text is NEVER echoed (may carry vendor detail); non-`ShopifyError` exceptions still propagate as raw 500.
+
+## Rate limiter (slowapi)
+- **File:** backend/app/ratelimit.py
+- **Purpose:** shared slowapi `Limiter` used to rate-limit the admin login.
+- **Public API:** `limiter: Limiter = Limiter(key_func=get_remote_address)`.
+- **Used in:** admin.router (`@limiter.limit("5/minute")` on POST /admin/login), main.app (`app.state.limiter` + `RateLimitExceeded` → 429 handler). `limiter.reset()` clears counters (tests).
+- **Notes:** NEW dep `slowapi>=0.1.9` (untyped → `[[tool.mypy.overrides]] module="slowapi.*"`). Keyed by remote address; per-process in-memory storage (fine for one Vercel instance; not distributed).
+
+## Admin auth primitives
+- **File:** backend/app/admin/auth.py
+- **Purpose:** signed expiring session token + constant-time password check (cafe-verbatim, dependency-free).
+- **Public API:** `issue_token(secret, now: datetime, ttl_hours=12) -> str` (format `<unix_exp>.<b64url_hmac_sha256>`; empty secret → `ValueError`); `verify_token(secret, token, now) -> bool` (False, never raises, on empty secret / malformed / bad sig / expiry); `check_password(supplied, expected) -> bool` (constant-time; empty `expected` → False, fail closed).
+- **Used in:** admin.router (login issues, require_admin verifies).
+- **Notes:** the session token is signed with `settings.app_master_key` (not `admin_password`) so rotating the display password doesn't need re-keying. `verify_token` fails closed on every error path.
+
+## Admin JSON API router
+- **File:** backend/app/admin/router.py
+- **Purpose:** the whole `/admin/*` JSON API — auth, creds (Shopify/WhatsApp/LLM), knowledge, controls, read-only views.
+- **Public API:** `admin_router: APIRouter` (prefix `/admin`); `require_admin(admin_session: str | None = Cookie())` dependency (401 unless the session cookie verifies); `AdminBodyCapMiddleware` (ASGI, 413 on oversized `/admin` bodies). Endpoints: `POST /login` (rate-limited 5/min, 503 if unset password, 401 on wrong, sets httponly `admin_session` cookie), `GET /session`, `GET|POST /shopify`, `GET|POST /whatsapp`, `GET /providers`, `GET /config`, `POST /provider`, `GET|PUT /knowledge/{kind}`, `GET|PUT /controls`, `GET /mappings`, `GET /outbox`.
+- **Used in:** main.app, static panel (`/admin/ui`).
+- **Notes:** every route except `/login` depends on `require_admin`. Secrets are NEVER echoed — GET status routes return `{"configured": bool}` + non-secret fields only. Creds POSTs are partial-update (blank/omitted keeps the stored value; first-time setup requires the full set). `_clean(v)` trims blank→None. LLM `POST /provider` verifies the key with the provider BEFORE persisting (verify-key-before-save). Provider verify is monkeypatchable at `app.admin.router.verify_key`.
+
+## AdminBodyCapMiddleware
+- **File:** backend/app/admin/router.py
+- **Purpose:** reject oversized `/admin` requests (>1 MiB Content-Length) with 413 at the ASGI layer, before FastAPI parses the body.
+- **Public API:** `AdminBodyCapMiddleware(app, max_body=1_048_576)` (pure ASGI); registered via `app.add_middleware(AdminBodyCapMiddleware)`.
+- **Used in:** main.app.
+- **Notes:** a router-level dependency CANNOT do this — FastAPI parses (and may 422 on) the JSON body before path dependencies run, so an oversized invalid body would 422 before any cap check. Enforcing on Content-Length at the ASGI layer matches the webhook edges' posture and returns 413 first. Only inspects `/admin` paths.
+
+## Admin knowledge validation models
+- **File:** backend/app/admin/knowledge_models.py
+- **Purpose:** kind-specific Pydantic validation for knowledge PUTs; serialize to the cafe-loader-compatible stored format.
+- **Public API:** `validate_and_serialize(kind, payload: dict[str, object]) -> str` (raises `pydantic.ValidationError` → router maps to 422; unknown kind → `KeyError`, guarded upstream). Models `BrandVoiceBody`, `FaqBody`/`FaqItem`, `PatternsBody`/`PatternItem`, `BusinessBody`.
+- **Used in:** admin.router (PUT /knowledge/{kind}).
+- **Notes:** faq/patterns store a JSON **list**, business a JSON **object**, brand_voice raw markdown — so `KnowledgeLoader` reads overrides and seeds identically. Size caps: brand_voice ≤100k chars; faq 1..200 items (q/a ≤2000); patterns 1..100 items (≤20 examples); business fields ≤2000, extra dict of strings.
+
+## Admin operational controls
+- **File:** backend/app/admin/controls.py
+- **Purpose:** ADR-002 (send-mode kill switch) + ADR-005 (client decisions as config) document; each field persists as its own plain `app_config` key so runtime readers keep their existing keys.
+- **Public API:** `AdminControls` (Pydantic) + `TagLists`; `async load_controls(config) -> AdminControls` (stored-or-default, never crashes on corrupt values); `async save_controls(config, controls) -> None`; `REVEAL_ALLOWED`.
+- **Used in:** admin.router (GET|PUT /controls); the individual keys are read by webhook eligibility / jobs / future outbox drain.
+- **Notes:** validated: `send_mode` ∈ off/shadow/allowlist/live; `push_policy` ∈ cod_only/all/all_prepaid_no_buttons; `default_language` ∈ en/hi/gu; `reveal_fields` ⊆ {order_number,email,status}; `allowlist_phones`/`owner_alert_number` E.164; `public_base_url` https-or-empty (trailing slash stripped); `push_staleness_hours` 1..168. EXISTING keys reused unchanged: `push_policy`, `push_staleness_hours`, `public_base_url`. New keys: `send_mode`, `allowlist_phones`, `reveal_fields`, `tags`, `default_language`, `owner_alert_number`.
+
+## KnowledgeLoader + Thetavas seeds
+- **File:** backend/app/knowledge/loader.py (+ backend/app/knowledge/seeds/{brand_voice.md,faq.json,business.json,patterns.json})
+- **Purpose:** override-else-seed reader for the store's voice + policy knowledge (cafe pattern, our names).
+- **Public API:** `KnowledgeLoader(repo: ConfigRepo, seeds_dir: Path)` with `get(kind) -> str`, `knowledge_version() -> str` (config `knowledge_version` or "0"), `assemble_all() -> dict[str, str]`; module `KINDS = ("brand_voice","faq","business","patterns")`, `SEEDS_DIR: Path`.
+- **Used in:** admin.router (knowledge GET); Phase 4 engine (prompt assembly) will consume it.
+- **Notes:** DB override (from `knowledge_overrides`) wins; else the packaged seed FILE. Seeds are Thetavas defaults (no emojis, plain text, no menu — we don't sell in chat); business support fields are blank for the store team to fill from the panel. `knowledge_version` bumps on every PUT (Phase 4 cache invalidation).
+
+## Providers layer (LLM behind LLMProvider)
+- **File:** backend/app/providers/{base.py,registry.py,litellm_provider.py,verify.py}
+- **Purpose:** minimal Phase 3.5 LLM provider abstraction — enough to verify an API key before saving; full engine use is Phase 4.
+- **Public API:** base: `LLMProvider` Protocol (`complete(model, messages, api_key, timeout, *, extra_params=None) -> CompletionResult`), `Message`, `CompletionResult`, `ProviderError(.kind)`, `ProviderErrorKind(StrEnum: AUTH/RATE_LIMIT/NOT_FOUND/TIMEOUT/UNKNOWN)`. registry: `ProviderInfo(key,label,default_model,accept_on_rate_limit=False)`, `PROVIDERS` (gemini only), `get_provider(key)`, `list_providers()`. litellm_provider: `LiteLLMProvider` (lazy `import litellm` inside `complete`, api_key redacted from errors). verify: `VerifyResult(ok,error,kind)`, `async verify_key(provider, model, api_key, timeout=15.0) -> VerifyResult` (never raises, never leaks the key).
+- **Used in:** admin.router (POST /provider verify-before-save).
+- **Notes:** NEW dep `litellm>=1.89,<2` (untyped → `[[tool.mypy.overrides]] module="litellm.*"`), imported LAZILY so the webhook cold path never pays its import cost (rule F10). `ProviderErrorKind` is a `StrEnum` (repo ruff UP042; behaviour-equivalent to the cafe `(str, Enum)`). v1 ships Gemini only; the registry shape already supports Vertex/env-auth providers for Phase 4 (YAGNI now).

@@ -42,6 +42,48 @@
 - **Response:** 503 if `settings.cron_secret` unset; 403 on secret mismatch/missing; 404 unknown job; 200 `{"job": name, "result": ...}`.
 - **Notes:** constant-time secret compare (F11). Registered job: `ensure_subscription` (→ `{"status": "ok|created|updated"}` or `{"error": "public_base_url not configured"}`).
 
+## [admin] Auth — POST /admin/login, GET /admin/session
+- **Handler:** backend/app/admin/router.py (`login()`, `session()`)
+- **Request:** login `{"password": str≤256}`; session none (cookie only).
+- **Response:** login 503 if `ADMIN_PASSWORD` unset, 401 on wrong password, 429 over 5/min, 200 `{"ok": true}` + httponly `admin_session` cookie (SameSite=strict, Secure when x-forwarded-proto=https, path=/admin, 12h); session 401 without a valid cookie, 200 `{"ok": true}`.
+- **Notes:** password compared constant-time (`check_password`); empty stored password never grants access. Cookie is an HMAC-signed expiring token (`app_master_key`), verified by `require_admin`. `GET /admin/session` does NO DB access (a DB hiccup can't log anyone out). Rate limit via slowapi keyed on remote address. All `/admin` requests >1 MiB Content-Length → 413 (`AdminBodyCapMiddleware`, before body parse).
+
+## [admin] Credentials — GET|POST /admin/shopify, GET|POST /admin/whatsapp
+- **Handler:** backend/app/admin/router.py (`shopify_status`/`set_shopify`, `whatsapp_status`/`set_whatsapp`)
+- **Request:** shopify `{"client_id"?, "client_secret"?}` (≤256); whatsapp `{"phone_number_id"?, "waba_id"?, "api_version"?, "access_token"?, "app_secret"?, "verify_token"?}`.
+- **Response:** shopify GET `{"configured": bool}` (both secrets set); whatsapp GET `{"configured": bool, "phone_number_id", "waba_id", "api_version"}` (NON-secret fields only); POST 422 if first-time setup is missing a required field, 200 `{"ok": true}`.
+- **Notes:** require_admin (401). **Secrets are NEVER echoed** — GETs return status/non-secret only. Partial update: blank/omitted keeps the stored value; first-time setup requires the full set. Secrets Fernet-encrypted at rest under `shopify:{client_id,client_secret}` / `whatsapp:{access_token,app_secret,verify_token}` (secret) + `whatsapp:{phone_number_id,waba_id,api_version}` (plain).
+
+## [admin] LLM provider — GET /admin/providers, GET /admin/config, POST /admin/provider
+- **Handler:** backend/app/admin/router.py (`providers`, `provider_config`, `set_provider`)
+- **Request:** provider `{"provider": str≤64, "api_key"?: str≤512}`.
+- **Response:** providers `[{"key","label","default_model"}]`; config `{"configured": bool, "provider": str|null}` (NEVER the key); provider 400 unknown provider / missing key / verification failed, 200 `{"ok": true}` (or `{"ok": true, "warning": ...}` when a rate-limited-but-authenticated key is accepted).
+- **Notes:** require_admin (401). **Verify-key-before-save** — the key is checked against the provider (LiteLLMProvider) BEFORE it is Fernet-encrypted to `llm:api_key:{provider}` and `llm:active_provider` (plain) is set. Verify never leaks the key; on failure nothing is persisted. Kind→message mapping gives a friendly reason (auth/quota/model/timeout).
+
+## [admin] Knowledge — GET|PUT /admin/knowledge/{kind}
+- **Handler:** backend/app/admin/router.py (`get_knowledge`, `put_knowledge`)
+- **Request:** kind ∈ {brand_voice, faq, business, patterns}; PUT body is kind-specific (brand_voice `{content}`; faq `{items:[{q,a}]}`; patterns `{items:[{pattern,examples,reply}]}`; business `{store_name,website,...,extra}`).
+- **Response:** GET `{"kind", "content"}` (DB override else seed file, raw string); PUT 400 unknown kind, 422 malformed body, 200 `{"ok": true}`.
+- **Notes:** require_admin (401). Validated by `validate_and_serialize` into cafe-loader-compatible stored formats (faq/patterns JSON list, business JSON object). Each PUT stores the override in `knowledge_overrides` and bumps `knowledge_version` (Phase 4 cache invalidation).
+
+## [admin] Controls — GET|PUT /admin/controls
+- **Handler:** backend/app/admin/router.py (`get_controls`, `put_controls`)
+- **Request:** PUT full `AdminControls` document (send_mode, allowlist_phones, push_policy, reveal_fields, tags, default_language, push_staleness_hours, public_base_url, owner_alert_number).
+- **Response:** GET the current document (stored-or-default); PUT 422 on any invalid value, 200 `{"ok": true}`.
+- **Notes:** require_admin (401). ADR-002 send-mode kill switch + ADR-005 decisions-as-config. Each field persists as its OWN plain `app_config` key so runtime readers keep their existing keys; corrupt stored values fall back to defaults (never crash the panel).
+
+## [admin] Read-only views — GET /admin/mappings, GET /admin/outbox
+- **Handler:** backend/app/admin/router.py (`list_mappings`, `list_outbox`)
+- **Request:** query `limit` (default 50, ge=1, le=500).
+- **Response:** JSON list of `MappingView` / `OutboundView` rows (most recent first); 422 if limit out of range.
+- **Notes:** require_admin (401). Read-only over `IngestStore.recent_mappings/recent_outbound` (Postgres ORDER BY created_at DESC; in-memory reversed-insertion). No mutations.
+
+## [admin-ui] Static panel — GET /admin/ui/
+- **Handler:** backend/app/main.py (`StaticFiles(directory=app/admin/static, html=True)` mounted at `/admin/ui`)
+- **Request:** browser GET.
+- **Response:** `index.html` + `admin.js` (vanilla, no build step); 200 text/html.
+- **Notes:** login screen → panel (Shopify, WhatsApp, LLM, Knowledge ×4, Controls, Views). Uses the `/admin/*` JSON API with the session cookie (`credentials: same-origin`). No secrets ever rendered — status badges only.
+
 ## [external] Shopify Admin token endpoint (client_credentials)
 - **Caller:** backend/app/shopify/token_manager.py (`TokenManager._grant`)
 - **Endpoint:** `POST https://{shop_domain}/admin/oauth/access_token`

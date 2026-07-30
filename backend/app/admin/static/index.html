@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Thetavas Admin</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f4f4f5; color: #18181b; }
+    .screen { display: none; }
+    .screen.active { display: block; }
+    #login-screen { min-height: 100vh; align-items: center; justify-content: center; }
+    #login-screen.active { display: flex; }
+    .login-card { background: #fff; border-radius: 8px; box-shadow: 0 1px 6px rgba(0,0,0,.12);
+      padding: 2rem; width: 320px; }
+    #panel-screen { max-width: 860px; margin: 2rem auto; padding: 0 1rem 4rem; }
+    .card { background: #fff; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.08);
+      padding: 1.25rem 1.5rem; margin-bottom: 1.5rem; }
+    .card h2 { font-size: 1rem; margin-bottom: 1rem; }
+    label { display: block; font-size: .875rem; font-weight: 500; margin-bottom: .3rem; }
+    input, select, textarea { width: 100%; padding: .5rem .7rem; border: 1px solid #d4d4d8;
+      border-radius: 6px; font-size: .9rem; font-family: inherit; background: #fafafa; }
+    textarea { resize: vertical; min-height: 110px; }
+    .field { margin-bottom: .8rem; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; }
+    button { padding: .5rem 1.1rem; border: none; border-radius: 6px; font-size: .875rem;
+      font-weight: 500; cursor: pointer; background: #4f46e5; color: #fff; }
+    button.small { padding: .25rem .6rem; font-size: .78rem; background: #71717a; }
+    button:disabled { background: #a5b4fc; cursor: not-allowed; }
+    .status { font-size: .8rem; margin-top: .5rem; min-height: 1.1rem; color: #71717a; }
+    .status.ok { color: #16a34a; } .status.err { color: #dc2626; } .status.warn { color: #b45309; }
+    .badge { font-size: .8rem; padding: .2rem .6rem; border-radius: 9999px; background: #f1f5f9;
+      color: #64748b; margin-bottom: 1rem; display: inline-block; }
+    .badge.on { background: #dcfce7; color: #166534; }
+    table { border-collapse: collapse; width: 100%; font-size: .82rem; }
+    th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid #e4e4e7; }
+    .row { display: grid; grid-template-columns: 1fr 1fr auto; gap: .5rem; margin-bottom: .5rem; }
+    .row3 { display: grid; grid-template-columns: 1fr 2fr 2fr auto; gap: .5rem; margin-bottom: .5rem; }
+    .tabs { display: flex; gap: .5rem; margin-bottom: 1rem; flex-wrap: wrap; }
+    .tabs button { background: #e4e4e7; color: #18181b; }
+    .tabs button.active { background: #4f46e5; color: #fff; }
+    .kn-pane { display: none; } .kn-pane.active { display: block; }
+    .scroll { overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <div id="login-screen" class="screen active">
+    <div class="login-card">
+      <h1 style="font-size:1.2rem; margin-bottom:1rem;">Thetavas Admin</h1>
+      <div class="field"><label for="password">Password</label>
+        <input type="password" id="password" autocomplete="current-password" /></div>
+      <button id="login-btn">Log in</button>
+      <div class="status" id="login-status"></div>
+    </div>
+  </div>
+
+  <div id="panel-screen" class="screen">
+    <h1 style="font-size:1.35rem; margin-bottom:1.5rem;">Thetavas Admin</h1>
+
+    <div class="card" id="shopify-card">
+      <h2>Shopify credentials</h2>
+      <span class="badge" id="shopify-badge">not configured</span>
+      <div class="grid2">
+        <div class="field"><label for="sh-client-id">Client ID</label>
+          <input type="password" id="sh-client-id" placeholder="leave blank to keep" /></div>
+        <div class="field"><label for="sh-client-secret">Client secret</label>
+          <input type="password" id="sh-client-secret" placeholder="leave blank to keep" /></div>
+      </div>
+      <button id="sh-save">Save Shopify</button>
+      <div class="status" id="sh-status"></div>
+    </div>
+
+    <div class="card" id="wa-card">
+      <h2>WhatsApp credentials</h2>
+      <span class="badge" id="wa-badge">not configured</span>
+      <div class="grid2">
+        <div class="field"><label for="wa-phone-number-id">Phone Number ID</label>
+          <input type="text" id="wa-phone-number-id" /></div>
+        <div class="field"><label for="wa-waba-id">WABA ID</label>
+          <input type="text" id="wa-waba-id" /></div>
+        <div class="field"><label for="wa-api-version">API version</label>
+          <input type="text" id="wa-api-version" placeholder="v23.0" /></div>
+        <div class="field"><label for="wa-access-token">Access token</label>
+          <input type="password" id="wa-access-token" placeholder="leave blank to keep" /></div>
+        <div class="field"><label for="wa-app-secret">App secret</label>
+          <input type="password" id="wa-app-secret" placeholder="leave blank to keep" /></div>
+        <div class="field"><label for="wa-verify-token">Verify token</label>
+          <input type="password" id="wa-verify-token" placeholder="leave blank to keep" /></div>
+      </div>
+      <button id="wa-save">Save WhatsApp</button>
+      <div class="status" id="wa-status"></div>
+    </div>
+
+    <div class="card" id="llm-card">
+      <h2>LLM provider</h2>
+      <span class="badge" id="llm-badge">not configured</span>
+      <div class="grid2">
+        <div class="field"><label for="llm-provider">Provider</label>
+          <select id="llm-provider"></select></div>
+        <div class="field"><label for="llm-key">API key</label>
+          <input type="password" id="llm-key" /></div>
+      </div>
+      <button id="llm-save">Verify and save</button>
+      <div class="status" id="llm-status"></div>
+    </div>
+
+    <div class="card" id="knowledge-card">
+      <h2>Knowledge</h2>
+      <div class="tabs">
+        <button data-kind="brand_voice" class="active">Brand voice</button>
+        <button data-kind="faq">FAQ</button>
+        <button data-kind="business">Business</button>
+        <button data-kind="patterns">Patterns</button>
+      </div>
+      <div class="kn-pane active" id="pane-brand_voice">
+        <div class="field"><textarea id="bv-content" rows="12"></textarea></div>
+        <button id="bv-save">Save brand voice</button>
+        <div class="status" id="bv-status"></div>
+      </div>
+      <div class="kn-pane" id="pane-faq">
+        <div id="faq-rows"></div>
+        <button class="small" id="faq-add">Add question</button>
+        <div style="margin-top:.8rem"><button id="faq-save">Save FAQ</button></div>
+        <div class="status" id="faq-status"></div>
+      </div>
+      <div class="kn-pane" id="pane-business">
+        <div class="grid2" id="biz-fields"></div>
+        <div class="field"><label for="biz-note">Note</label><input type="text" id="biz-note" /></div>
+        <button id="biz-save">Save business info</button>
+        <div class="status" id="biz-status"></div>
+      </div>
+      <div class="kn-pane" id="pane-patterns">
+        <div id="pat-rows"></div>
+        <button class="small" id="pat-add">Add pattern</button>
+        <div style="margin-top:.8rem"><button id="pat-save">Save patterns</button></div>
+        <div class="status" id="pat-status"></div>
+      </div>
+    </div>
+
+    <div class="card" id="controls-card">
+      <h2>Operational controls</h2>
+      <div class="grid2">
+        <div class="field"><label for="c-send-mode">Send mode (kill switch)</label>
+          <select id="c-send-mode">
+            <option value="off">off - nothing is sent</option>
+            <option value="shadow">shadow - record, do not send</option>
+            <option value="allowlist">allowlist - send to listed numbers only</option>
+            <option value="live">live - send to everyone</option>
+          </select></div>
+        <div class="field"><label for="c-allowlist">Allowlist phones (comma separated, +91...)</label>
+          <input type="text" id="c-allowlist" /></div>
+        <div class="field"><label for="c-push-policy">Push policy</label>
+          <select id="c-push-policy">
+            <option value="cod_only">COD orders only</option>
+            <option value="all">every order</option>
+            <option value="all_prepaid_no_buttons">all, prepaid without buttons</option>
+          </select></div>
+        <div class="field"><label for="c-language">Default language</label>
+          <select id="c-language">
+            <option value="en">English</option><option value="hi">Hindi</option>
+            <option value="gu">Gujarati</option>
+          </select></div>
+        <div class="field"><label for="c-staleness">Push staleness limit (hours)</label>
+          <input type="number" id="c-staleness" min="1" max="168" /></div>
+        <div class="field"><label for="c-base-url">Public base URL (https://...)</label>
+          <input type="text" id="c-base-url" /></div>
+        <div class="field"><label for="c-owner-alert">Owner alert number (+91..., optional)</label>
+          <input type="text" id="c-owner-alert" /></div>
+      </div>
+      <div class="field"><label>Reveal fields</label>
+        <label><input type="checkbox" id="c-rv-order" style="width:auto" /> order number</label>
+        <label><input type="checkbox" id="c-rv-email" style="width:auto" /> email</label>
+        <label><input type="checkbox" id="c-rv-status" style="width:auto" /> status</label>
+      </div>
+      <div class="grid2">
+        <div class="field"><label for="c-tags-pending">Tags: pending (comma separated)</label>
+          <input type="text" id="c-tags-pending" /></div>
+        <div class="field"><label for="c-tags-confirmed">Tags: confirmed</label>
+          <input type="text" id="c-tags-confirmed" /></div>
+        <div class="field"><label for="c-tags-cancelled">Tags: cancelled</label>
+          <input type="text" id="c-tags-cancelled" /></div>
+      </div>
+      <button id="c-save">Save controls</button>
+      <div class="status" id="c-status"></div>
+    </div>
+
+    <div class="card" id="views-card">
+      <h2>Recent activity</h2>
+      <button class="small" id="views-refresh">Refresh</button>
+      <h3 style="font-size:.9rem; margin:.8rem 0 .4rem;">Order mappings</h3>
+      <div class="scroll"><table id="mappings-table">
+        <thead><tr><th>Order</th><th>Phone</th><th>Status</th><th>COD</th><th>Created</th></tr></thead>
+        <tbody></tbody></table></div>
+      <h3 style="font-size:.9rem; margin:.8rem 0 .4rem;">Outbox</h3>
+      <div class="scroll"><table id="outbox-table">
+        <thead><tr><th>Key</th><th>State</th><th>Kind</th><th>Phone</th><th>Attempts</th><th>Error</th></tr></thead>
+        <tbody></tbody></table></div>
+      <div class="status" id="views-status"></div>
+    </div>
+  </div>
+  <script src="admin.js"></script>
+</body>
+</html>

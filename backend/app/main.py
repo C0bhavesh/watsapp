@@ -1,4 +1,7 @@
+from pathlib import Path
+
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -41,6 +44,11 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 app.add_middleware(AdminBodyCapMiddleware)
 app.include_router(admin_router)
+app.mount(
+    "/admin/ui",
+    StaticFiles(directory=Path(__file__).resolve().parent / "admin/static", html=True),
+    name="admin-ui",
+)
 
 
 @app.get("/health")

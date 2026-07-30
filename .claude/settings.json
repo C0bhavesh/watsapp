@@ -29,11 +29,11 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebSearch"
     ],
+    "defaultMode": "acceptEdits",
     "additionalDirectories": [
       "C:\\Users\\devnp\\.claude\\projects\\e--bhvaesh-automation\\memory",
       "D:\\ai_whatsapp_agent"
-    ],
-    "defaultMode": "acceptEdits"
+    ]
   },
   "hooks": {
     "PreToolUse": [
@@ -48,5 +48,8 @@
         ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "superpowers@superpowers-dev": true
   }
 }

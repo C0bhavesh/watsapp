@@ -5,6 +5,19 @@
 > (see `_pipeline_status.md`). Everything below the line is plain-language and copy-paste ready.
 > Convention copied from the Beyond Loaf project.
 
+## ✅ ANSWERS RECEIVED (2026-07-29)
+
+| Q | Answer | Build consequence |
+|---|---|---|
+| **1** — which orders get the push | **B — every order** (not COD-only) | `push_eligibility` config = `all`. ⚠ Prepaid orders now carry a Cancel button; flagged to owner. Config edit if reversed. |
+| **3** — languages | **English + Hindi + Hinglish** | Templates = `en` + `hi` only (Meta has no `hinglish` code). Hinglish served free-form post-reply. `gu` templates stay approved but dormant. |
+| **4** — cancel double-check | **A — ask once before cancelling** | `pending_actions` cancel-confirm flow stays in scope (Phase 5). |
+| **5** — what the bot may reveal | **YES — status may be revealed** | Reveal set = order id + email + **status** (confirmed/cancelled/shipped). Items/amounts/tracking still hidden. |
+| **14** — FAQ / policy content | **Delegated to us**; client edits later via admin panel | We seed `app/knowledge/seeds/*` with sensible Thetavas defaults; admin panel must expose them for runtime editing. |
+| **8** — switchover plan | ⏳ **still open** — explained to owner 2026-07-29 | Gates Phase 6 only. |
+
+Remaining open: **Q2** (order volume, for cost estimate) · **Q6** (no-match fallback: support contact vs staff alert) · **Q7c** (which WhatsApp number WATI uses today) · **Q8** (switchover) · **Q9–Q11** (held: post-shipping cancel, a2ship tracking, handoff number) · **Q12** (number on Cloud API confirmation) · **Q13** (tag-name compatibility).
+
 ---
 
 **Thetavas WhatsApp order assistant — a few decisions we need from you**

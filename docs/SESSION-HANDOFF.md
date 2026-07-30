@@ -1,8 +1,8 @@
 # SESSION HANDOFF — Thetavas Shopify × WhatsApp Order Bot
 
 > **New Claude session: read this file first, then `CLAUDE.md`, then `docs/FR/_pipeline_status.md`.**
-> Written 2026-07-28. Repo state at commit `41c782d` (33 commits) · suite **125 passed, 2 skipped**.
-> Project root: `e:\bhvaesh_automation` · GitHub: `github.com/Devpanchal37/thetavas-order-bot` (private, pushed & current).
+> Written 2026-07-29. Project root: `d:\bhvaesh_automation` · GitHub: `github.com/C0bhavesh/watsapp`
+> (private — supersedes the earlier `Devpanchal37/thetavas-order-bot`, moved 2026-07-28).
 
 ---
 
@@ -13,155 +13,199 @@ shipping, **Shopflo** one-click checkout). Two flows:
 
 - **THE CORE FEATURE — inbound conversation:** a customer WhatsApps the store ("where is my
   order?", "cancel my order"), we identify them by phone, fetch live order data from Shopify, and
-  answer with **Gemini** in their language (hi/en/hinglish/gu).
-- **Outbound push:** a new Shopify order triggers a WhatsApp **template** with **Confirm / Cancel**
-  buttons; Confirm adds a tag, Cancel cancels the order. This replicates what the client's current
-  **WATI** setup does, which we will replace.
+  answer with **Gemini** in their language (English / Hindi / Hinglish, Gujarati templates ready
+  but dormant).
+- **Outbound push:** every new Shopify order triggers a WhatsApp **template** with Confirm/Cancel
+  buttons; Confirm adds a tag, Cancel asks for confirmation then cancels the order. This replaces
+  the client's current **WATI** setup.
 
-**Owner correction (important):** the inbound conversation is the main point of the project. An
-earlier plan scheduled it last; phases were re-sequenced on 2026-07-28 so it ships next.
-
-## 2. Reference project — READ THIS, we copy from it
+## 2. Reference project
 
 `D:\ai_whatsapp_agent` — a working cafe-order WhatsApp bot (FastAPI + Meta Cloud API + LiteLLM/
-Gemini + Supabase, on Vercel). Most of our conversation layer is `[copy]`/`[adapt]` from it.
-Summary already written: **`docs/reference-project-ai-whatsapp-agent.md`** (read that instead of
-re-exploring the folder). Its `docs/FR/` convention is where our pipeline-status format comes from.
+Gemini + Supabase, on Vercel), used as the design/copy source. **Not present on this machine** —
+work from `docs/reference-project-ai-whatsapp-agent.md` (already-written summary) rather than
+re-exploring the folder.
 
-## 3. Which files to read, in order
+## 3. What is COMPLETE (built, reviewed, secured, pushed to GitHub)
 
-| Priority | File | Why |
-|---|---|---|
-| **1** | `CLAUDE.md` | project rules — agent routing, no app code in main chat, never push without approval, secrets rules |
-| **2** | `docs/FR/_pipeline_status.md` | **Tier-1 status board** — every phase, every review, every open item |
-| **3** | `docs/inbound-conversation-design.md` | the CORE feature, designed end-to-end (10-step flow + module map) |
-| **4** | `docs/architecture-plan.md` | Levels 0–6: system context, integrations, flows, modules, data model, security rules, phase gates |
-| **5** | `docs/architecture-decisions.md` | ADRs 001–005 — BINDING (outbox, kill switch, token, mutation safety, config-driven decisions) |
-| 6 | `docs/memory/error_learnings.md` | Tier-1 — read before any work; ~9 hard-won lessons |
-| 7 | `docs/FR/client-decisions-all.md` | all open client questions, copy-paste ready |
-| 8 | `docs/phase0-verification-results.md` | live Shopify API test results + the real order shape |
-| 9 | `docs/security-review-2026-07-28-phase{1,2}.md` | what was found/fixed + **deferred items list** |
-| 10 | `docs/current-wati-bridge-analysis.md` | what the system we're replacing actually does |
-| 11 | `docs/architecture-review-2026-07-28.md` | independent review, findings F1–F24 |
-| — | `docs/superpowers/plans/*.md` | task-level plans for Phases 1 & 2 (executed) |
-| — | `docs/memory/{component_registry,api_registry}.md` | Tier-2 — grep before creating anything |
+### Phase 1 — Shopify layer ✅ CLOSED
+`Settings`/Fernet `SecretVault`/`ConfigService`, **TokenManager** (ADR-003: DB-persisted 24h
+token, refresh margin), **ShopifyClient** (order fetch, order-by-name search, customer-orders-by-
+phone, `tagsAdd`, `orderCancel`), `AuthorizedOrder` invariant (ADR-004, enforced at construction),
+`/health`, Vercel entrypoint (region `bom1`). 54 tests, code-reviewed + security-reviewed, all
+fixes landed. **Live-verified against the real store.**
 
-## 4. What is COMPLETE (built, reviewed, secured, pushed)
+### Phase 2 — Order ingestion ✅ CLOSED
+E.164 phone util, Shopify **base64** HMAC verifier, `POST /webhooks/shopify` (atomic dedupe +
+phone→order mapping + outbox queue in one transaction — ADR-001), subscription self-heal
+(URL *and* API-version drift), authenticated jobs dispatcher (`CRON_SECRET`), full Postgres
+schema + `apply_schema.py`. 125 tests, both reviews passed (3 HIGH security findings, all fixed),
+orchestrator-verified end-to-end against a real Shopflo-shaped payload.
 
-### Phase 1 — Shopify layer ✅
-`backend/app/` — `config/` (Settings, Fernet `SecretVault`, `ConfigService`), `store/` (ConfigRepo
-Protocol + in-memory), `shopify/` (models + error taxonomy, **TokenManager** per ADR-003:
-DB-persisted 24h token, refresh margin, single-flight; **ShopifyClient**: order fetch, order search
-by name, customer-orders-by-phone, `tagsAdd`, `orderCancel`), `deps.py` composition root,
-`main.py` `/health`, Vercel entrypoint (region **bom1**/Mumbai), `scripts/smoke_shopify.py`.
-**Live-verified against the real store.**
+### Phase 3 — WhatsApp channel (the pipe) ✅ CLOSED, MERGED, **PUSHED**
+Meta **hex** HMAC verifier, Fernet-split `whatsapp:*` config loader, typed inbound parser
+(`InboundText`/`InboundInteractive`/**`InboundButton`** — template quick-reply taps arrive as
+`type:"button"`, not `interactive`), `MessageStore` dedupe port (in-memory + Postgres), sender
+(`send_text`/`send_template`/`send_buttons`), deterministic 4-language reply copy (`copy.py`),
+`GET`/`POST /webhook/whatsapp` router (verifies, dedupes, echoes event type — does **not** yet
+route anywhere). 218 tests passed, 3 skipped (no `TEST_DATABASE_URL`). Code review: 1 blocker +
+1 major, fixed. Security review: 1 HIGH (tenant guard failing open on batched messages) + 3
+MEDIUM + 2 LOW, all fixed and independently re-verified with fresh PoCs — **APPROVE**.
 
-### Phase 2 — Order ingestion ✅
-`app/core/phone.py` (E.164), `app/channels/` (`shopify_signature.py` = base64 HMAC,
-`shopify_orders.py` = payload parse + language + eligibility, `shopify_webhook.py` =
-`POST /webhooks/shopify`), `app/shopify/subscriptions.py` (self-heal incl. **API-version drift**),
-`app/jobs/router.py` (authenticated dispatcher, `CRON_SECRET`), `app/store/` (full Level 4
-`schema.sql`, `pg_factory.py` lazy asyncpg pool with `statement_cache_size=0`, `postgres.py`
-atomic `IngestStore`), `scripts/apply_schema.py`.
+**This phase is fully merged into `main` and pushed to `github.com/C0bhavesh/watsapp`.**
+(An earlier note in `_pipeline_status.md` said "not pushed" — that was true when written; the
+repo move + push on 2026-07-28 superseded it, 17 commits including all of Phases 1–3.)
 
-**Verified end-to-end by the orchestrator** with a real Shopflo-shaped signed payload: valid →
-mapped + queued; replay → duplicate, no double-queue; bad signature → 403; **hex (Meta-scheme)
-signature → 403**; phone normalized from shipping fallback; `hi-IN` → Hindi template selected.
-
-**All 8 security attack PoCs re-verified as fixed** (non-ASCII headers, type-confused signed
-payloads, deep JSON, 2MB body, foreign shop domain, 200k field, corrupt master key).
+**What works right now, end to end:** a real Shopify order → verified → recorded → queued in the
+outbox. A real WhatsApp message or button tap → verified → deduped → parsed into a typed event.
+**Nothing replies yet, and nothing sends yet** — that logic (Phase 4/5) is not built.
 
 ### External setup ✅
-- **Shopify:** client-credentials grant working on API **2026-07** (2025-07 is dead). Scopes
-  include `read_orders`/`write_orders`; ❌ **`read_customers` NOT granted** (fallback lookup
-  blocked — likely toggled under Customer Account API instead of Admin API; needs re-release +
-  reinstall + fresh token).
-- **Meta:** App `771818472295971` ("Demo") · WABA `2454816495000045` · Phone Number ID
-  `1298805403309058` · test number **+1 555-651-8147** (GREEN) · permanent system-user token
-  working (assets had to be assigned to the "Conversions API System User").
-- **Templates `order_confirmation_cod` — APPROVED in en, hi, gu** (UTILITY category ≈ ₹0.12/msg).
-  Draft/spec: `docs/whatsapp-templates.md`. A test template message was delivered to the owner's
-  phone (+91 7575072795, a verified test recipient).
+- **Shopify:** client-credentials grant on API **2026-07**. `read_orders`/`write_orders` granted;
+  `read_customers` still NOT granted (likely toggled under the wrong API section) — not currently
+  blocking, DB-mapping is the primary phone→order resolution path.
+- **Meta:** WABA `2454816495000045`, Phone Number ID `1298805403309058`, permanent system-user
+  token working. Templates `order_confirmation_cod` **approved in en, hi, gu**. A live template
+  message was successfully delivered to a real test number.
 
-## 5. What is PENDING
+### Client decisions — round 2, answered this session (2026-07-29)
+Recorded in `docs/FR/client-decisions-all.md` and `docs/FR/_pipeline_status.md`:
 
-### Not yet built (in the re-sequenced order)
-| Phase | Deliverable | Task-level plan? |
-|---|---|---|
-| **3** | **WhatsApp channel** — Meta webhook (GET verify + POST receive, **HEX** HMAC), typed inbound parser incl. **`InboundButton`** (template taps arrive as `type:"button"`, NOT `interactive`), sender (`send_text`, **new** `send_template`, `send_buttons`), `channels/copy.py` fixed strings ×4 languages | ❌ not written |
-| **4** | **THE CONVERSATION** — `providers/` (LiteLLM/Gemini) `[copy]`, `knowledge/` (loader+assembler+cache+seeds) `[adapt]`, `core/engine.py` strict-JSON intent `[adapt]`, `core/order_resolver.py` identity+ownership `[NEW]`, `core/memory.py` `[copy]` | ❌ not written |
-| **5** | Order push automation — outbox **drain**, template send, button-tap mutations, two-phase cancel | ❌ not written |
-| **6** | Parallel run (shadow mode) → cutover from WATI | ❌ not written |
+| # | Question | Answer | Consequence |
+|---|---|---|---|
+| Q1 | Which orders get the push | **All orders** (not COD-only) | Prepaid customers now see a Cancel button on an already-paid order — flagged as a risk to watch; reversible as a config edit (`push_eligibility`, ADR-005), not a rebuild |
+| Q3 | Launch languages | **English + Hindi + Hinglish** | Meta has no "Hinglish" template code — templates ship en+hi only; Hinglish is served free-form once the customer replies (no approval needed). Gujarati stays approved, dormant, free to enable |
+| Q4 | Cancel handling | **Double-check before cancelling** | Matches the design already built (`pending_actions`) |
+| Q5 | May the bot reveal order status | **Yes** | Reveal set = order id + email + status. Items/amounts/tracking stay hidden |
+| Q14 | FAQ/policy content | **Delegated to us**, client edits later via admin panel | We seed Thetavas-appropriate defaults; **this is what makes the admin panel a hard requirement, not a nice-to-have** |
 
-**Planning status:** architecture is 100% planned for all phases; **task-level implementation
-plans exist only for Phases 1–2**. Owner asked about this on 2026-07-28; the open recommendation
-was: full task-level plan for Phase 3 now + feature-level specs for 4–6 (code-level plans go stale
-if written too far ahead — Phase 1's plan needed reconciliation twice). **Owner has not chosen yet.**
+**Still open:** Q2 (order volume, for cost estimate), Q6 (no-match fallback: support contact only
+vs. also alert staff), Q7c (which WhatsApp number WATI uses today — overlap risk), **Q8
+(switchover plan — explained to owner 2026-07-29, no choice made yet)**, Q9–Q11 (held: post-
+shipping cancel, a2ship tracking, handoff number), Q12 (confirm number is on Cloud API not the
+phone app), Q13 (tag-name compatibility with a2ship/ops filters).
 
-### Blockers / needed from the owner
-1. **Supabase project + connection string** — THE blocker. Everything runs in-memory today.
-   Needed for: `python -m scripts.apply_schema`, the 2 skipped Postgres tests, and any deploy.
-   Recommend Mumbai region. Use `statement_cache_size=0` (already set) for the pooler.
-2. **⚠ Secrets do NOT survive a new session** — they lived in the session scratchpad, never in the
-   repo. Re-provide as needed: Shopify client id/secret, Meta app secret + system-user token.
-   (Shopify client secret and the Meta token were shared in plaintext in chat → **rotation
-   recommended** once the Fernet vault is wired in production.)
-3. **Client answers** (`docs/FR/client-decisions-all.md`): Q1 which orders get the push (default
-   `cod_only`), Q5 may the bot state order **status** (blocks the Q&A being useful), Q7 does WATI
-   use the **same number** we registered (migration risk), Q13 tag-name compatibility for
-   a2ship/ops filters, **Q14 the FAQ/policy CONTENT** for the knowledge base (delivery times,
-   returns, COD rules, damaged goods, support contact, tone).
-4. **Vercel** — deliberately NOT connected yet (owner's choice: connect after the code is
-   complete). Once connected, every push to `main` is a production deploy → approval required.
+### Separate, parallel workstream: Shopify theme visual refresh
+Unrelated to the bot — a visual-only refresh of the "TAVAS Unpublished Draft" theme (Editorial
+Serif direction, rounded buttons). Design spec and a 7-task implementation plan are written and
+committed to `main`. **All 7 tasks are built** (webfonts, button/card hover states, hero frame
+accent, spacing rhythm, header/footer polish) — but on worktree branch
+`worktree-theme-visual-refresh`, **not yet merged into `main`, not pushed**. Needs a manual
+`shopify theme dev` visual check before merging (no automated test framework applies to theme
+work).
 
-### Deferred but tracked (do not re-discover)
-In `docs/security-review-2026-07-28-phase2.md`: pre-auth secret caching + rate limiting on the
-webhook, idempotency key derived from the signed body, `public_base_url` allowlist, `app_env`
-prod default, PII duplication in `outbound_messages.payload_json`, structured redacting logging,
-least-privilege DB role. Plus: `/health` response model, dependency lockfile, `.vercelignore`,
-ruff `S` ruleset.
+## 4. What is PENDING
 
-## 6. Non-negotiable rules (violating these breaks the system)
+### 4a. Admin panel (Phase 3.5) — brainstorming IN PROGRESS, not finished
+**This is where we stopped.** Once Q14 delegated FAQ/policy content to client self-service, and
+given the architecture already requires all credentials to be entered through an admin panel
+(never env vars, per CLAUDE.md Critical Rule 1), it became clear the admin panel is a **hard
+blocker for both the client's workflow and the production deploy** — yet it exists nowhere in the
+phase plan (Phases 0–6 never build it). We started designing it as an inserted Phase 3.5.
 
-1. **The LLM never mutates.** Free-text "cancel my order" → LLM classifies *intent* → we re-fetch
-   from Shopify → we send **buttons** → only the deterministic tap calls `tagsAdd`/`orderCancel`.
-2. **Two different HMAC schemes.** Meta = **hex** (`X-Hub-Signature-256`); Shopify = **base64**
-   (`X-Shopify-Hmac-Sha256`). Constant-time compare on the **raw body**. Compare **bytes** — 
-   `hmac.compare_digest` raises `TypeError` on non-ASCII strings from headers.
-3. **Ownership check before revealing OR mutating.** `AuthorizedOrder` validates at construction
-   that the verified phone matches the order (ADR-004). Mutating client methods accept only it.
-4. **Always re-fetch live order state** before answering or acting — never trust our snapshot,
-   the message, or the LLM.
-5. **Never crash on a signed webhook.** A 500 burns Shopify's 19-consecutive-failure budget and
-   **deletes the subscription**. Coerce every payload field type.
-6. **Serverless has no "run after the response"** — use the durable outbox (ADR-001).
-7. **Secrets:** only `APP_MASTER_KEY` + `DATABASE_URL` in env; everything else Fernet-encrypted in
-   `app_config`. Never log/echo/commit.
+**Decided so far (via brainstorming, not yet written to a spec doc):**
+- Scope: login, credential entry (Shopify + Meta secrets), knowledge/FAQ/policy editor, order-
+  mappings view, **and** operational controls — the send kill-switch (off/shadow/allowlist/live,
+  ADR-002), push eligibility, tag names. (Owner chose to include operational controls — this
+  makes the panel the actual control surface for the WATI cutover, not just a config form.)
+- Access model: **one shared password, full access** (no owner/staff role split) — a deliberate
+  v1 simplification; the design will keep the door open to add roles later without a restructure.
+- Knowledge editor UX: **structured forms** (FAQ as add/edit/delete rows, labeled policy fields,
+  a plain textarea for brand voice) — not raw JSON, so a malformed save is impossible rather than
+  merely rejected.
+- Password storage: **`ADMIN_PASSWORD` environment variable** — matches the cafe reference
+  project, avoids a first-run bootstrap race. **This requires a one-line amendment to CLAUDE.md
+  Critical Rule 1**, which currently states only `APP_MASTER_KEY` + `DATABASE_URL` may live in
+  env vars. Not yet applied — needs your explicit OK since it's a Critical Rule.
+
+**Not yet decided (design was interrupted before these were presented/approved):**
+- How the panel is served: JSON API + one static HTML page, no build step (recommended — zero new
+  dependencies, deploys cleanly to Vercel serverless) vs. server-rendered Jinja2 forms.
+- Where live knowledge content lives: the architecture describes it as shipped seed **files**
+  (`app/knowledge/seeds/*.json`), but files are read-only and reset on every serverless deploy —
+  incompatible with "the client edits it and it applies immediately." The proposal on the table
+  (not yet approved) is to store the *live* values in the existing `app_config` table, with the
+  shipped files becoming defaults-only fallback.
+
+No design document has been written yet — nothing under `docs/superpowers/specs/` for this. No
+implementation plan exists. No code has been written for the admin panel.
+
+### 4b. Phase 4 — THE CONVERSATION (not started, not planned)
+The actual point of the project: LiteLLM/Gemini provider layer, `app/knowledge/` (loader +
+assembler + cache + seeds), `core/engine.py` (strict-JSON intent extraction), `core/
+order_resolver.py` (phone→order + ownership check, **NEW**, no cafe equivalent), windowed memory.
+Full end-to-end design already exists: `docs/inbound-conversation-design.md` (10-step flow). No
+task-level implementation plan written yet (by design — plans are written one phase ahead so they
+don't go stale).
+
+### 4c. Phase 5 — Order push automation (not started, not planned)
+Outbox drain (actually sending the queued template messages), button-tap → mutation dispatch
+(`order:confirm:{gid}` / `order:cancel:{gid}` → `tagsAdd`/`orderCancel`), two-phase cancel
+confirmation.
+
+### 4d. Phase 6 — Parallel run + cutover (not started)
+Gated on Q8 (switchover plan — see below).
+
+## 5. Where we stopped, and why
+
+We were mid-way through brainstorming the admin panel design (see 4a) — several scoping and UX
+questions had been answered, but the two architecture questions (how it's served, where knowledge
+lives) had not yet been presented for approval, and no spec document had been written. You asked
+for this status summary instead, which paused that thread. **Nothing was lost** — the decisions
+made so far are recorded above and should be picked back up from "where knowledge lives" the next
+time this is resumed.
+
+## 6. What's needed from you
+
+1. **Resume or redirect the admin panel design** — either continue answering the two open
+   architecture questions in §4a, or tell me to proceed with the recommended options (static
+   HTML+JSON API; database-backed knowledge with file fallback).
+2. **Approve the `ADMIN_PASSWORD` env-var exception to CLAUDE.md Critical Rule 1** (or pick one of
+   the other two storage options discussed) — this is a Critical Rule change, so it needs your
+   explicit sign-off, not an assumption on my part.
+3. **Create the Supabase project** (you confirmed none exists yet). Rough steps once you're ready:
+   create a project at supabase.com (Mumbai/`ap-south-1` region recommended), open
+   Project Settings → Database → Connection string, copy the **pooler** (port 6543, "Transaction"
+   mode) connection string, and share it so I can apply the schema and unblock the 3 skipped
+   Postgres tests.
+4. **Answer or triage the remaining open client questions** (Q2, Q6, Q7c, Q8, Q9–Q13) — Q8
+   (switchover plan) is the one actively blocking Phase 6 design; the rest can wait.
+5. **Decide on the theme visual refresh branch** — it's fully built on
+   `worktree-theme-visual-refresh` but not merged. Say when you want it reviewed/merged (it's
+   independent of the bot work, no rush either way).
+6. **Vercel connection** — deliberately still not connected (your call, from earlier). Once the
+   admin panel exists and Supabase is wired in, the steps are: connect the GitHub repo in Vercel,
+   set `APP_MASTER_KEY`/`DATABASE_URL`/`APP_ENV=prod`/`CRON_SECRET`/`ADMIN_PASSWORD` as env vars,
+   deploy, enter Shopify+Meta credentials via the admin panel, then point Meta's webhook at the
+   live URL. I'll walk through this step by step when we get there — and per CLAUDE.md, every
+   push to `main` becomes a live deploy once Vercel is connected, so each one needs your explicit
+   go-ahead.
+
+## 7. Non-negotiable rules (unchanged, still binding)
+
+1. **The LLM never mutates.** Free-text "cancel my order" → LLM classifies *intent* → re-fetch
+   from Shopify → send **buttons** → only the deterministic tap calls `tagsAdd`/`orderCancel`.
+2. **Two different HMAC schemes.** Meta = **hex**; Shopify = **base64**. Constant-time, byte
+   compare on the raw body — `hmac.compare_digest` raises `TypeError` on non-ASCII header strings.
+3. **Ownership check before revealing or mutating.** `AuthorizedOrder` validates at construction
+   that the verified phone matches the order (ADR-004).
+4. **Always re-fetch live order state** before answering or acting.
+5. **Never crash on a signed webhook** — a 500 burns Shopify's 19-failure budget and deletes the
+   subscription. Coerce every payload field type.
+6. **Serverless has no "run after the response"** — the durable outbox is the only safe pattern.
+7. **Secrets:** only `APP_MASTER_KEY` + `DATABASE_URL` in env today; everything else Fernet-
+   encrypted in `app_config`, entered via the (not-yet-built) admin panel. `ADMIN_PASSWORD` is a
+   proposed third exception, pending your approval (§6.2).
 8. **Never `git push` without explicit owner approval.**
-9. **Main Claude does not write app code** — route to the `developer` agent (see
-   `.claude/rules/common/agents.md`). Every phase: build → `code-reviewer` → `security-reviewer`
-   (sensitive surfaces) → fix → verify.
-
-## 7. Working conventions that have paid off
-
-- **Independent verification:** after every agent report, re-run the critical claim yourself
-  (the orchestrator re-ran all 8 security PoCs and the webhook E2E — both caught real detail).
-- **Reviews find real bugs.** Phase 1: a forged `AuthorizedOrder` passed `cancel_order`. Phase 2:
-  three crash paths on a public endpoint + the Supabase pgbouncer incompatibility. Do not skip.
-- **Ad-hoc scripts:** the cafe project is pip-installed **editable** and shadows `app.*` imports —
-  run with `cwd=backend` AND `PYTHONPATH=e:/bhvaesh_automation/backend`.
-- **Client decisions land as config, not code** (ADR-005), so answers are a config edit.
-- Verified store facts: order names have **no `#`** (`tavas3733`); COD = `paymentGatewayNames`
-  contains "Cash on Delivery" (or tag `cod`); phone chain = `order.phone` → `shipping_address` →
-  `billing_address`, already `+91` E.164; Shopflo tags orders `[COD, COD pending, HIGH_RISK, Shopflo]`;
-  WATI writes `Confirmed by wati` / `Cancel by wati`.
-- **Do not delete** the two `pro.ad2ship.com` admin webhooks (shipping depends on them). The two
-  `tavas-wati-webhook` rows are the old tool's off-switch at cutover.
+9. **Main Claude does not write app code** — route to the `developer` agent. Every phase: build →
+   `code-reviewer` → `security-reviewer` (sensitive surfaces) → fix → verify.
 
 ## 8. Suggested next action for a new session
 
-1. Read `CLAUDE.md` → `docs/FR/_pipeline_status.md` → `docs/inbound-conversation-design.md`.
-2. Ask the owner: (a) Supabase DSN, (b) the planning-depth choice from §5, (c) client answers.
-3. Then: write the Phase 3 task-level plan (`superpowers:writing-plans`), execute via the
-   `developer` agent, review with `code-reviewer` + `security-reviewer`, and proceed to Phase 4 —
-   the conversation, which is the point of the whole project.
+1. Read `CLAUDE.md` → `docs/FR/_pipeline_status.md` → this file.
+2. Get the two outstanding admin-panel architecture answers (§4a) and the `ADMIN_PASSWORD` rule
+   sign-off, then write and commit the admin panel design spec.
+3. `superpowers:writing-plans` → `developer` agent → `code-reviewer` → `security-reviewer` for the
+   admin panel build.
+4. In parallel or after: Supabase DSN unblocks live Postgres tests and the eventual deploy.
+5. Then Phase 4 — the conversation engine, the actual point of the project.

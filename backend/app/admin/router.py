@@ -10,6 +10,11 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.admin.auth import check_password, issue_token, verify_token
 from app.admin.knowledge_models import validate_and_serialize
+from app.channels.whatsapp_config import (
+    WHATSAPP_PLAIN_FIELDS,
+    WHATSAPP_SECRET_FIELDS,
+    load_whatsapp_config,
+)
 from app.deps import get_container
 from app.knowledge.loader import KINDS, SEEDS_DIR, KnowledgeLoader
 from app.ratelimit import limiter
@@ -157,4 +162,52 @@ async def set_shopify(req: ShopifyCredsRequest) -> dict[str, bool]:
         await cfg.set_secret("shopify:client_id", client_id)
     if client_secret is not None:
         await cfg.set_secret("shopify:client_secret", client_secret)
+    return {"ok": True}
+
+
+_WA_ALL_FIELDS: tuple[str, ...] = WHATSAPP_SECRET_FIELDS + WHATSAPP_PLAIN_FIELDS
+
+
+class WhatsAppCredsRequest(BaseModel):
+    """All optional: blank/omitted keeps the stored value; first-time needs all six."""
+
+    phone_number_id: str | None = Field(default=None, max_length=64)
+    waba_id: str | None = Field(default=None, max_length=64)
+    api_version: str | None = Field(default=None, max_length=16)
+    access_token: str | None = Field(default=None, max_length=1024)
+    app_secret: str | None = Field(default=None, max_length=256)
+    verify_token: str | None = Field(default=None, max_length=256)
+
+
+@admin_router.get("/whatsapp", dependencies=[Depends(require_admin)])
+async def whatsapp_status() -> dict[str, object]:
+    """Configured flag + NON-secret fields only."""
+    cfg = await load_whatsapp_config(get_container().config)
+    return {
+        "configured": cfg is not None,
+        "phone_number_id": cfg.phone_number_id if cfg else None,
+        "waba_id": cfg.waba_id if cfg else None,
+        "api_version": cfg.api_version if cfg else None,
+    }
+
+
+@admin_router.post("/whatsapp", dependencies=[Depends(require_admin)])
+async def set_whatsapp(req: WhatsAppCredsRequest) -> dict[str, bool]:
+    config = get_container().config
+    values = {name: _clean(getattr(req, name)) for name in _WA_ALL_FIELDS}
+    existing = await load_whatsapp_config(config)
+    if existing is None:
+        missing = [name for name in _WA_ALL_FIELDS if values[name] is None]
+        if missing:
+            raise HTTPException(
+                status_code=422, detail=f"first-time setup requires: {', '.join(missing)}"
+            )
+    for name in WHATSAPP_SECRET_FIELDS:
+        secret_value = values[name]
+        if secret_value is not None:
+            await config.set_secret(f"whatsapp:{name}", secret_value)
+    for name in WHATSAPP_PLAIN_FIELDS:
+        plain_value = values[name]
+        if plain_value is not None:
+            await config.set_plain(f"whatsapp:{name}", plain_value)
     return {"ok": True}

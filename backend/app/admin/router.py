@@ -9,6 +9,7 @@ from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.admin.auth import check_password, issue_token, verify_token
+from app.admin.controls import AdminControls, load_controls, save_controls
 from app.admin.knowledge_models import validate_and_serialize
 from app.channels.whatsapp_config import (
     WHATSAPP_PLAIN_FIELDS,
@@ -281,4 +282,15 @@ async def set_provider(req: ProviderConfigRequest) -> dict[str, bool | str]:
         raise HTTPException(status_code=400, detail=detail)
     await cfg.set_secret(f"llm:api_key:{req.provider}", req.api_key)
     await cfg.set_plain("llm:active_provider", req.provider)
+    return {"ok": True}
+
+
+@admin_router.get("/controls", dependencies=[Depends(require_admin)])
+async def get_controls() -> AdminControls:
+    return await load_controls(get_container().config)
+
+
+@admin_router.put("/controls", dependencies=[Depends(require_admin)])
+async def put_controls(controls: AdminControls) -> dict[str, bool]:
+    await save_controls(get_container().config, controls)
     return {"ok": True}

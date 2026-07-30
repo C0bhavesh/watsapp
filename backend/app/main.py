@@ -1,10 +1,14 @@
 from fastapi import FastAPI
 from pydantic import ValidationError
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
+from app.admin.router import AdminBodyCapMiddleware, admin_router
 from app.channels.shopify_webhook import router as shopify_webhook_router
 from app.channels.whatsapp import router as whatsapp_router
 from app.config.settings import Settings
 from app.jobs.router import router as jobs_router
+from app.ratelimit import limiter
 
 
 def _docs_enabled() -> bool:
@@ -32,6 +36,11 @@ app = FastAPI(
 app.include_router(shopify_webhook_router)
 app.include_router(whatsapp_router)
 app.include_router(jobs_router)
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
+app.add_middleware(AdminBodyCapMiddleware)
+app.include_router(admin_router)
 
 
 @app.get("/health")

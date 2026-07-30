@@ -21,3 +21,8 @@ node_modules/
 # Git worktrees + SDD scratch workspaces (never repo content)
 .claude/worktrees/
 .superpowers/
+
+# uv lockfile — let Vercel's own uv version generate it at build time
+# (avoids a lock-format mismatch between local uv and Vercel's older uv).
+backend/uv.lock
+backend/.vercel/

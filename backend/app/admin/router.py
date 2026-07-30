@@ -4,12 +4,14 @@ import logging
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.admin.auth import check_password, issue_token, verify_token
+from app.admin.knowledge_models import validate_and_serialize
 from app.deps import get_container
+from app.knowledge.loader import KINDS, SEEDS_DIR, KnowledgeLoader
 from app.ratelimit import limiter
 
 logger = logging.getLogger("app.admin")
@@ -87,4 +89,31 @@ async def login(request: Request, req: LoginRequest, response: Response) -> dict
 @admin_router.get("/session", dependencies=[Depends(require_admin)])
 async def session() -> dict[str, bool]:
     """Cookie-only auth probe — NO database access, so a DB hiccup can't log anyone out."""
+    return {"ok": True}
+
+
+def _check_kind(kind: str) -> None:
+    if kind not in KINDS:
+        raise HTTPException(status_code=400, detail=f"unknown kind: {kind}")
+
+
+@admin_router.get("/knowledge/{kind}", dependencies=[Depends(require_admin)])
+async def get_knowledge(kind: str) -> dict[str, str]:
+    """DB override if set, else the shipped seed file."""
+    _check_kind(kind)
+    loader = KnowledgeLoader(get_container().config_repo, SEEDS_DIR)
+    return {"kind": kind, "content": await loader.get(kind)}
+
+
+@admin_router.put("/knowledge/{kind}", dependencies=[Depends(require_admin)])
+async def put_knowledge(kind: str, payload: dict[str, object]) -> dict[str, bool]:
+    """Validate, store the override, and bump knowledge_version (cache invalidation)."""
+    _check_kind(kind)
+    try:
+        content = validate_and_serialize(kind, payload)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors(include_url=False)) from exc
+    repo = get_container().config_repo
+    await repo.set_knowledge_override(kind, content)
+    await repo.bump_config_int("knowledge_version")
     return {"ok": True}

@@ -17,6 +17,10 @@ from app.channels.whatsapp_config import (
 )
 from app.deps import get_container
 from app.knowledge.loader import KINDS, SEEDS_DIR, KnowledgeLoader
+from app.providers.base import ProviderErrorKind
+from app.providers.litellm_provider import LiteLLMProvider
+from app.providers.registry import get_provider, list_providers
+from app.providers.verify import verify_key
 from app.ratelimit import limiter
 
 logger = logging.getLogger("app.admin")
@@ -210,4 +214,71 @@ async def set_whatsapp(req: WhatsAppCredsRequest) -> dict[str, bool]:
         plain_value = values[name]
         if plain_value is not None:
             await config.set_plain(f"whatsapp:{name}", plain_value)
+    return {"ok": True}
+
+
+_KIND_MESSAGES: dict[ProviderErrorKind, str] = {
+    ProviderErrorKind.AUTH: "The API key was rejected by the provider. Please check the key.",
+    ProviderErrorKind.RATE_LIMIT: (
+        "The key looks valid, but the provider reports the quota or billing limit is"
+        " exhausted for this model. Check your plan or billing."
+    ),
+    ProviderErrorKind.NOT_FOUND: (
+        "The key looks valid, but the configured model is not available to this key."
+    ),
+    ProviderErrorKind.TIMEOUT: "Could not reach the provider to verify the key. Please retry.",
+}
+
+_RATE_LIMIT_SAVE_WARNING = (
+    "Key saved. The model is rate-limited right now; replies may be briefly delayed."
+)
+
+
+class ProviderConfigRequest(BaseModel):
+    provider: str = Field(max_length=64)
+    api_key: str | None = Field(default=None, max_length=512)
+
+
+@admin_router.get("/providers", dependencies=[Depends(require_admin)])
+async def providers() -> list[dict[str, str]]:
+    return [
+        {"key": p.key, "label": p.label, "default_model": p.default_model}
+        for p in list_providers()
+    ]
+
+
+@admin_router.get("/config", dependencies=[Depends(require_admin)])
+async def provider_config() -> dict[str, object]:
+    """Active provider status — NEVER returns the api_key."""
+    cfg = get_container().config
+    active = await cfg.get_plain("llm:active_provider")
+    if not active:
+        return {"configured": False, "provider": None}
+    has_key = await cfg.get_secret(f"llm:api_key:{active}") is not None
+    return {"configured": has_key, "provider": active if has_key else None}
+
+
+@admin_router.post("/provider", dependencies=[Depends(require_admin)])
+async def set_provider(req: ProviderConfigRequest) -> dict[str, bool | str]:
+    """Verify the api_key with the provider BEFORE encrypting and persisting it."""
+    info = get_provider(req.provider)
+    if info is None:
+        raise HTTPException(status_code=400, detail=f"unknown provider: {req.provider}")
+    if not req.api_key:
+        raise HTTPException(status_code=400, detail="api_key is required")
+    result = await verify_key(LiteLLMProvider(), info.default_model, req.api_key)
+    cfg = get_container().config
+    if not result.ok:
+        if result.kind is ProviderErrorKind.RATE_LIMIT and info.accept_on_rate_limit:
+            await cfg.set_secret(f"llm:api_key:{req.provider}", req.api_key)
+            await cfg.set_plain("llm:active_provider", req.provider)
+            return {"ok": True, "warning": _RATE_LIMIT_SAVE_WARNING}
+        detail = (
+            _KIND_MESSAGES.get(result.kind, result.error or "verification failed")
+            if result.kind
+            else (result.error or "verification failed")
+        )
+        raise HTTPException(status_code=400, detail=detail)
+    await cfg.set_secret(f"llm:api_key:{req.provider}", req.api_key)
+    await cfg.set_plain("llm:active_provider", req.provider)
     return {"ok": True}

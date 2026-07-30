@@ -11,3 +11,4 @@ class Settings(BaseSettings):
     request_timeout_seconds: float = 20.0
     app_env: str = "dev"
     cron_secret: str = ""
+    admin_password: str = ""  # env ADMIN_PASSWORD — Rule 1 third exception (approved 2026-07-30)

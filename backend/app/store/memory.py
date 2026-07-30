@@ -1,4 +1,10 @@
-from app.store.base import IngestResult, MappingUpsert, OutboundDraft
+from app.store.base import (
+    IngestResult,
+    MappingUpsert,
+    MappingView,
+    OutboundDraft,
+    OutboundView,
+)
 
 
 class InMemoryConfigRepo:
@@ -48,6 +54,35 @@ class InMemoryIngestStore:
             self.outbound[outbound.dedupe_key] = outbound
             queued = True
         return IngestResult(duplicate=False, queued=queued)
+
+    async def recent_mappings(self, limit: int) -> list[MappingView]:
+        views = [
+            MappingView(
+                order_gid=m.order_gid,
+                order_name=m.order_name,
+                phone_e164=m.phone_e164,
+                status="pending",
+                is_cod=m.is_cod,
+                created_at=None,
+            )
+            for m in self.mappings.values()
+        ]
+        return list(reversed(views))[:limit]
+
+    async def recent_outbound(self, limit: int) -> list[OutboundView]:
+        views = [
+            OutboundView(
+                dedupe_key=o.dedupe_key,
+                state="queued",
+                kind=o.kind,
+                phone_e164=o.phone_e164,
+                attempts=0,
+                last_error_code=None,
+                created_at=None,
+            )
+            for o in self.outbound.values()
+        ]
+        return list(reversed(views))[:limit]
 
 
 class InMemoryMessageStore:

@@ -1,9 +1,10 @@
 """Admin JSON API: login/session now; creds, knowledge, controls, views in later tasks."""
 
 import logging
+from dataclasses import asdict
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, ValidationError
 from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -23,6 +24,7 @@ from app.providers.litellm_provider import LiteLLMProvider
 from app.providers.registry import get_provider, list_providers
 from app.providers.verify import verify_key
 from app.ratelimit import limiter
+from app.store.base import MappingView, OutboundView
 
 logger = logging.getLogger("app.admin")
 
@@ -294,3 +296,15 @@ async def get_controls() -> AdminControls:
 async def put_controls(controls: AdminControls) -> dict[str, bool]:
     await save_controls(get_container().config, controls)
     return {"ok": True}
+
+
+@admin_router.get("/mappings", dependencies=[Depends(require_admin)])
+async def list_mappings(limit: int = Query(default=50, ge=1, le=500)) -> list[dict[str, object]]:
+    rows: list[MappingView] = await get_container().ingest.recent_mappings(limit)
+    return [asdict(r) for r in rows]
+
+
+@admin_router.get("/outbox", dependencies=[Depends(require_admin)])
+async def list_outbox(limit: int = Query(default=50, ge=1, le=500)) -> list[dict[str, object]]:
+    rows: list[OutboundView] = await get_container().ingest.recent_outbound(limit)
+    return [asdict(r) for r in rows]

@@ -1,4 +1,10 @@
-from app.store.base import IngestResult, MappingUpsert, OutboundDraft
+from app.store.base import (
+    IngestResult,
+    MappingUpsert,
+    MappingView,
+    OutboundDraft,
+    OutboundView,
+)
 from app.store.pg_factory import LazyPool
 
 
@@ -114,6 +120,47 @@ class PostgresIngestStore:
                     )
                     queued = _rows_affected(result) > 0
                 return IngestResult(duplicate=False, queued=queued)
+
+    async def recent_mappings(self, limit: int) -> list[MappingView]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT order_gid, order_name, phone_e164, status, is_cod, created_at"
+                " FROM order_mappings ORDER BY created_at DESC LIMIT $1",
+                limit,
+            )
+        return [
+            MappingView(
+                order_gid=str(r["order_gid"]),
+                order_name=str(r["order_name"]),
+                phone_e164=None if r["phone_e164"] is None else str(r["phone_e164"]),
+                status=str(r["status"]),
+                is_cod=bool(r["is_cod"]),
+                created_at=r["created_at"].isoformat() if r["created_at"] else None,
+            )
+            for r in rows
+        ]
+
+    async def recent_outbound(self, limit: int) -> list[OutboundView]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT dedupe_key, state, kind, phone_e164, attempts, last_error_code,"
+                " created_at FROM outbound_messages ORDER BY created_at DESC LIMIT $1",
+                limit,
+            )
+        return [
+            OutboundView(
+                dedupe_key=str(r["dedupe_key"]),
+                state=str(r["state"]),
+                kind=str(r["kind"]),
+                phone_e164=str(r["phone_e164"]),
+                attempts=int(r["attempts"]),
+                last_error_code=(
+                    None if r["last_error_code"] is None else str(r["last_error_code"])
+                ),
+                created_at=r["created_at"].isoformat() if r["created_at"] else None,
+            )
+            for r in rows
+        ]
 
 
 class PostgresMessageStore:

@@ -43,6 +43,27 @@ class IngestResult:
     queued: bool
 
 
+@dataclass(frozen=True)
+class MappingView:
+    order_gid: str
+    order_name: str
+    phone_e164: str | None
+    status: str
+    is_cod: bool
+    created_at: str | None  # ISO string; None for in-memory rows
+
+
+@dataclass(frozen=True)
+class OutboundView:
+    dedupe_key: str
+    state: str
+    kind: str
+    phone_e164: str
+    attempts: int
+    last_error_code: str | None
+    created_at: str | None
+
+
 class IngestStore(Protocol):
     async def ingest_order_created(
         self,
@@ -51,6 +72,10 @@ class IngestStore(Protocol):
         mapping: MappingUpsert,
         outbound: OutboundDraft | None,
     ) -> IngestResult: ...
+
+    async def recent_mappings(self, limit: int) -> list[MappingView]: ...
+
+    async def recent_outbound(self, limit: int) -> list[OutboundView]: ...
 
 
 class MessageStore(Protocol):

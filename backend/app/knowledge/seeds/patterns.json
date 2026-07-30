@@ -1,0 +1,8 @@
+[
+  {"pattern": "greeting", "examples": ["hi", "hii", "hello", "namaste", "good morning"], "reply": "Hello, welcome to Thetavas. I can help you check your order status or answer questions about delivery and returns. How can I help?"},
+  {"pattern": "order_status", "examples": ["where is my order", "order status", "mera order kaha hai", "order kab aayega"], "reply": "Let me check that for you. If you ordered from this WhatsApp number I will find it automatically; otherwise please share your order number, for example tavas1234."},
+  {"pattern": "cancel_request", "examples": ["cancel my order", "order cancel karo", "cancel kar do", "i want to cancel"], "reply": "I can help with that. Let me pull up your order first; if it can still be cancelled you will get a confirmation button here."},
+  {"pattern": "thanks_bye", "examples": ["thanks", "thank you", "ok", "theek hai", "bye"], "reply": "You are welcome. If you need anything else about your order, just message here."},
+  {"pattern": "are_you_a_bot", "examples": ["are you a bot", "bot ho kya", "is this a real person"], "reply": "I am the Thetavas order assistant. I can help with order status, confirmations and cancellations. For anything else I can connect you with our team."},
+  {"pattern": "unclear", "examples": ["??", "asdf", "a single word with no context"], "reply": "I did not quite get that. I can help you with your order status, or with confirming or cancelling an order."}
+]

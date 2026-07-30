@@ -29,14 +29,23 @@ from app.store.base import MappingView, OutboundView
 logger = logging.getLogger("app.admin")
 
 _MAX_BODY = 1_048_576  # 1 MiB — same posture as the webhook edges
+_BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
 
 
 class AdminBodyCapMiddleware:
-    """Reject oversized ``/admin`` requests by Content-Length, before body parsing.
+    """Cap ``/admin`` request bodies at the ASGI layer, before FastAPI parses them.
+
+    Two rejections, so the cap cannot be bypassed at the edge (matching the webhook
+    edges' raw-body posture):
+    - a ``Content-Length`` over the cap → **413** (payload too large);
+    - a body-bearing method (POST/PUT/PATCH) with **no** ``Content-Length`` header
+      (e.g. chunked transfer-encoding, which would otherwise skip the header check and
+      reach a pre-auth route unbounded) → **411** (length required). Browsers and fetch
+      always send Content-Length for a JSON body, so this rejects only unusual clients.
 
     A router dependency cannot enforce this: FastAPI parses (and may 422 on) the JSON
     body before path dependencies run, so an oversized *invalid* body 422s before any
-    cap check. Enforcing at the ASGI layer returns 413 first, matching the webhook edges.
+    cap check. Enforcing at the ASGI layer returns first.
     """
 
     def __init__(self, app: ASGIApp, max_body: int = _MAX_BODY) -> None:
@@ -47,15 +56,31 @@ class AdminBodyCapMiddleware:
         if scope["type"] == "http":
             path = scope.get("path", "")
             if isinstance(path, str) and path.startswith("/admin"):
+                content_length: str | None = None
                 for name, value in scope.get("headers") or []:
                     if name == b"content-length":
-                        raw = value.decode("latin-1")
-                        if raw.isdigit() and int(raw) > self._max_body:
-                            response = PlainTextResponse("payload too large", status_code=413)
-                            await response(scope, receive, send)
-                            return
+                        content_length = value.decode("latin-1")
                         break
+                if content_length is not None:
+                    if content_length.isdigit() and int(content_length) > self._max_body:
+                        await self._reject(scope, receive, send, 413, "payload too large")
+                        return
+                elif _has_body_method(scope):
+                    await self._reject(scope, receive, send, 411, "length required")
+                    return
         await self._app(scope, receive, send)
+
+    @staticmethod
+    async def _reject(
+        scope: Scope, receive: Receive, send: Send, status_code: int, message: str
+    ) -> None:
+        response = PlainTextResponse(message, status_code=status_code)
+        await response(scope, receive, send)
+
+
+def _has_body_method(scope: Scope) -> bool:
+    method = scope.get("method", "")
+    return isinstance(method, str) and method in _BODY_METHODS
 
 
 admin_router = APIRouter(prefix="/admin")

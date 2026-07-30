@@ -29,7 +29,11 @@ def verify_token(secret: str, token: str, now: datetime) -> bool:
         payload, sig = token.rsplit(".", 1)
     except ValueError:
         return False
-    if not hmac.compare_digest(sig, _sign(secret, payload)):
+    try:
+        candidate = sig.encode("ascii")  # sig is split from an attacker-controlled cookie
+    except UnicodeEncodeError:
+        return False  # non-ASCII sig can never match a base64url HMAC — fail closed
+    if not hmac.compare_digest(_sign(secret, payload).encode("ascii"), candidate):
         return False
     try:
         exp = int(payload)

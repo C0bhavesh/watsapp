@@ -1,3 +1,5 @@
+from collections.abc import Iterator
+
 import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
@@ -20,6 +22,14 @@ def test_login_wrong_password_401(client: TestClient) -> None:
 
 def test_session_without_cookie_401(client: TestClient) -> None:
     assert client.get("/admin/session").status_code == 401
+
+
+def test_session_non_ascii_cookie_401_not_500(client: TestClient) -> None:
+    # A latin-1 cookie byte reaches verify_token as a non-ASCII str (Starlette decodes
+    # headers permissively); the verifier must fail closed with 401, not raise → pre-auth 500.
+    raw_cookie = "admin_session=9999999999.ééé".encode("latin-1")
+    r = client.get("/admin/session", headers={"cookie": raw_cookie})
+    assert r.status_code == 401
 
 
 def test_login_unset_password_503(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -48,3 +58,15 @@ def test_body_cap_413(client: TestClient) -> None:
     big = b"x" * 1_048_577  # one byte over the 1 MiB cap; httpx sets Content-Length for us
     r = client.post("/admin/login", content=big, headers={"content-type": "application/json"})
     assert r.status_code == 413
+
+
+def test_body_cap_chunked_no_length_411(client: TestClient) -> None:
+    # A generator body makes httpx use chunked transfer-encoding with NO Content-Length,
+    # which would bypass a header-only size cap pre-auth. Middleware must 411 (length required).
+    def gen() -> Iterator[bytes]:
+        yield b'{"password": "test-admin-pass"}'
+
+    r = client.post(
+        "/admin/login", content=gen(), headers={"content-type": "application/json"}
+    )
+    assert r.status_code == 411

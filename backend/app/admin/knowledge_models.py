@@ -7,7 +7,7 @@ validated into these models before serialization.
 
 import json
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class BrandVoiceBody(BaseModel):
@@ -41,7 +41,16 @@ class BusinessBody(BaseModel):
     support_email: str = Field(default="", max_length=2000)
     support_hours: str = Field(default="", max_length=2000)
     note: str = Field(default="", max_length=2000)
-    extra: dict[str, str] = Field(default_factory=dict)
+    extra: dict[str, str] = Field(default_factory=dict, max_length=50)
+
+    @field_validator("extra")
+    @classmethod
+    def _cap_extra_entry_lengths(cls, value: dict[str, str]) -> dict[str, str]:
+        """Bound each entry so a single pair cannot smuggle a megabyte past the pair cap."""
+        for key, val in value.items():
+            if len(key) > 200 or len(val) > 2000:
+                raise ValueError("extra keys must be <=200 and values <=2000 chars")
+        return value
 
 
 def _dump(obj: object) -> str:

@@ -65,3 +65,11 @@ def test_put_patterns_and_business_validate(client: TestClient) -> None:
     assert client.put("/admin/knowledge/patterns", json=bad_p).status_code == 422
     ok_b = {"store_name": "Thetavas", "website": "https://thetavas.myshopify.com"}
     assert client.put("/admin/knowledge/business", json=ok_b).status_code == 200
+
+
+def test_put_business_extra_dict_capped_at_50(client: TestClient) -> None:
+    login(client)
+    over = {"extra": {f"k{i}": "v" for i in range(51)}}
+    assert client.put("/admin/knowledge/business", json=over).status_code == 422
+    ok = {"extra": {f"k{i}": "v" for i in range(50)}}
+    assert client.put("/admin/knowledge/business", json=ok).status_code == 200

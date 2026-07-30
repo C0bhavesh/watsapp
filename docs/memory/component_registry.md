@@ -204,10 +204,10 @@
 
 ## AdminBodyCapMiddleware
 - **File:** backend/app/admin/router.py
-- **Purpose:** reject oversized `/admin` requests (>1 MiB Content-Length) with 413 at the ASGI layer, before FastAPI parses the body.
+- **Purpose:** cap `/admin` request bodies at the ASGI layer, before FastAPI parses the body — two rejections so the cap cannot be bypassed at the edge.
 - **Public API:** `AdminBodyCapMiddleware(app, max_body=1_048_576)` (pure ASGI); registered via `app.add_middleware(AdminBodyCapMiddleware)`.
 - **Used in:** main.app.
-- **Notes:** a router-level dependency CANNOT do this — FastAPI parses (and may 422 on) the JSON body before path dependencies run, so an oversized invalid body would 422 before any cap check. Enforcing on Content-Length at the ASGI layer matches the webhook edges' posture and returns 413 first. Only inspects `/admin` paths.
+- **Notes:** a router-level dependency CANNOT do this — FastAPI parses (and may 422 on) the JSON body before path dependencies run, so an oversized invalid body would 422 before any cap check. Enforced on Content-Length + explicit no-length rejection at the ASGI layer, matching the webhook edges' raw-body posture: (1) `Content-Length` over the cap → **413**; (2) a body-bearing method (POST/PUT/PATCH) with NO `Content-Length` header — e.g. chunked transfer-encoding, which would otherwise skip the header check and reach a pre-auth route unbounded — → **411** (length required). Browsers/fetch always send Content-Length for JSON, so 411 rejects only unusual clients. Only inspects `/admin` paths.
 
 ## Admin knowledge validation models
 - **File:** backend/app/admin/knowledge_models.py

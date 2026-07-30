@@ -36,6 +36,18 @@ def test_verify_malformed_token() -> None:
     assert verify_token("k1", "abc.def", NOW) is False
 
 
+def test_verify_non_ascii_signature_fails_closed() -> None:
+    # The signature is split from the attacker-controlled cookie; a non-ASCII byte must
+    # NOT raise TypeError inside hmac.compare_digest — fail closed (return False) instead.
+    assert verify_token("k1", "9999999999.sigé", NOW) is False
+
+
+def test_verify_non_ascii_payload_fails_closed() -> None:
+    # A non-ASCII payload segment must likewise never raise.
+    assert verify_token("k1", "99é99.sig", NOW) is False
+    assert verify_token("k1", "éé.éé", NOW) is False
+
+
 def test_issue_empty_secret_raises() -> None:
     with pytest.raises(ValueError):
         issue_token("", NOW)

@@ -92,3 +92,9 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at      timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages (conversation_id, created_at);
+
+CREATE TABLE IF NOT EXISTS knowledge_overrides (
+    kind        text PRIMARY KEY,
+    content     text NOT NULL,
+    updated_at  timestamptz NOT NULL DEFAULT now()
+);

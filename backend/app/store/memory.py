@@ -4,12 +4,25 @@ from app.store.base import IngestResult, MappingUpsert, OutboundDraft
 class InMemoryConfigRepo:
     def __init__(self) -> None:
         self._data: dict[str, str] = {}
+        self._knowledge: dict[str, str] = {}
 
     async def get(self, key: str) -> str | None:
         return self._data.get(key)
 
     async def set(self, key: str, value: str) -> None:
         self._data[key] = value
+
+    async def get_knowledge_override(self, kind: str) -> str | None:
+        return self._knowledge.get(kind)
+
+    async def set_knowledge_override(self, kind: str, content: str) -> None:
+        self._knowledge[kind] = content
+
+    async def get_knowledge_overrides(self, kinds: list[str]) -> dict[str, str | None]:
+        return {k: self._knowledge.get(k) for k in kinds}
+
+    async def bump_config_int(self, key: str) -> None:
+        self._data[key] = str(int(self._data.get(key, "0")) + 1)
 
 
 class InMemoryIngestStore:

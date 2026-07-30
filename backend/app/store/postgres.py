@@ -26,6 +26,43 @@ class PostgresConfigRepo:
                 value,
             )
 
+    async def get_knowledge_override(self, kind: str) -> str | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT content FROM knowledge_overrides WHERE kind = $1", kind
+            )
+        return None if row is None else str(row["content"])
+
+    async def set_knowledge_override(self, kind: str, content: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO knowledge_overrides (kind, content, updated_at)"
+                " VALUES ($1, $2, now())"
+                " ON CONFLICT (kind) DO UPDATE"
+                " SET content = EXCLUDED.content, updated_at = now()",
+                kind,
+                content,
+            )
+
+    async def get_knowledge_overrides(self, kinds: list[str]) -> dict[str, str | None]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT kind, content FROM knowledge_overrides WHERE kind = ANY($1::text[])",
+                kinds,
+            )
+        found = {str(r["kind"]): str(r["content"]) for r in rows}
+        return {k: found.get(k) for k in kinds}
+
+    async def bump_config_int(self, key: str) -> None:
+        # value must remain a decimal integer string; only our code writes this key
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO app_config (key, value) VALUES ($1, '1')"
+                " ON CONFLICT (key) DO UPDATE"
+                " SET value = ((app_config.value)::bigint + 1)::text, updated_at = now()",
+                key,
+            )
+
 
 class PostgresIngestStore:
     def __init__(self, pool: LazyPool) -> None:

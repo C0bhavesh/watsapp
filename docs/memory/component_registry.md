@@ -44,9 +44,9 @@
 ## LazyPool (asyncpg)
 - **File:** backend/app/store/pg_factory.py
 - **Purpose:** asyncpg connection pool created on FIRST `acquire()`, never at import (serverless cold-start rule).
-- **Public API:** `LazyPool(dsn: str)`; `async with pool.acquire() as conn:`; `async close()`. Double-checked `asyncio.Lock` guards single pool creation. `create_pool(min_size=0, max_size=5)`.
+- **Public API:** `LazyPool(dsn: str)`; `async with pool.acquire() as conn:`; `async close()`. Double-checked `asyncio.Lock` guards single pool creation. `create_pool(min_size=0, max_size=5, statement_cache_size=0)`.
 - **Used in:** PostgresConfigRepo, PostgresIngestStore, deps.Container.
-- **Notes:** asyncpg has no py.typed marker — `[[tool.mypy.overrides]] module="asyncpg.*" ignore_missing_imports=true` in pyproject.toml.
+- **Notes:** asyncpg has no py.typed marker — `[[tool.mypy.overrides]] module="asyncpg.*" ignore_missing_imports=true` in pyproject.toml. **Supabase-host IPv4 pin (Vercel getaddrinfo EBUSY workaround, 2026-08-04):** when the DSN hostname contains `supabase.com`, `_get_pool` calls `_create_supabase_pool(host)` — it synchronously resolves IPv4 (`socket.getaddrinfo(host, None, family=AF_INET, type=SOCK_STREAM)[0][4][0]`) and passes `host=<ipv4>` + `ssl="require"` to `create_pool` (asyncpg kwarg overrides the DSN host; `ssl=require` encrypts without hostname verification since we connect by IP). This dodges Vercel's Python runtime raising `OSError [Errno 16] EBUSY` inside asyncio's threaded dual-stack (AF_UNSPEC) getaddrinfo. On resolution failure (`except OSError`) it falls back to the plain `create_pool(dsn, ...)` — never hard-fails worse than before. **Non-supabase DSNs are UNCHANGED** (no host override, no `ssl` kwarg) so local/other plain non-SSL Postgres still works. `statement_cache_size=0` kept on every path (transaction pooler breaks prepared statements). Wiring is unit-tested with mocks (`tests/store/test_lazypool_ipv4.py`); the bug itself only reproduces on the Vercel runtime.
 
 ## normalize_phone (E.164)
 - **File:** backend/app/core/phone.py

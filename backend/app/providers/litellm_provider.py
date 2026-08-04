@@ -33,10 +33,13 @@ def _classify(exc: BaseException) -> ProviderErrorKind:
     return ProviderErrorKind.UNKNOWN
 
 
-def _redact(msg: str, api_key: str, model: str, vertex: "VertexConfig | None") -> str:
-    """Scrub both the api_key and (for vertex models) the service-account JSON from an error."""
-    if model.startswith("vertex_ai/") and vertex and vertex.credentials_json:
-        msg = msg.replace(vertex.credentials_json, "***")
+def _redact(msg: str, api_key: str) -> str:
+    """Scrub the api_key from an error string (api_key providers only).
+
+    Vertex errors do NOT flow through here — they collapse to a fixed message in
+    ``complete`` because exact-substring redaction cannot catch a reformatted or
+    re-serialized copy of the service-account JSON.
+    """
     if api_key:
         msg = msg.replace(api_key, "***")
     return msg
@@ -79,9 +82,11 @@ class LiteLLMProvider:
                 model=model, messages=msg_dicts, timeout=timeout, **call_kwargs
             )
         except Exception as exc:  # noqa: BLE001 — every upstream error becomes ProviderError
-            raise ProviderError(
-                _redact(str(exc), api_key, model, self._vertex), _classify(exc)
-            ) from exc
+            if model.startswith("vertex_ai/"):
+                # A vertex error may embed the service-account JSON (exact, reformatted, or a
+                # lone field) — discard the raw text entirely and surface a fixed safe message.
+                raise ProviderError("Vertex AI request failed", _classify(exc)) from exc
+            raise ProviderError(_redact(str(exc), api_key), _classify(exc)) from exc
         try:
             text = resp.choices[0].message.content or ""
         except (AttributeError, IndexError, TypeError):

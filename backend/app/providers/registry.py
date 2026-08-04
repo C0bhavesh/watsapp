@@ -1,4 +1,7 @@
 from dataclasses import dataclass
+from typing import Literal
+
+AuthKind = Literal["api_key", "env"]
 
 
 @dataclass(frozen=True)
@@ -12,7 +15,7 @@ class ProviderInfo:
     # "api_key": credential is a single key string stored encrypted (entered in the admin
     # panel). "env": credential(s) come from environment variables (e.g. a Vertex AI
     # service-account JSON) — nothing is pasted or stored in the config DB.
-    auth_kind: str = "api_key"
+    auth_kind: AuthKind = "api_key"
     # Extra kwargs spread into the litellm.acompletion call for this provider (e.g. Vertex's
     # temperature/reasoning_effort). None = no extras. A dict field makes the frozen instance
     # unhashable, which is fine: ProviderInfo objects are only stored as dict VALUES.

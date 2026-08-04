@@ -329,15 +329,36 @@ _ENV_VERIFY_FAILED = (
     "project, and location."
 )
 
+# Env-auth (Vertex) failures have NO api_key — messages reference the service-account JSON,
+# project, and location instead of "the key". Kept separate from _KIND_MESSAGES (api_key wording).
+_ENV_KIND_MESSAGES: dict[ProviderErrorKind, str] = {
+    ProviderErrorKind.AUTH: (
+        "The service-account credentials were rejected by the provider. Check the"
+        " service-account JSON, project, and location."
+    ),
+    ProviderErrorKind.RATE_LIMIT: (
+        "The credentials look valid, but the provider reports the quota or billing limit is"
+        " exhausted for this model, project, and location. Check your plan or billing."
+    ),
+    ProviderErrorKind.NOT_FOUND: (
+        "The credentials look valid, but the configured model is not available. Check the"
+        " model, project, and location."
+    ),
+    ProviderErrorKind.TIMEOUT: (
+        "Could not reach the provider to verify the service-account JSON, project, and"
+        " location. Please retry."
+    ),
+}
+
 
 def _env_verify_detail(kind: ProviderErrorKind | None) -> str:
     """Safe 400 detail for an env-auth verification failure — never the raw provider error.
 
-    Known kinds get a clear message; UNKNOWN/None fall back to the generic Vertex message so
-    the service-account JSON in a raw error can never leak into the response body.
+    Known kinds get a service-account-oriented message; UNKNOWN/None fall back to the generic
+    Vertex message so the service-account JSON in a raw error can never leak into the response.
     """
-    if kind is not None and kind is not ProviderErrorKind.UNKNOWN:
-        mapped = _KIND_MESSAGES.get(kind)
+    if kind is not None:
+        mapped = _ENV_KIND_MESSAGES.get(kind)
         if mapped is not None:
             return mapped
     return _ENV_VERIFY_FAILED

@@ -1,3 +1,4 @@
+import json
 import sys
 
 import pytest
@@ -73,15 +74,30 @@ async def test_vertex_model_missing_creds_raises_auth(monkeypatch: pytest.Monkey
     assert fake.captured is None  # never reached litellm
 
 
-async def test_error_redaction_removes_credentials_json(monkeypatch: pytest.MonkeyPatch) -> None:
-    creds = '{"private_key":"-----BEGIN PRIVATE KEY-----SECRETMATERIAL-----END PRIVATE KEY-----"}'
+async def test_vertex_error_never_surfaces_service_account_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A vertex_ai/* error collapses to a fixed safe message — the raw text is discarded.
+
+    Exact-substring redaction is not enough: litellm may reformat/re-serialize the
+    credentials or echo a lone field, none of which match the stored string verbatim.
+    """
+    sa = {
+        "client_email": "svc@proj-x.iam.gserviceaccount.com",
+        "private_key": "-----BEGIN PRIVATE KEY-----SECRETMATERIAL-----END PRIVATE KEY-----",
+    }
+    creds = json.dumps(sa)
+    reformatted = json.dumps(sa, indent=2, sort_keys=True)  # same secret, different bytes
+    lone_private_key = sa["private_key"]
 
     class _BoomLiteLLM:
         def __init__(self) -> None:
             self.disable_aiohttp_transport = False
 
         async def acompletion(self, **kwargs: object) -> _FakeResp:
-            raise RuntimeError(f"vertex blew up with {creds}")
+            raise RuntimeError(
+                f"vertex blew up with {creds} :: {reformatted} :: {lone_private_key}"
+            )
 
     monkeypatch.setitem(sys.modules, "litellm", _BoomLiteLLM())
     vertex = VertexConfig(credentials_json=creds, project="proj", location="us-central1")
@@ -92,7 +108,13 @@ async def test_error_redaction_removes_credentials_json(monkeypatch: pytest.Monk
             "vertex_ai/gemini-3.5-flash", [Message("user", "ping")], "", 15.0
         )
 
-    assert creds not in str(exc_info.value)  # service-account JSON scrubbed from the error
+    message = str(exc_info.value)
+    assert message == "Vertex AI request failed"  # fixed safe message, kind preserved
+    assert creds not in message
+    assert reformatted not in message
+    assert "private_key" not in message
+    assert "client_email" not in message
+    assert "BEGIN PRIVATE KEY" not in message
 
 
 async def test_api_key_model_injects_api_key_not_vertex(monkeypatch: pytest.MonkeyPatch) -> None:

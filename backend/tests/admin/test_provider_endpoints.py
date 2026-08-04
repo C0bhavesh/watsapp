@@ -78,6 +78,31 @@ def test_vertex_env_verify_failure_uses_safe_message(
     assert client.get("/admin/config").json() == {"configured": False, "provider": None}
 
 
+def test_vertex_env_auth_failure_is_service_account_oriented(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    login(client)
+    leak = '{"private_key":"-----BEGIN PRIVATE KEY-----LEAKED-----END PRIVATE KEY-----"}'
+
+    async def fake_verify(*args: object, **kwargs: object) -> VerifyResult:
+        return VerifyResult(ok=False, error=leak, kind=ProviderErrorKind.AUTH)
+
+    monkeypatch.setattr("app.admin.router.verify_key", fake_verify)
+    r = client.post("/admin/provider", json={"provider": "vertex"})
+    assert r.status_code == 400
+    detail = r.json()["detail"].lower()
+    # Env/Vertex auth failure must reference the service-account credentials, not "the API key".
+    assert "service-account" in detail
+    assert "project" in detail
+    assert "location" in detail
+    assert "api key" not in detail
+    # No raw provider error / service-account JSON ever surfaces.
+    assert leak not in r.text
+    assert "-----BEGIN PRIVATE KEY-----" not in r.text
+    # Nothing activated on failure.
+    assert client.get("/admin/config").json() == {"configured": False, "provider": None}
+
+
 def test_unknown_provider_400(client: TestClient) -> None:
     login(client)
     r = client.post("/admin/provider", json={"provider": "nope", "api_key": "k"})

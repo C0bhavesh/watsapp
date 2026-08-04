@@ -5,6 +5,7 @@ import httpx
 from app.config.crypto import SecretVault
 from app.config.service import ConfigService
 from app.config.settings import Settings
+from app.providers.litellm_provider import LiteLLMProvider, VertexConfig
 from app.shopify.client import ShopifyClient
 from app.shopify.token_manager import TokenManager
 from app.store.base import ConfigRepo, IngestStore, MessageStore
@@ -64,3 +65,18 @@ def get_container() -> Container:
 def reset_container() -> None:
     global _container
     _container = None
+
+
+def build_provider(settings: Settings) -> LiteLLMProvider:
+    """Construct the LLM verifier with Vertex env-credentials wired in.
+
+    Built at call time (never at import), so the webhook cold path never pays for it and the
+    Vertex service-account JSON is read from env-sourced settings only when a verify is requested.
+    ``LiteLLMProvider`` still imports litellm lazily inside ``complete`` — nothing here triggers it.
+    """
+    vertex = VertexConfig(
+        credentials_json=settings.vertex_credentials_json or None,
+        project=settings.vertex_project or None,
+        location=settings.vertex_location,
+    )
+    return LiteLLMProvider(vertex=vertex)

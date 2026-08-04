@@ -17,10 +17,9 @@ from app.channels.whatsapp_config import (
     WHATSAPP_SECRET_FIELDS,
     load_whatsapp_config,
 )
-from app.deps import get_container
+from app.deps import build_provider, get_container
 from app.knowledge.loader import KINDS, SEEDS_DIR, KnowledgeLoader
 from app.providers.base import ProviderErrorKind
-from app.providers.litellm_provider import LiteLLMProvider
 from app.providers.registry import get_provider, list_providers
 from app.providers.verify import verify_key
 from app.ratelimit import limiter
@@ -323,6 +322,26 @@ _RATE_LIMIT_SAVE_WARNING = (
     "Key saved. The model is rate-limited right now; replies may be briefly delayed."
 )
 
+# Safe fallback for env-provider (Vertex) verification failures. The raw provider error may
+# embed the service-account JSON, so it is NEVER surfaced for env-auth providers.
+_ENV_VERIFY_FAILED = (
+    "Could not verify the provider credentials. Check the service-account JSON, "
+    "project, and location."
+)
+
+
+def _env_verify_detail(kind: ProviderErrorKind | None) -> str:
+    """Safe 400 detail for an env-auth verification failure — never the raw provider error.
+
+    Known kinds get a clear message; UNKNOWN/None fall back to the generic Vertex message so
+    the service-account JSON in a raw error can never leak into the response body.
+    """
+    if kind is not None and kind is not ProviderErrorKind.UNKNOWN:
+        mapped = _KIND_MESSAGES.get(kind)
+        if mapped is not None:
+            return mapped
+    return _ENV_VERIFY_FAILED
+
 
 class ProviderConfigRequest(BaseModel):
     provider: str = Field(max_length=64)
@@ -332,7 +351,12 @@ class ProviderConfigRequest(BaseModel):
 @admin_router.get("/providers", dependencies=[Depends(require_admin)])
 async def providers() -> list[dict[str, str]]:
     return [
-        {"key": p.key, "label": p.label, "default_model": p.default_model}
+        {
+            "key": p.key,
+            "label": p.label,
+            "default_model": p.default_model,
+            "auth_kind": p.auth_kind,
+        }
         for p in list_providers()
     ]
 
@@ -344,20 +368,44 @@ async def provider_config() -> dict[str, object]:
     active = await cfg.get_plain("llm:active_provider")
     if not active:
         return {"configured": False, "provider": None}
+    info = get_provider(active)
+    if info is not None and info.auth_kind == "env":
+        # Env-credential provider (Vertex): credentials come from env, no stored key needed.
+        return {"configured": True, "provider": active}
     has_key = await cfg.get_secret(f"llm:api_key:{active}") is not None
     return {"configured": has_key, "provider": active if has_key else None}
 
 
 @admin_router.post("/provider", dependencies=[Depends(require_admin)])
 async def set_provider(req: ProviderConfigRequest) -> dict[str, bool | str]:
-    """Verify the api_key with the provider BEFORE encrypting and persisting it."""
+    """Verify the provider credentials BEFORE persisting.
+
+    api_key providers: verify the pasted key, then encrypt-store it and activate.
+    env-auth providers (Vertex): verify against env creds (no key), then activate WITHOUT
+    storing any key. On env-auth failure only a safe message is returned — the raw error may
+    embed the service-account JSON.
+    """
     info = get_provider(req.provider)
     if info is None:
         raise HTTPException(status_code=400, detail=f"unknown provider: {req.provider}")
+    verifier = build_provider(get_container().settings)
+    cfg = get_container().config
+
+    if info.auth_kind == "env":
+        result = await verify_key(
+            verifier, info.default_model, "", extra_params=info.request_params
+        )
+        if not result.ok:
+            raise HTTPException(status_code=400, detail=_env_verify_detail(result.kind))
+        # Activate without storing a key — env-auth credentials live in env, never the DB.
+        await cfg.set_plain("llm:active_provider", req.provider)
+        return {"ok": True}
+
     if not req.api_key:
         raise HTTPException(status_code=400, detail="api_key is required")
-    result = await verify_key(LiteLLMProvider(), info.default_model, req.api_key)
-    cfg = get_container().config
+    result = await verify_key(
+        verifier, info.default_model, req.api_key, extra_params=info.request_params
+    )
     if not result.ok:
         if result.kind is ProviderErrorKind.RATE_LIMIT and info.accept_on_rate_limit:
             await cfg.set_secret(f"llm:api_key:{req.provider}", req.api_key)

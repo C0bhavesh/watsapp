@@ -90,28 +90,47 @@ el("wa-save").addEventListener("click", async () => {
 });
 
 // ---- llm provider ------------------------------------------------------------
+// provider key -> auth_kind ("api_key" | "env"). Env providers (Vertex) authenticate
+// from server env credentials, so no API key is pasted or stored.
+let providerAuthKinds = {};
+
 async function loadProviders() {
   const list = await api("GET", "/admin/providers");
   const sel = el("llm-provider");
   sel.innerHTML = "";
+  providerAuthKinds = {};
   for (const p of list) {
+    providerAuthKinds[p.key] = p.auth_kind || "api_key";
     const opt = document.createElement("option");
     opt.value = p.key; opt.textContent = p.label + " (" + p.default_model + ")";
     sel.appendChild(opt);
   }
+  applyProviderAuthUI();
   const cfg = await api("GET", "/admin/config");
   const b = el("llm-badge");
   b.textContent = cfg.configured ? "configured: " + cfg.provider : "not configured";
   b.className = "badge" + (cfg.configured ? " on" : "");
 }
+
+// Hide the API-key field and relabel the button for env-auth (Vertex) providers.
+function applyProviderAuthUI() {
+  const isEnv = providerAuthKinds[el("llm-provider").value] === "env";
+  const keyField = el("llm-key-field");
+  if (keyField) keyField.style.display = isEnv ? "none" : "";
+  el("llm-save").textContent = isEnv ? "Use this provider" : "Verify and save";
+}
+el("llm-provider").addEventListener("change", applyProviderAuthUI);
+
 el("llm-save").addEventListener("click", async () => {
-  setStatus("llm-status", "Verifying key with the provider...");
+  const provider = el("llm-provider").value;
+  const isEnv = providerAuthKinds[provider] === "env";
+  setStatus("llm-status", isEnv ? "Activating provider..." : "Verifying key with the provider...");
   try {
-    const r = await api("POST", "/admin/provider", {
-      provider: el("llm-provider").value, api_key: el("llm-key").value,
-    });
+    const payload = isEnv ? { provider } : { provider, api_key: el("llm-key").value };
+    const r = await api("POST", "/admin/provider", payload);
     el("llm-key").value = "";
-    setStatus("llm-status", r.warning || "Key verified and saved.", r.warning ? "warn" : "ok");
+    const ok = isEnv ? "Provider activated." : "Key verified and saved.";
+    setStatus("llm-status", r.warning || ok, r.warning ? "warn" : "ok");
     loadProviders();
   } catch (e) { setStatus("llm-status", e.message, "err"); }
 });

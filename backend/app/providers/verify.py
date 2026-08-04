@@ -15,9 +15,13 @@ async def verify_key(
     model: str,
     api_key: str,
     timeout: float = 15.0,
+    *,
+    extra_params: dict[str, object] | None = None,
 ) -> VerifyResult:
     try:
-        await provider.complete(model, [Message("user", "ping")], api_key, timeout)
+        await provider.complete(
+            model, [Message("user", "ping")], api_key, timeout, extra_params=extra_params
+        )
         return VerifyResult(ok=True, error=None, kind=None)
     except ProviderError as exc:
         raw = str(exc)

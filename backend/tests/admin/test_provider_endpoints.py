@@ -20,6 +20,64 @@ def test_providers_list(client: TestClient) -> None:
     assert any(p["key"] == "gemini" for p in r.json())
 
 
+def test_providers_list_includes_auth_kind(client: TestClient) -> None:
+    login(client)
+    r = client.get("/admin/providers")
+    assert r.status_code == 200
+    by_key = {p["key"]: p for p in r.json()}
+    assert by_key["gemini"]["auth_kind"] == "api_key"
+    assert by_key["vertex"]["auth_kind"] == "env"
+
+
+def test_vertex_env_provider_saves_without_key(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    login(client)
+
+    async def fake_verify(*args: object, **kwargs: object) -> VerifyResult:
+        return VerifyResult(ok=True, error=None, kind=None)
+
+    monkeypatch.setattr("app.admin.router.verify_key", fake_verify)
+    # No api_key sent for the env-auth provider.
+    r = client.post("/admin/provider", json={"provider": "vertex"})
+    assert r.status_code == 200 and r.json() == {"ok": True}
+
+    # Active provider recorded, and GET /config reports configured without a stored key.
+    assert client.get("/admin/config").json() == {"configured": True, "provider": "vertex"}
+
+    async def _read() -> tuple[str | None, str | None]:
+        c = get_container()
+        active = await c.config_repo.get("llm:active_provider")
+        secret = await c.config_repo.get("llm:api_key:vertex")
+        return active, secret
+
+    active, secret = asyncio.run(_read())
+    assert active == "vertex"
+    assert secret is None  # env-auth provider never writes a key secret
+
+
+def test_vertex_env_verify_failure_uses_safe_message(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    login(client)
+    leak = '{"private_key":"-----BEGIN PRIVATE KEY-----LEAKED-----END PRIVATE KEY-----"}'
+
+    async def fake_verify(*args: object, **kwargs: object) -> VerifyResult:
+        return VerifyResult(ok=False, error=leak, kind=ProviderErrorKind.UNKNOWN)
+
+    monkeypatch.setattr("app.admin.router.verify_key", fake_verify)
+    r = client.post("/admin/provider", json={"provider": "vertex"})
+    assert r.status_code == 400
+    assert leak not in r.text  # the service-account JSON must never surface
+    assert "-----BEGIN PRIVATE KEY-----" not in r.text
+    assert r.json()["detail"] == (
+        "Could not verify the provider credentials. Check the service-account JSON, "
+        "project, and location."
+    )
+    # Nothing activated on failure.
+    assert client.get("/admin/config").json() == {"configured": False, "provider": None}
+
+
 def test_unknown_provider_400(client: TestClient) -> None:
     login(client)
     r = client.post("/admin/provider", json={"provider": "nope", "api_key": "k"})

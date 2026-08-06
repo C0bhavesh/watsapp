@@ -257,6 +257,7 @@ async function loadControls() {
   el("c-push-policy").value = c.push_policy;
   el("c-language").value = c.default_language;
   el("c-staleness").value = c.push_staleness_hours;
+  el("c-retention").value = c.retention_days;
   el("c-base-url").value = c.public_base_url;
   el("c-owner-alert").value = c.owner_alert_number;
   el("c-rv-order").checked = c.reveal_fields.includes("order_number");
@@ -284,6 +285,7 @@ el("c-save").addEventListener("click", async () => {
     },
     default_language: el("c-language").value,
     push_staleness_hours: parseInt(el("c-staleness").value, 10),
+    retention_days: parseInt(el("c-retention").value, 10),
     public_base_url: el("c-base-url").value.trim(),
     owner_alert_number: el("c-owner-alert").value.trim(),
   };

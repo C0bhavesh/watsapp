@@ -48,3 +48,37 @@ async def test_ineligible_ingest_maps_without_queueing() -> None:
     result = await store.ingest_order_created("wh1", "orders/create", mapping(), None)
     assert result == IngestResult(duplicate=False, queued=False)
     assert "gid://shopify/Order/1" in store.mappings and not store.outbound
+
+
+async def test_find_mappings_by_phone_returns_matches_only() -> None:
+    from app.store.base import MappingUpsert
+    from app.store.memory import InMemoryIngestStore
+
+    store = InMemoryIngestStore()
+    await store.ingest_order_created(
+        "wh1", "orders/create",
+        MappingUpsert(
+            order_gid="gid://1", order_name="tavas1", order_number_int=1,
+            phone_e164="+919999999999", customer_name=None, email=None,
+            language="en", financial_status_at_create=None, is_cod=False,
+        ),
+        None,
+    )
+    await store.ingest_order_created(
+        "wh2", "orders/create",
+        MappingUpsert(
+            order_gid="gid://2", order_name="tavas2", order_number_int=2,
+            phone_e164="+918888888888", customer_name=None, email=None,
+            language="en", financial_status_at_create=None, is_cod=False,
+        ),
+        None,
+    )
+    matches = await store.find_mappings_by_phone("+919999999999")
+    assert [m.order_gid for m in matches] == ["gid://1"]
+
+
+async def test_find_mappings_by_phone_no_match_returns_empty() -> None:
+    from app.store.memory import InMemoryIngestStore
+
+    store = InMemoryIngestStore()
+    assert await store.find_mappings_by_phone("+910000000000") == []

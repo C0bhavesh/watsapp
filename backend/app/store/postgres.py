@@ -165,6 +165,26 @@ class PostgresIngestStore:
             for r in rows
         ]
 
+    async def find_mappings_by_phone(self, phone_e164: str, limit: int = 20) -> list[MappingView]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT order_gid, order_name, phone_e164, status, is_cod, created_at"
+                " FROM order_mappings WHERE phone_e164 = $1 ORDER BY created_at DESC LIMIT $2",
+                phone_e164,
+                limit,
+            )
+        return [
+            MappingView(
+                order_gid=str(r["order_gid"]),
+                order_name=str(r["order_name"]),
+                phone_e164=None if r["phone_e164"] is None else str(r["phone_e164"]),
+                status=str(r["status"]),
+                is_cod=bool(r["is_cod"]),
+                created_at=r["created_at"].isoformat() if r["created_at"] else None,
+            )
+            for r in rows
+        ]
+
     async def delete_by_phone(self, phone_e164: str) -> DeletionResult:
         """DPDP right-to-erasure: purge every row keyed to one phone number, atomically.
 

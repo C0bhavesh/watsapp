@@ -87,6 +87,21 @@ class InMemoryIngestStore:
         ]
         return list(reversed(views))[:limit]
 
+    async def find_mappings_by_phone(self, phone_e164: str, limit: int = 20) -> list[MappingView]:
+        matches = [m for m in self.mappings.values() if m.phone_e164 == phone_e164]
+        views = [
+            MappingView(
+                order_gid=m.order_gid,
+                order_name=m.order_name,
+                phone_e164=m.phone_e164,
+                status="pending",
+                is_cod=m.is_cod,
+                created_at=None,
+            )
+            for m in matches
+        ]
+        return list(reversed(views))[:limit]
+
     async def delete_by_phone(self, phone_e164: str) -> DeletionResult:
         removed_mappings = [
             gid for gid, m in self.mappings.items() if m.phone_e164 == phone_e164

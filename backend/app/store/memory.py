@@ -7,6 +7,7 @@ from app.store.base import (
     MappingView,
     OutboundDraft,
     OutboundView,
+    StoredMessage,
 )
 
 
@@ -149,3 +150,39 @@ class InMemoryMessageStore:
             return False
         self.seen.add(message_id)
         return True
+
+
+class InMemoryConversationStore:
+    def __init__(self) -> None:
+        self._conversations: dict[str, int] = {}
+        self._messages: dict[int, list[StoredMessage]] = {}
+        self._paused_until: dict[int, datetime] = {}
+        self._handoff_attempted_at: dict[int, datetime] = {}
+        self._next_id = 1
+
+    async def get_or_create(self, user_id: str) -> int:
+        if user_id not in self._conversations:
+            self._conversations[user_id] = self._next_id
+            self._messages[self._next_id] = []
+            self._next_id += 1
+        return self._conversations[user_id]
+
+    async def recent_messages(self, conversation_id: int, limit: int) -> list[StoredMessage]:
+        return self._messages.get(conversation_id, [])[-limit:]
+
+    async def append_message(self, conversation_id: int, role: str, content: str) -> None:
+        self._messages.setdefault(conversation_id, []).append(
+            StoredMessage(role=role, content=content, created_at=None)
+        )
+
+    async def pause_until(self, conversation_id: int, until: datetime) -> None:
+        self._paused_until[conversation_id] = until
+
+    async def get_paused_until(self, conversation_id: int) -> datetime | None:
+        return self._paused_until.get(conversation_id)
+
+    async def mark_handoff_attempted(self, conversation_id: int, at: datetime) -> None:
+        self._handoff_attempted_at[conversation_id] = at
+
+    async def get_handoff_attempted_at(self, conversation_id: int) -> datetime | None:
+        return self._handoff_attempted_at.get(conversation_id)

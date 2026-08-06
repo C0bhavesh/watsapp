@@ -7,6 +7,7 @@ from app.store.base import (
     MappingView,
     OutboundDraft,
     OutboundView,
+    StoredMessage,
 )
 from app.store.pg_factory import LazyPool
 
@@ -290,3 +291,80 @@ class PostgresMessageStore:
                 message_id,
             )
         return _rows_affected(result) > 0
+
+
+class PostgresConversationStore:
+    def __init__(self, pool: LazyPool) -> None:
+        self._pool = pool
+
+    async def get_or_create(self, user_id: str) -> int:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id FROM conversations WHERE user_id = $1"
+                " ORDER BY last_active_at DESC LIMIT 1",
+                user_id,
+            )
+            if row is not None:
+                await conn.execute(
+                    "UPDATE conversations SET last_active_at = now() WHERE id = $1", row["id"]
+                )
+                return int(row["id"])
+            new_row = await conn.fetchrow(
+                "INSERT INTO conversations (user_id) VALUES ($1) RETURNING id", user_id
+            )
+        return int(new_row["id"])
+
+    async def recent_messages(self, conversation_id: int, limit: int) -> list[StoredMessage]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT role, content, created_at FROM messages WHERE conversation_id = $1"
+                " ORDER BY created_at DESC LIMIT $2",
+                conversation_id,
+                limit,
+            )
+        ordered = list(reversed(rows))
+        return [
+            StoredMessage(
+                role=str(r["role"]),
+                content=str(r["content"]),
+                created_at=r["created_at"].isoformat() if r["created_at"] else None,
+            )
+            for r in ordered
+        ]
+
+    async def append_message(self, conversation_id: int, role: str, content: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO messages (conversation_id, role, content) VALUES ($1, $2, $3)",
+                conversation_id,
+                role,
+                content,
+            )
+
+    async def pause_until(self, conversation_id: int, until: datetime) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE conversations SET paused_until = $1 WHERE id = $2", until, conversation_id
+            )
+
+    async def get_paused_until(self, conversation_id: int) -> datetime | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT paused_until FROM conversations WHERE id = $1", conversation_id
+            )
+        return None if row is None else row["paused_until"]
+
+    async def mark_handoff_attempted(self, conversation_id: int, at: datetime) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE conversations SET handoff_attempted_at = $1 WHERE id = $2",
+                at,
+                conversation_id,
+            )
+
+    async def get_handoff_attempted_at(self, conversation_id: int) -> datetime | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT handoff_attempted_at FROM conversations WHERE id = $1", conversation_id
+            )
+        return None if row is None else row["handoff_attempted_at"]

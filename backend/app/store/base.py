@@ -115,3 +115,28 @@ class MessageStore(Protocol):
     """Dedupe authority for inbound Meta messages (sibling of processed_webhooks)."""
 
     async def record_if_new(self, message_id: str) -> bool: ...
+
+
+@dataclass(frozen=True)
+class StoredMessage:
+    role: str
+    content: str
+    created_at: str | None
+
+
+class ConversationStore(Protocol):
+    """Windowed chat history + handoff state per WhatsApp sender."""
+
+    async def get_or_create(self, user_id: str) -> int: ...
+
+    async def recent_messages(self, conversation_id: int, limit: int) -> list[StoredMessage]: ...
+
+    async def append_message(self, conversation_id: int, role: str, content: str) -> None: ...
+
+    async def pause_until(self, conversation_id: int, until: datetime) -> None: ...
+
+    async def get_paused_until(self, conversation_id: int) -> datetime | None: ...
+
+    async def mark_handoff_attempted(self, conversation_id: int, at: datetime) -> None: ...
+
+    async def get_handoff_attempted_at(self, conversation_id: int) -> datetime | None: ...

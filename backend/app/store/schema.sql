@@ -84,6 +84,11 @@ CREATE TABLE IF NOT EXISTS conversations (
 );
 CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations (user_id, last_active_at);
 
+-- Tracks whether ONE AI handoff attempt has already been used in the current conversation
+-- window (client decision, round 3 2026-08-06: one AI attempt, then immediate handoff on a
+-- second request). Distinct from paused_until, which marks a human has already taken over.
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS handoff_attempted_at timestamptz;
+
 CREATE TABLE IF NOT EXISTS messages (
     id              bigserial PRIMARY KEY,
     conversation_id bigint NOT NULL REFERENCES conversations (id),

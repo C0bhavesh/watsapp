@@ -119,6 +119,17 @@ need to check whether tracking numbers flow back into Shopify or only exist insi
 **11. Human handoff** — which WhatsApp number should receive alerts when the assistant can't
 help? (Can be added any time.)
 
+**15. How long should we keep customer data?** We store a customer's phone number, order
+details, and chat history so the assistant can answer their questions. Indian data-protection
+law (DPDP) expects a stated retention period and a way to delete someone's data on request.
+
+- A (recommended): keep data for 12 months after their last order or message, then delete it
+  automatically; delete sooner if a customer specifically asks.
+- B: a different retention period — tell us how long.
+- C: keep indefinitely for now (not recommended, but your call).
+
+The delete-on-request capability is being built regardless of which period you choose.
+
 ## Part 5 — One technical confirmation about your WhatsApp number
 
 **12. Your purchased verified WhatsApp number** — please confirm it is registered on the

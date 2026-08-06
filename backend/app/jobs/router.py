@@ -6,6 +6,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from app.deps import Container, get_container
+from app.jobs.retention import run_retention_purge
 from app.shopify.errors import ShopifyError
 from app.shopify.subscriptions import ensure_subscription
 
@@ -24,6 +25,7 @@ async def _job_ensure_subscription(c: Container) -> dict[str, Any]:
 
 JOBS: dict[str, JobFn] = {
     "ensure_subscription": _job_ensure_subscription,
+    "retention_purge": run_retention_purge,
 }
 
 

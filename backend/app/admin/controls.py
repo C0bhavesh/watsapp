@@ -43,6 +43,10 @@ class AdminControls(BaseModel):
     )
     default_language: Literal["en", "hi", "gu"] = "en"
     push_staleness_hours: int = Field(default=6, ge=1, le=168)
+    # DPDP retention window in days. 0 = disabled (no automatic deletion) — the safe default;
+    # the exact period is a pending client decision (Q15), so nothing is purged until an owner
+    # sets a positive value. le=3650 caps it at ~10 years.
+    retention_days: int = Field(default=0, ge=0, le=3650)
     public_base_url: str = Field(default="", max_length=500)
     owner_alert_number: str = Field(default="", max_length=32)
 
@@ -84,6 +88,7 @@ _STR_KEYS: tuple[str, ...] = (
     "public_base_url",
     "owner_alert_number",
 )
+_INT_KEYS: tuple[str, ...] = ("push_staleness_hours", "retention_days")
 _JSON_KEYS: tuple[str, ...] = ("allowlist_phones", "reveal_fields", "tags")
 
 
@@ -94,9 +99,10 @@ async def load_controls(config: ConfigService) -> AdminControls:
         value = await config.get_plain(key)
         if value is not None:
             data[key] = value
-    staleness = await config.get_plain("push_staleness_hours")
-    if staleness is not None and staleness.isdigit():
-        data["push_staleness_hours"] = int(staleness)
+    for key in _INT_KEYS:
+        raw_int = await config.get_plain(key)
+        if raw_int is not None and raw_int.isdigit():
+            data[key] = int(raw_int)
     for key in _JSON_KEYS:
         raw = await config.get_plain(key)
         if raw is not None:
@@ -115,7 +121,8 @@ async def load_controls(config: ConfigService) -> AdminControls:
 async def save_controls(config: ConfigService, controls: AdminControls) -> None:
     for key in _STR_KEYS:
         await config.set_plain(key, getattr(controls, key))
-    await config.set_plain("push_staleness_hours", str(controls.push_staleness_hours))
+    for key in _INT_KEYS:
+        await config.set_plain(key, str(getattr(controls, key)))
     await config.set_plain("allowlist_phones", json.dumps(controls.allowlist_phones))
     await config.set_plain("reveal_fields", json.dumps(controls.reveal_fields))
     await config.set_plain("tags", json.dumps(controls.tags.model_dump()))

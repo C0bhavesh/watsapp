@@ -21,6 +21,20 @@ def test_defaults(client: TestClient) -> None:
     assert body["reveal_fields"] == ["order_number", "email", "status"]
     assert body["default_language"] == "en"
     assert body["push_staleness_hours"] == 6
+    # DPDP retention defaults to 0 = disabled (no policy invented until the client confirms Q15).
+    assert body["retention_days"] == 0
+
+
+def test_retention_days_roundtrip_and_validation(client: TestClient) -> None:
+    login(client)
+    base = client.get("/admin/controls").json()
+    assert client.put("/admin/controls", json={**base, "retention_days": 365}).status_code == 200
+    assert client.get("/admin/controls").json()["retention_days"] == 365
+    # Negative or absurd values are rejected.
+    assert client.put("/admin/controls", json={**base, "retention_days": -1}).status_code == 422
+    assert (
+        client.put("/admin/controls", json={**base, "retention_days": 40000}).status_code == 422
+    )
 
 
 def test_put_roundtrip(client: TestClient) -> None:
@@ -37,6 +51,7 @@ def test_put_roundtrip(client: TestClient) -> None:
         },
         "default_language": "hi",
         "push_staleness_hours": 12,
+        "retention_days": 180,
         "public_base_url": "https://bot.example.com",
         "owner_alert_number": "",
     }

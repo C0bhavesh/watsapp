@@ -1,4 +1,48 @@
-from app.agents.base import extract_json_blob, extract_reply_text
+from typing import Any
+
+from app.agents.base import AgentContext, extract_json_blob, extract_reply_text
+from app.providers.base import CompletionResult, Message
+
+
+class _StubProvider:
+    async def complete(
+        self,
+        model: str,
+        messages: list[Message],
+        api_key: str,
+        timeout: float,
+        *,
+        extra_params: dict[str, object] | None = None,
+    ) -> CompletionResult:
+        return CompletionResult(text="", model=model)
+
+
+def _context(**overrides: Any) -> AgentContext:
+    kwargs: dict[str, Any] = {
+        "wa_id": "919999999999",
+        "phone_e164": "+919999999999",
+        "user_text": "hi",
+        "history": [],
+        "orders": [],
+        "is_vip": False,
+        "knowledge": {},
+        "provider": _StubProvider(),
+        "model": "m",
+        "api_key": "k",
+        "extra_params": None,
+    }
+    kwargs.update(overrides)
+    return AgentContext(**kwargs)
+
+
+def test_agent_context_repr_never_leaks_the_api_key() -> None:
+    """A traceback/exception-logger locals capture must never print a plaintext key."""
+    provider = _StubProvider()
+    context = _context(provider=provider, api_key="super-secret-llm-key")
+    assert "super-secret-llm-key" not in repr(context)
+    # repr=False must preserve value equality (same guarantee as WhatsAppConfig).
+    assert context == _context(provider=provider, api_key="super-secret-llm-key")
+    assert context != _context(provider=provider, api_key="another-key")
 
 
 def test_extract_json_blob_direct() -> None:

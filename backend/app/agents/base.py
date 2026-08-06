@@ -1,6 +1,6 @@
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.providers.base import LLMProvider, Message
@@ -38,7 +38,11 @@ class AgentContext:
     knowledge: dict[str, str]
     provider: LLMProvider
     model: str
-    api_key: str
+    # Excluded from repr so a traceback/log/Sentry locals capture never leaks the plaintext
+    # LLM key -- `core/conversation.py` wraps agent dispatch in `except Exception:
+    # logger.exception(...)`, which is exactly that scenario. Same pattern (and reason) as
+    # `channels/whatsapp_config.WhatsAppConfig`; repr=False preserves __eq__.
+    api_key: str = field(repr=False)
     extra_params: dict[str, object] | None
     timeout: float = 20.0
 

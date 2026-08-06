@@ -99,14 +99,19 @@ a human reviewing the conversation sees it, but nothing auto-replies). The pause
 after 24 hours — "resets per conversation window" per the client's answer — with no manual
 admin action required to resume.
 
-**VIP / repeat-customer detection.** No new table. `order_count` and `total_spend` are
-computed on the fly from `order_mappings` grouped by phone (this is exactly the
-"kept-indefinitely" data per Q15, so the computation stays cheap and accurate for the
-customer's full history, forever). The VIP *threshold* (e.g., 3+ orders) is a config value —
-matches ADR-005 (client decisions as config), tunable from the admin panel without a
-redeploy, not hardcoded in a prompt or in Python. The hard constraint that total
-spend/order count may never be **stated** unprompted (only used to inform tone — "welcome
-back" vs. a first-time greeting) lives in the shared personality prompt fragment, not
+**VIP / repeat-customer detection.** No new table, no new column. VIP classification uses
+`order_count` alone, computed on the fly from `order_mappings` grouped by phone (this is
+exactly the "kept-indefinitely" data per Q15, so the computation stays cheap and accurate for
+the customer's full history, forever). `order_mappings` has no amount/total column — corrected
+during planning (2026-08-06) after the original draft of this spec incorrectly assumed
+`total_spend` could be computed the same way. Total spend is **not** pre-computed or tracked
+proactively; it's looked up live from Shopify (`find_customer_orders_by_phone`, summing
+`Order.total`) only on the rare turn a customer explicitly asks about it — acceptable since the
+hard rule below means it's essentially never surfaced anyway. The VIP *threshold* (e.g., 3+
+orders) is a config value — matches ADR-005 (client decisions as config), tunable from the
+admin panel without a redeploy, not hardcoded in a prompt or in Python. The hard constraint
+that spend/order count may never be **stated** unprompted (only used to inform tone —
+"welcome back" vs. a first-time greeting) lives in the shared personality prompt fragment, not
 per-specialist, so it can't be forgotten when a new specialist is added later.
 
 ## Product search

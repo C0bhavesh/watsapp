@@ -1,4 +1,5 @@
 import json
+import math
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request, Response
@@ -22,6 +23,10 @@ MAX_FIELD_LEN = 256
 
 
 DEFAULT_STALENESS_HOURS = 6.0
+# Mirror AdminControls.push_staleness_hours' Field(ge=1, le=168) — the panel can only ever store
+# a value in this range, so anything outside it (or non-finite, or non-ASCII-digit) is corrupt.
+_MIN_STALENESS_HOURS = 1.0
+_MAX_STALENESS_HOURS = 168.0
 
 
 def _clip(v: str | None) -> str | None:
@@ -31,15 +36,21 @@ def _clip(v: str | None) -> str | None:
 def _staleness_hours(raw: str | None) -> float:
     """Parse the stored push_staleness_hours; a corrupt/typed value degrades to the default.
 
-    On the signed webhook hot path an unguarded ``float()`` on a bad config value is a 500,
-    which burns Shopify's 19-failure retry budget before it deletes the subscription.
+    On the signed webhook hot path an unguarded ``float()`` on a bad config value is a 500, which
+    burns Shopify's 19-failure retry budget before it deletes the subscription. Beyond that, a
+    plain ``float()`` guard is not enough:
+    - ``float("٣٠") == 30.0`` (Unicode digits) — accept a corrupt value; require ASCII digits.
+    - ``float("nan"/"inf"/"Infinity"/"1e400")`` never raises, and a nan/inf makes the eligibility
+      check ``age > staleness*3600`` always False — that fully DISABLES the staleness guard, so
+      every historical order looks fresh and push-eligible again (mass unwanted re-sends). Require
+      ``math.isfinite`` and clamp to the field's own valid range; anything else -> safe default.
     """
-    if not raw:
+    if not raw or not (raw.isascii() and raw.isdigit()):
         return DEFAULT_STALENESS_HOURS
-    try:
-        return float(raw)
-    except ValueError:
+    value = float(raw)
+    if not math.isfinite(value) or not (_MIN_STALENESS_HOURS <= value <= _MAX_STALENESS_HOURS):
         return DEFAULT_STALENESS_HOURS
+    return value
 
 
 @router.post("/webhooks/shopify")

@@ -143,6 +143,21 @@ async def test_corrupt_staleness_config_does_not_500_uses_default() -> None:
     assert resp.json() == {"ok": True, "duplicate": False, "queued": True}
 
 
+def test_staleness_hardening_falls_back_to_default() -> None:
+    from app.channels.shopify_webhook import DEFAULT_STALENESS_HOURS, _staleness_hours
+
+    # (1) Unicode digits: float("٣٠") == 30.0 — a bare float() guard accepts a corrupt value.
+    # (2) Non-finite: float("nan"/"inf"/"Infinity"/"1e400") NEVER raises, and a nan/inf makes
+    #     `age > staleness*3600` always False -> the staleness guard is fully DISABLED, so every
+    #     historical order looks fresh and push-eligible again (mass unwanted template re-sends).
+    # (3) In-range-parseable but out of the field's Field(ge=1, le=168) bound -> also unsafe.
+    # All must degrade to the safe default, none may disable the guard.
+    for bad in ("٣٠", "nan", "inf", "Infinity", "1e400", "9999", "0", "-5", ""):
+        assert _staleness_hours(bad) == DEFAULT_STALENESS_HOURS, bad
+    # A genuine in-bound integer value is honored.
+    assert _staleness_hours("12") == 12.0
+
+
 async def test_oversized_body_413_and_nothing_ingested() -> None:
     body = b"x" * (1_048_576 + 1)
     resp = await post(

@@ -6,6 +6,8 @@ knowledge bodies, or the erased phone number).
 """
 
 import asyncio
+import hashlib
+import hmac
 import logging
 
 import pytest
@@ -95,6 +97,28 @@ def test_erasure_audited_without_phone(
     with caplog.at_level(logging.INFO, logger="app.admin"):
         r = client.post("/admin/erasure", json={"phone": PHONE})
     assert r.status_code == 200
-    assert "admin_audit action=erasure resource=phone outcome=success" in caplog.text
+    # The resource is an HMAC fingerprint of the phone (recomputable from the number + the
+    # app master key), NOT the literal "phone" and NEVER the number itself.
+    key = get_container().settings.app_master_key
+    fingerprint = hmac.new(key.encode(), PHONE.encode(), hashlib.sha256).hexdigest()[:16]
+    assert (
+        f"admin_audit action=erasure resource=phone:{fingerprint} outcome=success"
+        in caplog.text
+    )
+    # The blast radius (row count) is logged so a reviewer needn't touch the response body.
+    assert "deleted=2" in caplog.text
     # The erased phone number is PII and must never appear in the audit log.
     assert PHONE not in caplog.text
+    # The old, non-attributable literal must be gone.
+    assert "resource=phone outcome" not in caplog.text
+
+
+def test_unauthorized_admin_access_audited(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A forged/absent cookie against any /admin route must leave an authz-denied audit line
+    # naming the route path — 50 forged attempts should not be invisible.
+    with caplog.at_level(logging.INFO, logger="app.admin"):
+        r = client.get("/admin/session")
+    assert r.status_code == 401
+    assert "admin_audit action=authz resource=/admin/session outcome=denied" in caplog.text

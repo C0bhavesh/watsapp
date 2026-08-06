@@ -77,3 +77,19 @@ def test_erasure_rejects_bad_phone_without_echoing_it(client: TestClient) -> Non
     assert r.status_code == 422
     # The submitted phone (PII) must not be echoed back in the validation error body.
     assert "+9199" not in r.text
+
+
+def test_erasure_rejects_unicode_digit_phone(client: TestClient) -> None:
+    login(client)
+    # Arabic-Indic digits satisfy a Unicode-aware \\d but match zero real rows — they would
+    # otherwise produce a false "success" with a fake audit line. ASCII-only [0-9] rejects them.
+    r = client.post("/admin/erasure", json={"phone": "+٩١٩١١١١١١١١١"})
+    assert r.status_code == 422
+
+
+def test_erasure_is_rate_limited(client: TestClient) -> None:
+    login(client)
+    # Destructive, irreversible, PII-touching: throttle it like /admin/login. 10/minute.
+    for _ in range(10):
+        assert client.post("/admin/erasure", json={"phone": "+910000000000"}).status_code == 200
+    assert client.post("/admin/erasure", json={"phone": "+910000000000"}).status_code == 429

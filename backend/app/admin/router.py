@@ -1,5 +1,7 @@
 """Admin JSON API: login/session now; creds, knowledge, controls, views in later tasks."""
 
+import hashlib
+import hmac
 import logging
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -134,27 +136,41 @@ class AdminSecurityHeadersMiddleware:
 admin_router = APIRouter(prefix="/admin")
 
 
-def _audit(action: str, outcome: str, *, resource: str | None = None) -> None:
+def _audit(
+    action: str, outcome: str, *, resource: str | None = None, detail: str | None = None
+) -> None:
     """Actor-free admin audit line (item 4).
 
     One shared ADMIN_PASSWORD means there is no per-user identity to record. Logs the
-    action, the resource/field NAME, and the outcome ONLY — never a value (passwords,
-    API keys, credential contents, knowledge bodies, or the erased phone number). Lands in
-    Vercel's function logs; no new infra for v1.
+    action, the resource/field NAME, the outcome, and an optional non-PII detail ONLY —
+    never a value (passwords, API keys, credential contents, knowledge bodies, or the erased
+    phone number). Lands in Vercel's function logs; no new infra for v1.
     """
-    if resource is None:
-        logger.info("admin_audit action=%s outcome=%s", action, outcome)
-    else:
-        logger.info("admin_audit action=%s resource=%s outcome=%s", action, resource, outcome)
+    res = "" if resource is None else f" resource={resource}"
+    det = "" if detail is None else f" {detail}"
+    logger.info("admin_audit action=%s%s outcome=%s%s", action, res, outcome, det)
+
+
+def _phone_fingerprint(phone: str) -> str:
+    """Recomputable, non-reversible HMAC tag for a phone — safe to write to the audit log.
+
+    Keyed with the app's own APP_MASTER_KEY (the Fernet key, reused here as an HMAC key — no
+    new secret is stored or derived). A reviewer can recompute it from a customer's number to
+    correlate an erasure request, but it is not PII at rest and not reversible without the key.
+    """
+    key = get_container().settings.app_master_key
+    return hmac.new(key.encode(), phone.encode(), hashlib.sha256).hexdigest()[:16]
 
 
 def _now() -> datetime:
     return datetime.now(UTC)
 
 
-def require_admin(admin_session: str | None = Cookie(default=None)) -> None:
+def require_admin(request: Request, admin_session: str | None = Cookie(default=None)) -> None:
     settings = get_container().settings
     if not admin_session or not verify_token(settings.app_master_key, admin_session, _now()):
+        # Leave an audit trail for forged/absent-cookie attempts (naming the route, not a value).
+        _audit("authz", "denied", resource=request.url.path)
         raise HTTPException(status_code=401, detail="admin auth required")
 
 
@@ -479,20 +495,32 @@ async def put_controls(controls: AdminControls) -> dict[str, bool]:
 
 
 class ErasureRequest(BaseModel):
-    """DPDP right-to-erasure by phone number (E.164). The phone is PII — never logged."""
+    """DPDP right-to-erasure by phone number (E.164). The phone is PII — never logged.
 
-    phone: str = Field(max_length=32, pattern=r"^\+\d{7,15}$")
+    ASCII digits only: pydantic-core's ``\\d`` is Unicode-aware, so Arabic-Indic/fullwidth
+    digit strings would pass yet match zero real rows (a false "success"). ``[0-9]`` pins it.
+    """
+
+    phone: str = Field(max_length=32, pattern=r"^\+[0-9]{7,15}$")
 
 
 @admin_router.post("/erasure", dependencies=[Depends(require_admin)])
-async def erase_by_phone(req: ErasureRequest) -> dict[str, object]:
+@limiter.limit("10/minute")
+async def erase_by_phone(request: Request, req: ErasureRequest) -> dict[str, object]:
     """Purge every row keyed to one phone number across the retention tables.
 
-    Works today regardless of the (pending) retention period. Audit-logged as an erasure for
-    *a* number — the number itself is never written to the log line (treated as PII).
+    Works today regardless of the (pending) retention period. Destructive and irreversible, so
+    it is rate-limited like /login. Audit-logged as an erasure for *a* number — the number is
+    never written to the log line; the resource is an HMAC fingerprint (recomputable, not PII).
     """
     result = await get_container().ingest.delete_by_phone(req.phone)
-    _audit("erasure", "success", resource="phone")
+    deleted_total = sum(asdict(result).values())
+    _audit(
+        "erasure",
+        "success",
+        resource=f"phone:{_phone_fingerprint(req.phone)}",
+        detail=f"deleted={deleted_total}",
+    )
     return {"ok": True, "deleted": asdict(result)}
 
 

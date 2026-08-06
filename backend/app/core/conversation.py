@@ -31,13 +31,19 @@ from app.knowledge.loader import SEEDS_DIR, KnowledgeLoader
 
 logger = logging.getLogger("app.core.conversation")
 
-# Comfortably under vercel.json's function `maxDuration` (60s) so a near-deadline turn is
-# cancelled and logged (see `except TimeoutError` in `run_turn`) well before Vercel itself would
-# kill the function and return an uncaught 504. That distinction matters: `record_if_new` has
-# already marked the inbound message as seen by the time this runs, so an uncaught 504 makes
-# Meta's retry of the same message get silently dropped as a duplicate -- the customer never
-# gets a reply, and nothing is logged. A caught TimeoutError here at least leaves a WARNING.
-TURN_TIMEOUT_SECONDS = 50.0
+# Defense-in-depth against the platform-level function timeout, which is NOT set in this repo's
+# vercel.json (Vercel treats `functions` and `builds` as mutually exclusive -- `builds`/`routes`
+# is what makes this ASGI app's catch-all routing work, so `maxDuration` must instead be set via
+# the Vercel dashboard -- Project Settings -> Functions -- once the project is connected; see
+# error_learnings.md and _pipeline_status.md). 55s is chosen to sit comfortably under whatever
+# dashboard duration is configured there (60s was the original reasoning and is still the
+# expected range) so a near-deadline turn is cancelled and logged here (see `except TimeoutError`
+# in `run_turn`) well before Vercel itself would kill the function and return an uncaught 504.
+# That distinction matters even once the dashboard limit is raised: `record_if_new` has already
+# marked the inbound message as seen by the time this runs, so an uncaught 504 makes Meta's
+# retry of the same message get silently dropped as a duplicate -- the customer never gets a
+# reply, and nothing is logged. A caught TimeoutError here at least leaves a WARNING.
+TURN_TIMEOUT_SECONDS = 55.0
 
 
 async def _run_agent(

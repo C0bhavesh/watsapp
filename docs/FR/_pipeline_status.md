@@ -49,6 +49,26 @@
 
 ## Deferred — logged for later
 
+- **⏳ Vercel dashboard: set function `maxDuration` (Task 14 security-review CRITICAL fix,
+  2026-08-06)** — `backend/vercel.json` is UNCHANGED (still just `builds`/`routes`/`regions`);
+  an attempt to add `functions["api/index.py"].maxDuration=60` there was reverted the same day
+  because Vercel treats `functions` and `builds` as mutually exclusive (hard deploy-time error:
+  "The functions property cannot be used in conjunction with the builds property"), and this
+  repo's `builds`/`routes` config is what makes the catch-all ASGI routing work. **Owner
+  decision: set `maxDuration` via the Vercel dashboard UI instead (Project Settings →
+  Functions) once the project is connected — this is a deploy-time step, NOT a code change, so
+  it is tracked here rather than as a code TODO.** The code-side defense-in-depth is already
+  shipped regardless: `app/core/conversation.py`'s `run_turn` wraps the whole conversation turn
+  in `asyncio.timeout(TURN_TIMEOUT_SECONDS=55.0)`, catching `TimeoutError` and logging a
+  WARNING instead of leaving a near-deadline turn to an uncaught platform 504 (which would
+  silently drop the customer's reply — `MessageStore.record_if_new` already marks the message
+  seen, so Meta's retry of a timed-out delivery is dropped as a duplicate). 55s was chosen to
+  sit comfortably under an expected ~60s dashboard setting; **must close before cutover** (same
+  urgency as the other pre-deploy items below) since without a platform limit the internal
+  guard's assumption ("comfortably under the platform limit") is unverified until the dashboard
+  value is actually set. See `docs/memory/error_learnings.md`'s 2026-08-06 entry for the
+  Vercel `functions`/`builds` schema conflict.
+
 - **`processed_messages` residual PII on erasure** — tracked, no decode mechanism built. The
   Meta wamid (message_id PK) embeds the sender's phone in cleartext base64, but the table has no
   `phone_e164` column, so `delete_by_phone` cannot phone-scope it without decoding wamids (real

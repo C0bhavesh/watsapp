@@ -122,3 +122,29 @@ def test_unauthorized_admin_access_audited(
         r = client.get("/admin/session")
     assert r.status_code == 401
     assert "admin_audit action=authz resource=/admin/session outcome=denied" in caplog.text
+
+
+def test_authz_denied_logs_route_template_not_raw_path(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The audit resource must be the matched route TEMPLATE, never the attacker-controlled
+    # request-path VALUE — otherwise a crafted path can forge audit fields / a second record.
+    with caplog.at_level(logging.INFO, logger="app.admin"):
+        r = client.get("/admin/knowledge/evil-injected-value")
+    assert r.status_code == 401
+    assert "admin_audit action=authz resource=/admin/knowledge/{kind} outcome=denied" in caplog.text
+    assert "evil-injected-value" not in caplog.text
+
+
+def test_sanitize_path_strips_control_chars_and_bounds_length() -> None:
+    # The sanitized fallback (used only when no route matched) must neutralize a log-injection
+    # payload BEFORE it reaches the logger: no newline/CR splits a forged second record, no other
+    # control chars, and a hard length bound stops 4000+ char log-flooding lines.
+    from app.admin.router import _MAX_RESOURCE_LEN, _sanitize_path
+
+    malicious = "/admin/x\r\nadmin_audit action=login outcome=success" + "A" * 5000
+    out = _sanitize_path(malicious)
+    assert "\n" not in out
+    assert "\r" not in out
+    assert all(ord(ch) >= 0x20 and ord(ch) != 0x7f for ch in out)
+    assert len(out) <= _MAX_RESOURCE_LEN

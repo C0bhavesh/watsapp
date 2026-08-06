@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import logging
+import re
 from dataclasses import asdict
 from datetime import UTC, datetime
 
@@ -166,11 +167,41 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+_MAX_RESOURCE_LEN = 128
+# Strip C0 controls (incl. \n \r \t) and DEL — a newline would split the log line and let an
+# unauthenticated caller forge a second, fake audit record.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _sanitize_path(raw: str) -> str:
+    """Make a raw request path safe to embed in a single audit log field.
+
+    Removes every control character (newlines/CRs included) BEFORE the value reaches the logger
+    — never relying on the logging call to sanitize — and truncates to a fixed bound so one
+    request can't emit a multi-kilobyte log-flooding line.
+    """
+    return _CONTROL_CHARS_RE.sub("", raw)[:_MAX_RESOURCE_LEN]
+
+
+def _audit_resource(request: Request) -> str:
+    """Resource name for an authz-denied audit line.
+
+    Prefer the matched route TEMPLATE (e.g. ``/admin/knowledge/{kind}``) — it is a fixed pattern
+    the attacker cannot influence, so it cannot carry an injection payload. Only when no route
+    matched (``scope['route']`` absent) do we fall back to a sanitized+bounded raw path.
+    """
+    route = request.scope.get("route")
+    template = getattr(route, "path", None)
+    if isinstance(template, str):
+        return template
+    return _sanitize_path(request.url.path)
+
+
 def require_admin(request: Request, admin_session: str | None = Cookie(default=None)) -> None:
     settings = get_container().settings
     if not admin_session or not verify_token(settings.app_master_key, admin_session, _now()):
         # Leave an audit trail for forged/absent-cookie attempts (naming the route, not a value).
-        _audit("authz", "denied", resource=request.url.path)
+        _audit("authz", "denied", resource=_audit_resource(request))
         raise HTTPException(status_code=401, detail="admin auth required")
 
 

@@ -102,7 +102,7 @@
 - **Endpoint:** `POST https://{shop_domain}/admin/api/{shopify_api_version}/graphql.json` (version from Settings, pinned 2026-07)
 - **Request:** `{"query": ..., "variables": ...}`, header `X-Shopify-Access-Token`.
 - **Response:** `{"data": ..., "errors": ...}` — see ShopifyClient notes for error mapping.
-- **Notes:** ops — get_order, find_order_by_name, find_customer_orders_by_phone (reads); tagsAdd, orderCancel (mutations, AuthorizedOrder-gated, ADR-004). Orders NOT searchable by phone directly (error_learnings 2026-07-28) — customer→orders fallback. 401 → single force-refresh retry.
+- **Notes:** ops — get_order, find_order_by_name, find_customer_orders_by_phone (reads); tagsAdd, orderCancel (mutations, AuthorizedOrder-gated, ADR-004); **search_products (Phase 4 Task 5, 2026-08-06)** — `products(first, query)` read, query always AND-ed with `status:active` (never surfaces draft/archived products), input pre-validated by `_is_safe_product_query` (rejects quotes/colons/wildcards/boolean-operator-words/unbalanced parens — a security fix against Shopify search-operator injection added during Task 5's review, not in the original brief) before being interpolated into the GraphQL query string. Orders NOT searchable by phone directly (error_learnings 2026-07-28) — customer→orders fallback. 401 → single force-refresh retry.
 
 ## [external] Meta WhatsApp Cloud API — send message
 - **Caller:** backend/app/channels/whatsapp_sender.py (`send_text` / `send_template` / `send_buttons` via `_post_message`)

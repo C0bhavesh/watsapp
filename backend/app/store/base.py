@@ -110,6 +110,8 @@ class IngestStore(Protocol):
 
     async def purge_older_than(self, cutoff: datetime) -> DeletionResult: ...
 
+    async def count_orders_by_phone(self, phone_e164: str) -> int: ...
+
 
 class MessageStore(Protocol):
     """Dedupe authority for inbound Meta messages (sibling of processed_webhooks)."""

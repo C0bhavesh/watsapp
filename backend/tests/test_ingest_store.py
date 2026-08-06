@@ -82,3 +82,22 @@ async def test_find_mappings_by_phone_no_match_returns_empty() -> None:
 
     store = InMemoryIngestStore()
     assert await store.find_mappings_by_phone("+910000000000") == []
+
+
+async def test_count_orders_by_phone_counts_matches_only() -> None:
+    from app.store.base import MappingUpsert
+    from app.store.memory import InMemoryIngestStore
+
+    store = InMemoryIngestStore()
+    for i in range(3):
+        await store.ingest_order_created(
+            f"wh{i}", "orders/create",
+            MappingUpsert(
+                order_gid=f"gid://{i}", order_name=f"tavas{i}", order_number_int=i,
+                phone_e164="+919999999999", customer_name=None, email=None,
+                language="en", financial_status_at_create=None, is_cod=False,
+            ),
+            None,
+        )
+    assert await store.count_orders_by_phone("+919999999999") == 3
+    assert await store.count_orders_by_phone("+910000000000") == 0

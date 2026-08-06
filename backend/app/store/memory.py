@@ -140,6 +140,9 @@ class InMemoryIngestStore:
             order_actions=0,
         )
 
+    async def count_orders_by_phone(self, phone_e164: str) -> int:
+        return len([m for m in self.mappings.values() if m.phone_e164 == phone_e164])
+
 
 class InMemoryMessageStore:
     def __init__(self) -> None:

@@ -52,6 +52,7 @@ def test_put_roundtrip(client: TestClient) -> None:
         "default_language": "hi",
         "push_staleness_hours": 12,
         "retention_days": 180,
+        "vip_order_count_threshold": 5,
         "public_base_url": "https://bot.example.com",
         "owner_alert_number": "",
     }
@@ -185,3 +186,21 @@ def test_trailing_newline_phone_rejected(client: TestClient) -> None:
 
 def test_requires_auth(client: TestClient) -> None:
     assert client.get("/admin/controls").status_code == 401
+
+
+def test_defaults_include_vip_threshold() -> None:
+    from app.admin.controls import AdminControls
+
+    assert AdminControls().vip_order_count_threshold == 3
+
+
+async def test_vip_threshold_roundtrip(master_key: str) -> None:
+    from app.admin.controls import AdminControls, load_controls, save_controls
+    from app.config.crypto import SecretVault
+    from app.config.service import ConfigService
+    from app.store.memory import InMemoryConfigRepo
+
+    config = ConfigService(InMemoryConfigRepo(), SecretVault(master_key))
+    await save_controls(config, AdminControls(vip_order_count_threshold=5))
+    loaded = await load_controls(config)
+    assert loaded.vip_order_count_threshold == 5

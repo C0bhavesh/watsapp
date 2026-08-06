@@ -53,6 +53,9 @@ class AdminControls(BaseModel):
     retention_days: int = Field(default=0, ge=0, le=3650)
     public_base_url: str = Field(default="", max_length=500)
     owner_alert_number: str = Field(default="", max_length=32)
+    # VIP/repeat-customer threshold (order count, not spend — order_mappings has no amount
+    # column; total_spend is a rare on-demand live Shopify lookup, never pre-computed).
+    vip_order_count_threshold: int = Field(default=3, ge=1, le=100)
 
     @field_validator("allowlist_phones")
     @classmethod
@@ -92,7 +95,7 @@ _STR_KEYS: tuple[str, ...] = (
     "public_base_url",
     "owner_alert_number",
 )
-_INT_KEYS: tuple[str, ...] = ("push_staleness_hours", "retention_days")
+_INT_KEYS: tuple[str, ...] = ("push_staleness_hours", "retention_days", "vip_order_count_threshold")
 _JSON_KEYS: tuple[str, ...] = ("allowlist_phones", "reveal_fields", "tags")
 
 

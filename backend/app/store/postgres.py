@@ -278,6 +278,13 @@ class PostgresIngestStore:
             order_actions=_rows_affected(actions),
         )
 
+    async def count_orders_by_phone(self, phone_e164: str) -> int:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT count(*) AS n FROM order_mappings WHERE phone_e164 = $1", phone_e164
+            )
+        return int(row["n"]) if row else 0
+
 
 class PostgresMessageStore:
     def __init__(self, pool: LazyPool) -> None:

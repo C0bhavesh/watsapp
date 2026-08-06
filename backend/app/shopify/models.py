@@ -62,3 +62,14 @@ def normalize_order_name(raw: str, prefix: str = "tavas") -> str:
     if name.isdigit():
         return f"{prefix}{name}"
     return name
+
+
+@dataclass(frozen=True)
+class Product:
+    gid: str
+    title: str
+    handle: str
+    price: Money | None
+    available: bool
+    product_type: str | None
+    tags: tuple[str, ...]

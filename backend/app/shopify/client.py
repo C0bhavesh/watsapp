@@ -17,6 +17,7 @@ from app.shopify.models import (
     CancelRequested,
     Money,
     Order,
+    Product,
     normalize_order_name,
 )
 from app.shopify.token_manager import TokenManager
@@ -47,6 +48,30 @@ def _order_from_node(node: dict[str, Any]) -> Order:
         if total_node
         else None,
         customer_locale=node.get("customerLocale"),
+    )
+
+
+PRODUCT_FIELDS = (
+    "id title handle productType tags totalInventory "
+    "priceRangeV2 { minVariantPrice { amount currencyCode } }"
+)
+
+
+def _product_from_node(node: dict[str, Any]) -> Product:
+    price_node = (node.get("priceRangeV2") or {}).get("minVariantPrice")
+    total_inventory = node.get("totalInventory")
+    # None (untracked inventory) defaults to available; a real 0 means out of stock.
+    available = total_inventory is None or total_inventory > 0
+    return Product(
+        gid=str(node["id"]),
+        title=str(node["title"]),
+        handle=str(node.get("handle") or ""),
+        price=Money(str(price_node["amount"]), str(price_node["currencyCode"]))
+        if price_node
+        else None,
+        available=available,
+        product_type=node.get("productType"),
+        tags=tuple(node.get("tags") or ()),
     )
 
 
@@ -151,6 +176,20 @@ class ShopifyClient:
             {"q": f"customer_id:{customer_id}"},
         )
         return [_order_from_node(e["node"]) for e in (data.get("orders") or {}).get("edges") or []]
+
+    async def search_products(self, query: str, limit: int = 5) -> list[Product]:
+        stripped = query.strip()
+        if not stripped:
+            return []
+        # status:active only -- never surface a draft/archived product to a customer.
+        gql_query = f"({stripped}) AND status:active"
+        data = await self._graphql(
+            f"query($q: String!, $first: Int!) {{ products(first: $first, query: $q) "
+            f"{{ edges {{ node {{ {PRODUCT_FIELDS} }} }} }} }}",
+            {"q": gql_query, "first": limit},
+        )
+        edges = (data.get("products") or {}).get("edges") or []
+        return [_product_from_node(e["node"]) for e in edges]
 
     async def add_tags(self, auth: AuthorizedOrder, tags: Sequence[str]) -> None:
         data = await self._graphql(

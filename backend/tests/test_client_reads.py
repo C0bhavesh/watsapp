@@ -151,3 +151,96 @@ async def test_customer_search_two_step(settings, master_key) -> None:
     await seed(config)
     orders = await client.find_customer_orders_by_phone("+919999999999")
     assert len(orders) == 1 and orders[0].name == "tavas3733"
+
+
+PRODUCT_NODE = {
+    "id": "gid://shopify/Product/1",
+    "title": "Blue Chikankari Kurti",
+    "handle": "blue-chikankari-kurti",
+    "productType": "Kurti",
+    "tags": ["chikankari", "blue"],
+    "totalInventory": 12,
+    "priceRangeV2": {"minVariantPrice": {"amount": "1299.0", "currencyCode": "INR"}},
+}
+
+
+async def test_search_products_parses_full_node(settings, master_key) -> None:
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"data": {"products": {"edges": [{"node": PRODUCT_NODE}]}}}
+        )
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    results = await client.search_products("blue kurti")
+    assert len(results) == 1
+    product = results[0]
+    assert product.gid == "gid://shopify/Product/1"
+    assert product.title == "Blue Chikankari Kurti"
+    assert product.available is True
+    assert product.price is not None and product.price.currency == "INR"
+
+
+async def test_search_products_includes_status_active_in_query(settings, master_key) -> None:
+    captured: dict = {}
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"data": {"products": {"edges": []}}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    await client.search_products("kurti")
+    assert "status:active" in captured["variables"]["q"]
+
+
+async def test_search_products_zero_inventory_is_unavailable(settings, master_key) -> None:
+    node = {**PRODUCT_NODE, "totalInventory": 0}
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"products": {"edges": [{"node": node}]}}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    results = await client.search_products("kurti")
+    assert results[0].available is False
+
+
+async def test_search_products_untracked_inventory_defaults_available(settings, master_key) -> None:
+    node = {**PRODUCT_NODE, "totalInventory": None}
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"products": {"edges": [{"node": node}]}}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    results = await client.search_products("kurti")
+    assert results[0].available is True
+
+
+async def test_search_products_respects_limit(settings, master_key) -> None:
+    captured: dict = {}
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"data": {"products": {"edges": []}}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    await client.search_products("kurti", limit=2)
+    assert captured["variables"]["first"] == 2
+
+
+async def test_search_products_empty_query_returns_empty_without_calling_shopify(
+    settings, master_key
+) -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json={"data": {"products": {"edges": []}}})
+
+    client, config = make_client(settings, master_key, handler)
+    await seed(config)
+    assert await client.search_products("") == []
+    assert calls == []

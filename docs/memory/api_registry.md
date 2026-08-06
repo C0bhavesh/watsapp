@@ -22,7 +22,7 @@
 - **Handler:** backend/app/channels/shopify_webhook.py (`shopify_webhook()`)
 - **Request:** raw Shopify webhook body (JSON); headers `X-Shopify-Hmac-Sha256`, `X-Shopify-Topic`, `X-Shopify-Webhook-Id`.
 - **Response:** 403 `forbidden` (bad/missing HMAC or unset secret); 200 `{"ok": true, "ignored": true}` (non-`orders/create` topic, missing webhook id, or unparseable/non-dict body); 200 `{"ok": true, "duplicate": bool, "queued": bool}` on ingest.
-- **Notes:** HMAC = base64(HMAC-SHA256(raw body, config `shopify:client_secret`)), constant-time. NO network calls — one atomic `IngestStore.ingest_order_created` transaction then respond (ADR-001; 5xx → Shopify retries). Idempotent on `(webhook_id, topic)`. Eligibility from config `push_policy` (default `cod_only`) + `push_staleness_hours` (default 6); queued push dedupe_key `order_created:{gid}`. Outbox payload_json: `{template:"order_confirmation_cod", language, customer_name, order_name, amount}`.
+- **Notes:** HMAC = base64(HMAC-SHA256(raw body, config `shopify:client_secret`)), constant-time. NO network calls — one atomic `IngestStore.ingest_order_created` transaction then respond (ADR-001; 5xx → Shopify retries). Idempotent on `(webhook_id, topic)`. Eligibility from config `push_policy` (default `cod_only`) + `push_staleness_hours` (default 6, parsed via `_staleness_hours` = `try float() except ValueError → 6.0` so a corrupt stored value can't 500 the signed hot path — security-review 2026-08-06); queued push dedupe_key `order_created:{gid}`. Outbox payload_json: `{template:"order_confirmation_cod", language, customer_name, order_name, amount}`.
 
 ## [GET /webhook/whatsapp]
 - **Handler:** backend/app/channels/whatsapp.py (`verify_webhook()`)
@@ -74,9 +74,9 @@
 
 ## [admin] DPDP erasure — POST /admin/erasure
 - **Handler:** backend/app/admin/router.py (`erase_by_phone`)
-- **Request:** `{"phone": str}` — E.164 `^\+\d{7,15}$`, ≤32.
-- **Response:** 401 without a valid cookie; 422 on a non-E.164 phone (input NOT echoed — global handler strips it, PII-safe); 200 `{"ok": true, "deleted": {"order_mappings", "outbound_messages", "conversations", "messages"}}`.
-- **Notes:** require_admin (401). DPDP right-to-erasure — `ingest.delete_by_phone` purges every row keyed to that number across order_mappings + outbound_messages (by `phone_e164`) + conversations/messages (by `user_id`) in one Postgres transaction; works today regardless of the (pending) retention period. Audit-logged as `erasure resource=phone` — the number itself is NEVER written to the log line (PII).
+- **Request:** `{"phone": str}` — E.164 `^\+[0-9]{7,15}$` (ASCII digits only), ≤32.
+- **Response:** 401 without a valid cookie; 422 on a non-E.164 phone incl. Unicode-digit strings (input NOT echoed — global handler strips it, PII-safe); 429 after 10/minute; 200 `{"ok": true, "deleted": {"order_mappings", "outbound_messages", "conversations", "messages", "pending_actions", "order_actions"}}`.
+- **Notes:** require_admin (401) + rate-limited `@limiter.limit("10/minute")` (destructive/irreversible, needs `request: Request` like login). DPDP right-to-erasure — `ingest.delete_by_phone` purges every row keyed to that number across order_mappings + outbound_messages (`phone_e164`) + conversations/messages (`user_id`) + pending_actions (`wa_id`) + order_actions (`actor_wa_id`) in one Postgres transaction; works today regardless of the (pending) retention period. **Security-review fixes (2026-08-06):** audit line is `erasure resource=phone:{HMAC-16hex} outcome=success deleted={N}` — the resource is an HMAC-SHA256(number) keyed with `app_master_key` (recomputable, non-reversible, not PII), the number itself is NEVER logged; `deleted={sum}` gives blast radius. `processed_messages` is a known residual (its wamid embeds the phone but has no phone column — aged out by retention only, not on-demand deletable; documented in code + `_pipeline_status.md`).
 
 ## [admin] Read-only views — GET /admin/mappings, GET /admin/outbox
 - **Handler:** backend/app/admin/router.py (`list_mappings`, `list_outbox`)

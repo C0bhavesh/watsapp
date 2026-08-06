@@ -36,7 +36,9 @@ def _results_context(products: list[Product]) -> str:
 async def run(context: AgentContext, shopify: ProductSource) -> AgentReply:
     fallback = copy_for("error_fallback", "en")
     try:
-        products = await shopify.search_products(context.user_text, limit=5)
+        # None ("nothing searchable in the message") and [] ("searched, no match") both mean
+        # "nothing to recommend" here -- recommendations never broadens or re-searches.
+        products = await shopify.search_products(context.user_text, limit=5) or []
     except ShopifyError:
         products = []
     system_prompt = _SYSTEM_TEMPLATE.format(

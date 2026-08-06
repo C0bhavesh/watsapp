@@ -231,7 +231,7 @@ async def test_search_products_respects_limit(settings, master_key) -> None:
     assert captured["variables"]["first"] == 2
 
 
-async def test_search_products_empty_query_returns_empty_without_calling_shopify(
+async def test_search_products_empty_query_returns_none_without_calling_shopify(
     settings, master_key
 ) -> None:
     calls: list[httpx.Request] = []
@@ -242,24 +242,65 @@ async def test_search_products_empty_query_returns_empty_without_calling_shopify
 
     client, config = make_client(settings, master_key, handler)
     await seed(config)
-    assert await client.search_products("") == []
+    # None (not []) so the caller can tell "nothing searchable in the message" apart from
+    # "searched and found nothing" -- an empty list would fabricate a negative answer.
+    assert await client.search_products("") is None
     assert calls == []
 
 
-async def test_search_products_rejects_search_operators(settings, master_key) -> None:
+async def test_search_products_sanitizes_search_operators_instead_of_rejecting(
+    settings, master_key
+) -> None:
+    captured: dict = {}
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"data": {"products": {"edges": []}}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    # Crafted malicious input with OR/status injection: the operators are stripped and the
+    # remaining words are searched, rather than the whole query being refused.
+    results = await client.search_products("wedding lehenga) OR status:archived OR (blue")
+    assert results == []
+    sent = captured["variables"]["q"]
+    assert sent == "(wedding lehenga status archived blue) AND status:active"
+
+
+async def test_search_products_operators_only_query_returns_none_without_calling_shopify(
+    settings, master_key
+) -> None:
     calls: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
-        if request.url.path.endswith("/oauth/access_token"):
-            return httpx.Response(200, json={"access_token": "shpat_t1", "expires_in": 86399})
         return httpx.Response(200, json={"data": {"products": {"edges": []}}})
 
     client, config = make_client(settings, master_key, handler)
     await seed(config)
-    # Crafted malicious input with OR/status injection
-    assert await client.search_products("wedding lehenga) OR status:archived OR (blue") == []
+    # Nothing searchable survives sanitization -> unusable input, not "no matches".
+    assert await client.search_products('*** "" ()') is None
     assert calls == []
+
+
+async def test_search_products_ordinary_customer_language_is_searched(
+    settings, master_key
+) -> None:
+    """Real customer phrasing (and/or/not, apostrophes, colons) must never be refused."""
+    captured: dict = {}
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200, json={"data": {"products": {"edges": [{"node": PRODUCT_NODE}]}}}
+        )
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    results = await client.search_products("black and white women's saree, size: M")
+    assert len(results) == 1
+    assert results[0].title == "Blue Chikankari Kurti"
+    assert captured["variables"]["q"] == "(black white womens saree, size M) AND status:active"
 
 
 async def test_search_products_legitimate_free_text_works(settings, master_key) -> None:
@@ -272,5 +313,5 @@ async def test_search_products_legitimate_free_text_works(settings, master_key) 
     await seed(config)
     # Legitimate product description with English words and punctuation
     results = await client.search_products("blue kurti for wedding")
-    assert len(results) == 1
+    assert results is not None and len(results) == 1
     assert results[0].title == "Blue Chikankari Kurti"

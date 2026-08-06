@@ -24,16 +24,24 @@ class _FixedProvider:
 
 class _FakeShopify:
     def __init__(
-        self, products: list[Product] | None = None, raises: Exception | None = None
+        self,
+        products: list[Product] | None = None,
+        raises: Exception | None = None,
+        results: list[list[Product] | None] | None = None,
     ) -> None:
         self.products = products or []
         self.raises = raises
+        self.results = results  # scripted per-call results, when a test needs a retry
+        self.queries: list[str] = []
         self.last_query: str | None = None
 
-    async def search_products(self, query: str, limit: int = 5) -> list[Product]:
+    async def search_products(self, query: str, limit: int = 5) -> list[Product] | None:
+        self.queries.append(query)
         self.last_query = query
         if self.raises:
             raise self.raises
+        if self.results is not None:
+            return self.results[min(len(self.queries) - 1, len(self.results) - 1)]
         return self.products
 
 
@@ -72,6 +80,53 @@ async def test_run_on_shopify_outage_still_replies_without_crashing() -> None:
     provider = _FixedProvider('{"reply": "Let me connect you with our team for that."}')
     result = await run(_context(provider, "do you have a red kurti"), shopify)
     assert result.text
+
+
+def _product(title: str) -> Product:
+    return Product(
+        gid="1", title=title, handle="h", price=Money("1299", "INR"), available=True,
+        product_type="Kurti", tags=(),
+    )
+
+
+async def test_empty_first_search_broadens_once_by_dropping_the_last_word() -> None:
+    shopify = _FakeShopify(results=[[], [_product("Red Silk Kurti")]])
+    provider = _FixedProvider('{"reply": "Here is what I found."}')
+    await run(_context(provider, "red silk kurti xxl"), shopify)
+    assert shopify.queries == ["red silk kurti xxl", "red silk kurti"]
+    assert "Red Silk Kurti" in provider.captured_messages[0].content
+
+
+async def test_broadened_search_also_empty_stops_after_one_retry() -> None:
+    shopify = _FakeShopify(results=[[], []])
+    provider = _FixedProvider('{"reply": "I could not find that."}')
+    await run(_context(provider, "green polka dot lehenga"), shopify)
+    assert len(shopify.queries) == 2  # one retry only, never a third round
+    assert "No matching products" in provider.captured_messages[0].content
+
+
+async def test_no_broadening_when_the_first_search_has_results() -> None:
+    shopify = _FakeShopify(results=[[_product("Blue Kurti")]])
+    provider = _FixedProvider('{"reply": "We have a Blue Kurti."}')
+    await run(_context(provider, "blue kurti"), shopify)
+    assert shopify.queries == ["blue kurti"]
+
+
+async def test_single_word_query_is_not_broadened() -> None:
+    shopify = _FakeShopify(results=[[]])
+    provider = _FixedProvider('{"reply": "Nothing found."}')
+    await run(_context(provider, "kurti"), shopify)
+    assert shopify.queries == ["kurti"]  # nothing left to drop
+
+
+async def test_unsearchable_message_is_never_searched_and_says_so() -> None:
+    shopify = _FakeShopify(results=[[]])
+    provider = _FixedProvider('{"reply": "What are you looking for?"}')
+    await run(_context(provider, '"" ***'), shopify)
+    assert shopify.queries == []  # nothing searchable survived sanitization
+    system_prompt = provider.captured_messages[0].content
+    assert "No matching products" not in system_prompt  # never a fabricated negative
+    assert "did not contain" in system_prompt
 
 
 async def test_product_data_rendered_in_system_prompt() -> None:

@@ -57,40 +57,34 @@ PRODUCT_FIELDS = (
 )
 
 
-def _is_safe_product_query(query: str) -> bool:
-    """Check if a product search query is safe from Shopify search-operator injection.
+# Shopify search-syntax metacharacters, split by how they should be removed. Quotes bind
+# INSIDE a word, so dropping them keeps the word whole ("women's" -> "womens"); parens, `:`
+# (field prefixes like status:/title:), `*` (wildcard) and `\` (escape -- it could otherwise
+# escape the closing paren of the wrapper `search_products` builds) separate terms, so they
+# become a space rather than fusing two words into a nonsense token.
+_QUOTE_CHARS_RE = re.compile(r"[\"']")
+_UNSAFE_CHARS_RE = re.compile(r"[*:()\\]")
+# Standalone boolean operators only -- "andaman" and "order" keep their letters.
+_BOOLEAN_TOKEN_RE = re.compile(r"\b(?:and|or|not)\b", re.IGNORECASE)
+_WHITESPACE_RE = re.compile(r"\s+")
 
-    Rejects queries containing:
-    - Quotes (single or double)
-    - Colons (field prefixes like status:, title:)
-    - Wildcards (*)
-    - Standalone boolean operators (AND, OR, NOT) with word boundaries
-    - Unbalanced parentheses
 
-    Allows legitimate product descriptions like "blue kurti for wedding".
+def sanitize_product_query(query: str) -> str | None:
+    """Strip Shopify search-operator syntax from a customer message, keeping the rest.
+
+    Rejecting a whole query on the first metacharacter told customers the store had nothing
+    for ordinary phrasing ("black and white saree", "women's kurti", "size: M") -- a fabricated
+    negative, since a rejected query and a genuinely empty catalog search were indistinguishable
+    to the caller. Sanitizing searches the safe remainder instead.
+
+    Returns None when nothing searchable survives, so a caller can tell "your message had no
+    searchable product term" apart from "searched and found nothing" (an empty list).
     """
-    # Check for quotes (both single and double)
-    if '"' in query or "'" in query:
-        return False
-
-    # Check for field prefix colons
-    if ":" in query:
-        return False
-
-    # Check for wildcards
-    if "*" in query:
-        return False
-
-    # Check for standalone AND/OR/NOT operators (case-insensitive, word boundary)
-    # This rejects " OR " or " AND " but allows words like "andaman" or "order"
-    if re.search(r"\b(and|or|not)\b", query, re.IGNORECASE):
-        return False
-
-    # Check for unbalanced parentheses
-    if query.count("(") != query.count(")"):
-        return False
-
-    return True
+    cleaned = _QUOTE_CHARS_RE.sub("", query)
+    cleaned = _UNSAFE_CHARS_RE.sub(" ", cleaned)
+    cleaned = _BOOLEAN_TOKEN_RE.sub(" ", cleaned)
+    cleaned = _WHITESPACE_RE.sub(" ", cleaned).strip()
+    return cleaned or None
 
 
 def _product_from_node(node: dict[str, Any]) -> Product:
@@ -213,12 +207,14 @@ class ShopifyClient:
         )
         return [_order_from_node(e["node"]) for e in (data.get("orders") or {}).get("edges") or []]
 
-    async def search_products(self, query: str, limit: int = 5) -> list[Product]:
-        stripped = query.strip()
-        if not stripped or not _is_safe_product_query(stripped):
-            return []
+    async def search_products(self, query: str, limit: int = 5) -> list[Product] | None:
+        """Search the live catalog. ``None`` = the query had no searchable term (never
+        searched); ``[]`` = searched and the catalog genuinely had no match."""
+        sanitized = sanitize_product_query(query)
+        if sanitized is None:
+            return None
         # status:active only -- never surface a draft/archived product to a customer.
-        gql_query = f"({stripped}) AND status:active"
+        gql_query = f"({sanitized}) AND status:active"
         data = await self._graphql(
             f"query($q: String!, $first: Int!) {{ products(first: $first, query: $q) "
             f"{{ edges {{ node {{ {PRODUCT_FIELDS} }} }} }} }}",

@@ -1,6 +1,6 @@
 from app.agents.base import AgentContext
 from app.agents.order_tracking import run
-from app.providers.base import CompletionResult, ProviderError, ProviderErrorKind
+from app.providers.base import CompletionResult, Message, ProviderError, ProviderErrorKind
 from app.shopify.models import AuthorizedOrder, Order
 
 
@@ -23,7 +23,7 @@ class _FixedProvider:
     async def complete(
         self,
         model: str,
-        messages: list,
+        messages: list[Message],
         api_key: str,
         timeout: float,
         *,
@@ -34,7 +34,29 @@ class _FixedProvider:
         return CompletionResult(text=self._text or "", model=model)
 
 
-def _context(provider: _FixedProvider, user_text: str, orders: list) -> AgentContext:
+class _CapturingProvider:
+    """Provider that captures messages passed to complete() for assertion."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self.captured_messages: list[Message] | None = None
+
+    async def complete(
+        self,
+        model: str,
+        messages: list[Message],
+        api_key: str,
+        timeout: float,
+        *,
+        extra_params: dict[str, object] | None = None,
+    ) -> CompletionResult:
+        self.captured_messages = messages
+        return CompletionResult(text=self._text, model=model)
+
+
+def _context(
+    provider: _FixedProvider | _CapturingProvider, user_text: str, orders: list[AuthorizedOrder]
+) -> AgentContext:
     return AgentContext(
         wa_id="919999999999", phone_e164="+919999999999", user_text=user_text, history=[],
         orders=orders, is_vip=False, knowledge={}, provider=provider, model="m", api_key="k",
@@ -59,3 +81,55 @@ async def test_run_on_provider_error_returns_safe_fallback() -> None:
     provider = _FixedProvider(raises=ProviderError("down", ProviderErrorKind.TIMEOUT))
     result = await run(_context(provider, "where is my order", []))
     assert "team" in result.text
+
+
+async def test_unfulfilled_order_is_cancel_eligible() -> None:
+    """Verify UNFULFILLED orders marked as cancel-eligible in system prompt."""
+    provider = _CapturingProvider(text='{"reply": "Your order is eligible."}')
+    order = AuthorizedOrder(
+        order=_order("tavas1", "+919999999999", fulfillment_status="UNFULFILLED"),
+        verified_phone="+919999999999",
+    )
+    await run(_context(provider, "can i cancel my order", [order]))
+
+    # Extract the system prompt (first message with role="system")
+    assert provider.captured_messages is not None
+    system_msg = next((m for m in provider.captured_messages if m.role == "system"), None)
+    assert system_msg is not None
+    assert "cancel eligible: True" in system_msg.content
+
+
+async def test_fulfilled_order_is_not_cancel_eligible() -> None:
+    """Verify FULFILLED orders marked as not cancel-eligible (dispatched)."""
+    provider = _CapturingProvider(text='{"reply": "Too late to cancel."}')
+    order = AuthorizedOrder(
+        order=_order("tavas2", "+919999999999", fulfillment_status="FULFILLED"),
+        verified_phone="+919999999999",
+    )
+    await run(_context(provider, "can i cancel my order", [order]))
+
+    assert provider.captured_messages is not None
+    system_msg = next((m for m in provider.captured_messages if m.role == "system"), None)
+    assert system_msg is not None
+    assert "cancel eligible: False" in system_msg.content
+
+
+async def test_already_cancelled_order_is_not_eligible() -> None:
+    """Verify orders with cancelled_at marked as not cancel-eligible."""
+    provider = _CapturingProvider(text='{"reply": "Already cancelled."}')
+    order = AuthorizedOrder(
+        order=_order(
+            "tavas3",
+            "+919999999999",
+            fulfillment_status="UNFULFILLED",
+            cancelled_at="2026-08-01T10:00:00Z",
+        ),
+        verified_phone="+919999999999",
+    )
+    await run(_context(provider, "can i cancel my order", [order]))
+
+    assert provider.captured_messages is not None
+    system_msg = next((m for m in provider.captured_messages if m.role == "system"), None)
+    assert system_msg is not None
+    assert "cancel eligible: False" in system_msg.content
+    assert "cancelled: True" in system_msg.content

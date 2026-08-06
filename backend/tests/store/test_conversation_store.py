@@ -87,3 +87,28 @@ async def test_conversation_roundtrip_postgres() -> None:
     fetched_attempt = await store.get_handoff_attempted_at(conversation_id)
     assert fetched_attempt is not None and abs((fetched_attempt - attempted_at).total_seconds()) < 1
     await pool.close()
+
+
+@pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"), reason="needs TEST_DATABASE_URL")
+async def test_get_or_create_upsert_prevents_duplicate_rows_postgres() -> None:
+    """Regression for the SELECT-then-INSERT race: get_or_create must be a single atomic
+    ON CONFLICT upsert, so repeated calls for the same user_id never create a second row."""
+    import uuid
+
+    from app.store.pg_factory import LazyPool
+    from app.store.postgres import PostgresConversationStore
+
+    pool = LazyPool(os.environ["TEST_DATABASE_URL"])
+    store = PostgresConversationStore(pool)
+    user_id = f"test-wa-id-{uuid.uuid4()}"
+
+    id1 = await store.get_or_create(user_id)
+    id2 = await store.get_or_create(user_id)
+    assert id1 == id2
+
+    async with pool.acquire() as conn:
+        count = await conn.fetchval(
+            "SELECT count(*) FROM conversations WHERE user_id = $1", user_id
+        )
+    assert count == 1
+    await pool.close()

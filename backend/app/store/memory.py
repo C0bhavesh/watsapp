@@ -161,6 +161,10 @@ class InMemoryConversationStore:
         self._next_id = 1
 
     async def get_or_create(self, user_id: str) -> int:
+        # Not racy: this check-then-set has no `await` between the membership test and the
+        # dict writes, so under asyncio's single-threaded cooperative scheduling no other
+        # coroutine can run in between — there is no yield point for a concurrent
+        # get_or_create(same user_id) call to interleave on. Safe without a lock.
         if user_id not in self._conversations:
             self._conversations[user_id] = self._next_id
             self._messages[self._next_id] = []

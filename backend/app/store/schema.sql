@@ -89,6 +89,15 @@ CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations (user_id, las
 -- second request). Distinct from paused_until, which marks a human has already taken over.
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS handoff_attempted_at timestamptz;
 
+-- Enforces one conversation row per WhatsApp sender. Required so
+-- PostgresConversationStore.get_or_create can use a single atomic
+-- `INSERT ... ON CONFLICT (user_id) DO UPDATE` upsert instead of a SELECT-then-INSERT,
+-- which would otherwise let two concurrent first-contact messages from the same sender
+-- race and create two conversation rows. A unique index (not a named constraint) is used
+-- because it is idempotent via IF NOT EXISTS, matching this file's existing index style,
+-- and Postgres ON CONFLICT accepts any unique index on the target column(s).
+CREATE UNIQUE INDEX IF NOT EXISTS ux_conversations_user_id ON conversations (user_id);
+
 CREATE TABLE IF NOT EXISTS messages (
     id              bigserial PRIMARY KEY,
     conversation_id bigint NOT NULL REFERENCES conversations (id),

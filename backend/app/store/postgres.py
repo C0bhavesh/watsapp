@@ -298,21 +298,18 @@ class PostgresConversationStore:
         self._pool = pool
 
     async def get_or_create(self, user_id: str) -> int:
+        # Single atomic upsert (relies on the ux_conversations_user_id unique index) instead
+        # of SELECT-then-INSERT: two concurrent first-contact messages from the same sender
+        # can otherwise both miss the SELECT and both INSERT, splitting history across two
+        # conversation ids. ON CONFLICT makes this one round trip with no race window.
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT id FROM conversations WHERE user_id = $1"
-                " ORDER BY last_active_at DESC LIMIT 1",
+                "INSERT INTO conversations (user_id) VALUES ($1)"
+                " ON CONFLICT (user_id) DO UPDATE SET last_active_at = now()"
+                " RETURNING id",
                 user_id,
             )
-            if row is not None:
-                await conn.execute(
-                    "UPDATE conversations SET last_active_at = now() WHERE id = $1", row["id"]
-                )
-                return int(row["id"])
-            new_row = await conn.fetchrow(
-                "INSERT INTO conversations (user_id) VALUES ($1) RETURNING id", user_id
-            )
-        return int(new_row["id"])
+        return int(row["id"])
 
     async def recent_messages(self, conversation_id: int, limit: int) -> list[StoredMessage]:
         async with self._pool.acquire() as conn:

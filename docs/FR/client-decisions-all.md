@@ -5,6 +5,79 @@
 > (see `_pipeline_status.md`). Everything below the line is plain-language and copy-paste ready.
 > Convention copied from the Beyond Loaf project.
 
+## ✅ ANSWERS RECEIVED (2026-08-06) — Round 3: Phase 4 business & product decisions
+
+Comprehensive decision set covering Phase 4 architecture, data retention, WATI migration,
+scale, AI shopping-assistant behavior (product search, sales strategy, personality, VIP
+handling), and the full policy stack (cancellation/return/exchange/refund) — sourced from the
+actual policy documents at `D:\TAVAS Website\policy\*.docx` (extracted verbatim below) plus
+direct owner decisions. **⚠ Two direct conflicts with already-shipped code, flagged for fix:**
+(1) the retention-purge job built 2026-08-06 ages out `order_mappings`/`outbound_messages` by
+date, but Q15 below requires order/customer data be kept **indefinitely** — currently harmless
+only because `retention_days=0` (disabled) by default; (2) the Phase 4 implementation plan
+committed 2026-08-04 (`docs/superpowers/plans/2026-08-04-phase4-conversation-engine.md`) used a
+single inline-prompt engine, directly contradicted by decision 1 below (subagent architecture)
+— that plan is superseded, not resumable as written.
+
+| # | Question | Answer | Build consequence |
+|---|---|---|---|
+| **Architecture** | Phase 4 engine design | **Subagent architecture** — specialized agents for product search, order tracking, policies, recommendations, customer support. Explicitly NOT a single large inline-prompt engine. | Supersedes the committed single-`engine.py` plan; Phase 4 needs a fresh design pass before any implementation plan is written. |
+| **Q15 — Retention** | What to keep vs. delete | **Keep indefinitely:** customer profile, name, phone, order history, order number/date, products purchased, SKU, payment method (COD/online), order status, total spending, order count, tags (VIP/Repeat Customer). **Delete after 365 days:** AI conversation history, temporary AI context, debug logs, temporary cache, processed-message logs, other non-essential operational data. | Conflicts with the shipped `purge_older_than` (see flag above) — needs a fix so `order_mappings`/`outbound_messages` are excluded from age-based purge, and only conversation/message/operational tables age out at 365 days. Right-to-erasure-on-request (`/admin/erasure`) is unaffected — that stays available regardless of default retention. |
+| **Q8 — Switchover** | Migration approach | **Develop/test on a separate WhatsApp number first.** After successful testing, migrate the existing WATI production number to the Meta Cloud API. **No parallel production run required.** | Simpler than the "shadow mode" design (ADR-002's `shadow`/`allowlist` send modes still useful for the test-number phase, just not for a live parallel run on the real number). Gates Phase 6. |
+| **Rate limiting** | Login/erasure throttle backing store | **Postgres-backed**, not Upstash Redis (unless future traffic requires it). | Closes the pre-deploy hardening item 1 open decision. Not yet built — the current `slowapi` in-memory limiter is a known-weak placeholder on serverless. |
+| **Scale target** | Expected order volume | **100–500 orders/day.** Architecture must scale without major redesign at this range. | Informs DB indexing/outbox throughput assumptions; no immediate action, sanity-check against Phase 2 design. |
+| **Q7c / Q12 (clarified)** | Which number, and does it change | **Same business WhatsApp number currently connected to WATI, throughout.** Only the backend changes after migration. | Confirms the higher-risk migration path (same number = a number can only be connected to one system at a time) — the Q8 "separate test number first" answer is what makes this safe: test on a throwaway number, only touch the production number at actual cutover. |
+| **Q9 — Post-dispatch cancel** | Cancellation window | **Only before dispatch.** Once dispatched, no cancellation. Matches Shipping Policy verbatim ("Orders can be cancelled only before dispatch"). | `resolve_by_order_name`/cancel flow (Phase 5) must check fulfillment/dispatch status, not just financial status, before offering the Cancel button. |
+| **Q10 — a2ship / tracking** | Live courier tracking | **No live courier integration.** Send the Shopify tracking link; continue assisting or escalate to human if more help is needed. | Decisively closes Q10 — no a2ship API integration ever needed for this feature. |
+| **Q11 — Handoff number** | Where does "human" go | **No separate support number.** Human support continues on the **same** WhatsApp chat/number. AI tells the customer a team member will continue in the same conversation. | Simpler than originally framed — no `owner_alert_number` routing needed for customer-facing handoff (that field may still be useful for internal ops alerts, TBD). |
+| **Human handoff protocol** | How many AI attempts before handoff | **One attempt.** If the customer still asks for a human, or the AI can't resolve it, hand off **immediately** on the second request — do not keep persuading. | New conversation state needed: track "has this customer already asked for a human once in this conversation" — not in the original engine design. |
+| **AI product search fallback** | No exact match found | Search for similar products → recommend alternatives → if nothing suitable, offer human assistance. **Never hallucinate or invent product information.** | New Shopify capability needed: product/catalog search (current `ShopifyClient` only has order operations). New subagent: product search. |
+| **Product recommendations** | Which products may be recommended | **Only currently available for sale** — never archived, draft, unavailable, or out-of-stock. If nothing suitable is in stock, recommend similar in-stock items or offer human help. | Product search must filter on Shopify availability/status, not just existence. |
+| **AI personality** | Bot tone | **"Friendly Fashion Advisor,"** not just a support bot — warm, professional, fashion-knowledgeable, honest, conversational, en/hi/hinglish, emojis used sparingly. | Materially different from the shipped `brand_voice.md` seed (written as plain "transactional, polite") — needs rewriting. |
+| **AI sales strategy** | Cross-sell / upsell | Cross-sell relevant products, upsell naturally, recommend full outfit combinations and matching accessories — **always answer the customer's original question first**, never pushy. | New "recommendations" subagent scope; a genuine feature addition beyond original v1 ("we do NOT sell in chat" is now reversed). |
+| **VIP / repeat customers** | Personalization | Recognize repeat customers: welcome-back messages, thank returning customers, recommend based on purchase history. **Must NOT proactively state** total spending, order count, or detailed purchase history unless the customer explicitly asks. | Needs customer-tier classification logic (derived from the "keep indefinitely" order-count/spend data) + a hard constraint on the prompt/subagent to never surface those specific fields unprompted. |
+| **Policy precedence** | Conflict resolution | Published store policies (shipping/returns/exchanges/refunds/privacy/terms) **always take precedence** over AI behavior if there's ever a conflict. | The policy subagent must be grounded in the actual policy text (extracted below), not a paraphrase, and must not be overridden by the personality/sales instructions above. |
+
+### Extracted policy text (verbatim, from `D:\TAVAS Website\policy\*.docx`, last updated 2026-07-11 except Privacy/T&C undated)
+
+**Shipping Policy:** Orders are dispatched within 1–3 business days. Estimated delivery: 4–7
+business days depending on PIN code and courier availability. COD is available only in
+eligible PIN codes. Orders can be cancelled only before dispatch.
+
+**Return Policy:** TAVAS does not accept returns once a product has been delivered.
+Exceptions: damaged, defective, or incorrect product — notify within 24 hours of delivery,
+with a continuous unedited unboxing video and clear photographs showing the issue. Requests
+submitted after 24 hours or without the required proof may be declined.
+
+**Exchange Policy:** Damaged/incorrect products — after verification, a replacement is
+provided subject to stock availability; if unavailable, a full refund is issued. Size
+exchange: request within 48 hours of delivery; product must be unwashed and free from
+perfume/deodorant/makeup stains/dirt/signs of use; subject to stock availability; exchange
+shipping charges are borne by the customer.
+
+**Refund Policy:** Refunds are issued only when an approved damaged/defective/incorrect
+product cannot be replaced. Processed to the original payment method within 3–5 business days
+after approval (bank processing times may vary).
+
+**Privacy Policy:** Collects name, phone, email, shipping address, payment details to process
+orders; used for order processing/delivery, customer support, order updates, service
+improvement. Does not sell personal information; may share only with payment
+gateways/couriers/service providers as needed to fulfil orders or comply with law. Customer is
+responsible for accurate information; policy may be updated over time.
+
+**Terms & Conditions:** Customers must provide accurate shipping details. TAVAS is not
+responsible for courier delays, weather, festivals, strikes, government restrictions, or other
+events beyond its control. Slight colour variation (lighting/photography/screen) is not a
+defect. Minor variation in print placement, handwork, embroidery, stitching, or fabric texture
+is normal, not a manufacturing defect. All exchange/refund requests are subject to quality
+inspection. Fraudulent or abusive claims may be rejected; TAVAS may refuse service where
+policy misuse is detected. Terms may be updated without prior notice.
+
+**Still open, not addressed by this round:** Q6 (no-match fallback — support contact only, or
+also alert staff?) and Q13 (tag-name compatibility with a2ship/ops filters during cutover).
+
+---
+
 ## ✅ ANSWERS RECEIVED (2026-07-29)
 
 | Q | Answer | Build consequence |
@@ -16,7 +89,9 @@
 | **14** — FAQ / policy content | **Delegated to us**; client edits later via admin panel | We seed `app/knowledge/seeds/*` with sensible Thetavas defaults; admin panel must expose them for runtime editing. |
 | **8** — switchover plan | ⏳ **still open** — explained to owner 2026-07-29 | Gates Phase 6 only. |
 
-Remaining open: **Q2** (order volume, for cost estimate) · **Q6** (no-match fallback: support contact vs staff alert) · **Q7c** (which WhatsApp number WATI uses today) · **Q8** (switchover) · **Q9–Q11** (held: post-shipping cancel, a2ship tracking, handoff number) · **Q12** (number on Cloud API confirmation) · **Q13** (tag-name compatibility).
+**Superseded by round 3 (2026-08-06, above):** Q7c, Q8, Q9, Q10, Q11, Q15 all answered.
+Remaining genuinely open: **Q6** (no-match fallback: support contact vs staff alert) · **Q13**
+(tag-name compatibility with a2ship/ops filters during cutover).
 
 ---
 

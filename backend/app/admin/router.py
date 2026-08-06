@@ -134,6 +134,20 @@ class AdminSecurityHeadersMiddleware:
 admin_router = APIRouter(prefix="/admin")
 
 
+def _audit(action: str, outcome: str, *, resource: str | None = None) -> None:
+    """Actor-free admin audit line (item 4).
+
+    One shared ADMIN_PASSWORD means there is no per-user identity to record. Logs the
+    action, the resource/field NAME, and the outcome ONLY — never a value (passwords,
+    API keys, credential contents, knowledge bodies, or the erased phone number). Lands in
+    Vercel's function logs; no new infra for v1.
+    """
+    if resource is None:
+        logger.info("admin_audit action=%s outcome=%s", action, outcome)
+    else:
+        logger.info("admin_audit action=%s resource=%s outcome=%s", action, resource, outcome)
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -154,9 +168,12 @@ async def login(request: Request, req: LoginRequest, response: Response) -> dict
     """Verify the admin password and issue a signed session cookie on success."""
     settings = get_container().settings
     if not settings.admin_password:
+        _audit("login", "not_configured")
         raise HTTPException(status_code=503, detail="admin not configured")
     if not check_password(req.password, settings.admin_password):
+        _audit("login", "failure")
         raise HTTPException(status_code=401, detail="invalid password")
+    _audit("login", "success")
     token = issue_token(settings.app_master_key, _now())
     response.set_cookie(
         "admin_session",
@@ -208,6 +225,7 @@ async def put_knowledge(kind: str, payload: dict[str, object]) -> dict[str, bool
     repo = get_container().config_repo
     await repo.set_knowledge_override(kind, content)
     await repo.bump_config_int("knowledge_version")
+    _audit("knowledge_set", "success", resource=f"knowledge:{kind}")
     return {"ok": True}
 
 
@@ -249,6 +267,7 @@ async def set_shopify(req: ShopifyCredsRequest) -> dict[str, bool]:
         await cfg.set_secret("shopify:client_id", client_id)
     if client_secret is not None:
         await cfg.set_secret("shopify:client_secret", client_secret)
+    _audit("credential_set", "success", resource="shopify")
     return {"ok": True}
 
 
@@ -301,6 +320,7 @@ async def set_whatsapp(req: WhatsAppCredsRequest) -> dict[str, bool]:
         plain_value = values[name]
         if plain_value is not None:
             await config.set_plain(f"whatsapp:{name}", plain_value)
+    _audit("credential_set", "success", resource="whatsapp")
     return {"ok": True}
 
 
@@ -420,6 +440,7 @@ async def set_provider(req: ProviderConfigRequest) -> dict[str, bool | str]:
             raise HTTPException(status_code=400, detail=_env_verify_detail(result.kind))
         # Activate without storing a key — env-auth credentials live in env, never the DB.
         await cfg.set_plain("llm:active_provider", req.provider)
+        _audit("provider_set", "success", resource=f"llm:{req.provider}")
         return {"ok": True}
 
     if not req.api_key:
@@ -431,6 +452,7 @@ async def set_provider(req: ProviderConfigRequest) -> dict[str, bool | str]:
         if result.kind is ProviderErrorKind.RATE_LIMIT and info.accept_on_rate_limit:
             await cfg.set_secret(f"llm:api_key:{req.provider}", req.api_key)
             await cfg.set_plain("llm:active_provider", req.provider)
+            _audit("provider_set", "success", resource=f"llm:{req.provider}")
             return {"ok": True, "warning": _RATE_LIMIT_SAVE_WARNING}
         detail = (
             _KIND_MESSAGES.get(result.kind, result.error or "verification failed")
@@ -440,6 +462,7 @@ async def set_provider(req: ProviderConfigRequest) -> dict[str, bool | str]:
         raise HTTPException(status_code=400, detail=detail)
     await cfg.set_secret(f"llm:api_key:{req.provider}", req.api_key)
     await cfg.set_plain("llm:active_provider", req.provider)
+    _audit("provider_set", "success", resource=f"llm:{req.provider}")
     return {"ok": True}
 
 
@@ -451,7 +474,26 @@ async def get_controls() -> AdminControls:
 @admin_router.put("/controls", dependencies=[Depends(require_admin)])
 async def put_controls(controls: AdminControls) -> dict[str, bool]:
     await save_controls(get_container().config, controls)
+    _audit("controls_set", "success", resource="controls")
     return {"ok": True}
+
+
+class ErasureRequest(BaseModel):
+    """DPDP right-to-erasure by phone number (E.164). The phone is PII — never logged."""
+
+    phone: str = Field(max_length=32, pattern=r"^\+\d{7,15}$")
+
+
+@admin_router.post("/erasure", dependencies=[Depends(require_admin)])
+async def erase_by_phone(req: ErasureRequest) -> dict[str, object]:
+    """Purge every row keyed to one phone number across the retention tables.
+
+    Works today regardless of the (pending) retention period. Audit-logged as an erasure for
+    *a* number — the number itself is never written to the log line (treated as PII).
+    """
+    result = await get_container().ingest.delete_by_phone(req.phone)
+    _audit("erasure", "success", resource="phone")
+    return {"ok": True, "deleted": asdict(result)}
 
 
 @admin_router.get("/mappings", dependencies=[Depends(require_admin)])

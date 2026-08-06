@@ -12,7 +12,9 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.config.service import ConfigService
 
-_E164_RE = re.compile(r"^\+\d{7,15}$")
+# ASCII digits only: \d is Unicode-aware, so Arabic-Indic/fullwidth digit strings would pass
+# a \d pattern yet are not real phone numbers — pin to [0-9].
+_E164_RE = re.compile(r"^\+[0-9]{7,15}$")
 
 REVEAL_ALLOWED: tuple[str, ...] = ("order_number", "email", "status")
 
@@ -101,8 +103,14 @@ async def load_controls(config: ConfigService) -> AdminControls:
             data[key] = value
     for key in _INT_KEYS:
         raw_int = await config.get_plain(key)
-        if raw_int is not None and raw_int.isdigit():
-            data[key] = int(raw_int)
+        if raw_int is not None:
+            # int() is the parse authority — NOT str.isdigit(), which is Unicode-aware and
+            # disagrees with int() (e.g. "²".isdigit() is True but int("²") raises). A corrupt
+            # stored value degrades to the model default instead of crashing the panel.
+            try:
+                data[key] = int(raw_int)
+            except ValueError:
+                pass
     for key in _JSON_KEYS:
         raw = await config.get_plain(key)
         if raw is not None:

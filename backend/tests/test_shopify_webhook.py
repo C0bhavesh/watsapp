@@ -132,6 +132,17 @@ async def test_deeply_nested_json_with_valid_hmac_ignored() -> None:
     assert resp.json() == {"ok": True, "ignored": True}
 
 
+async def test_corrupt_staleness_config_does_not_500_uses_default() -> None:
+    # push_staleness_hours is operator/attacker-typed config. A non-numeric stored value must
+    # NOT 500 the signed webhook — a 500 here burns Shopify's 19-failure retry budget before
+    # the subscription is deleted. The handler degrades to the default staleness window.
+    await get_container().config.set_plain("push_staleness_hours", "abc")
+    body = json.dumps(payload("gid://shopify/Order/staleness")).encode()
+    resp = await post(body, headers(body, webhook_id="wh-staleness"))
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "duplicate": False, "queued": True}
+
+
 async def test_oversized_body_413_and_nothing_ingested() -> None:
     body = b"x" * (1_048_576 + 1)
     resp = await post(

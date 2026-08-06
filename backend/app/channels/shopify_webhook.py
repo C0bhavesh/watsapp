@@ -21,8 +21,25 @@ MAX_WEBHOOK_BODY_BYTES = 1_048_576
 MAX_FIELD_LEN = 256
 
 
+DEFAULT_STALENESS_HOURS = 6.0
+
+
 def _clip(v: str | None) -> str | None:
     return v if v is None else v[:MAX_FIELD_LEN]
+
+
+def _staleness_hours(raw: str | None) -> float:
+    """Parse the stored push_staleness_hours; a corrupt/typed value degrades to the default.
+
+    On the signed webhook hot path an unguarded ``float()`` on a bad config value is a 500,
+    which burns Shopify's 19-failure retry budget before it deletes the subscription.
+    """
+    if not raw:
+        return DEFAULT_STALENESS_HOURS
+    try:
+        return float(raw)
+    except ValueError:
+        return DEFAULT_STALENESS_HOURS
 
 
 @router.post("/webhooks/shopify")
@@ -88,8 +105,7 @@ async def shopify_webhook(request: Request) -> Response:
 
     outbound: OutboundDraft | None = None
     push_policy = await c.config.get_plain("push_policy") or "cod_only"
-    staleness_raw = await c.config.get_plain("push_staleness_hours")
-    staleness_hours = float(staleness_raw) if staleness_raw else 6.0
+    staleness_hours = _staleness_hours(await c.config.get_plain("push_staleness_hours"))
     if incoming.phone_e164 and is_eligible_for_push(
         incoming, datetime.now(UTC), push_policy, staleness_hours
     ):

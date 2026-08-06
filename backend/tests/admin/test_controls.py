@@ -87,6 +87,36 @@ def test_over_long_tag_rejected(client: TestClient) -> None:
     assert client.put("/admin/controls", json=doc).status_code == 422
 
 
+def test_corrupt_unicode_int_value_falls_back_not_500(client: TestClient) -> None:
+    login(client)
+
+    async def _seed_bad_int() -> None:
+        # Superscript two: str.isdigit() is True but int() raises ValueError. The old
+        # isdigit() gate would pass it through to int() and 500 the panel; int()-guard degrades.
+        await get_container().config_repo.set("retention_days", "²")
+
+    asyncio.run(_seed_bad_int())
+    r = client.get("/admin/controls")
+    assert r.status_code == 200
+    assert r.json()["retention_days"] == 0  # falls back to the safe default
+
+
+def test_unicode_digits_rejected_in_e164_fields(client: TestClient) -> None:
+    login(client)
+    base = client.get("/admin/controls").json()
+    # Arabic-Indic digits satisfy a Unicode-aware \\d but are not a real phone number — the
+    # ASCII-only pattern must reject them for allowlist_phones and owner_alert_number.
+    arabic = "+٩٩٩٩٩٩٩٩٩٩"
+    assert (
+        client.put("/admin/controls", json={**base, "allowlist_phones": [arabic]}).status_code
+        == 422
+    )
+    assert (
+        client.put("/admin/controls", json={**base, "owner_alert_number": arabic}).status_code
+        == 422
+    )
+
+
 def test_schema_invalid_stored_value_returns_defaults_not_500(client: TestClient) -> None:
     login(client)
 

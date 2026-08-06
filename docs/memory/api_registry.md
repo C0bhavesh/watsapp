@@ -40,13 +40,13 @@
 - **Handler:** backend/app/jobs/router.py (`run_job()`)
 - **Request:** header `X-Cron-Secret`; path `{name}`.
 - **Response:** 503 if `settings.cron_secret` unset; 403 on secret mismatch/missing; 404 unknown job; 200 `{"job": name, "result": ...}`.
-- **Notes:** constant-time secret compare (F11). Registered job: `ensure_subscription` (→ `{"status": "ok|created|updated"}` or `{"error": "public_base_url not configured"}`).
+- **Notes:** constant-time secret compare (F11). Registered jobs: `ensure_subscription` (→ `{"status": "ok|created|updated"}` or `{"error": "public_base_url not configured"}`); `retention_purge` (DPDP age-based purge — reads config `retention_days`; default 0 → `{"status": "disabled"}` no-op; when >0 purges rows older than the cutoff → `{"status": "purged", "retention_days", "deleted": {...}}`).
 
 ## [admin] Auth — POST /admin/login, GET /admin/session
 - **Handler:** backend/app/admin/router.py (`login()`, `session()`)
 - **Request:** login `{"password": str≤256}`; session none (cookie only).
 - **Response:** login 503 if `ADMIN_PASSWORD` unset, 401 on wrong password, 429 over 5/min, 200 `{"ok": true}` + httponly `admin_session` cookie (SameSite=strict, **Secure when `settings.app_env == "prod"`** — server config, NOT the client `x-forwarded-proto`; path=/admin, 12h); session 401 without a valid cookie, 200 `{"ok": true}`.
-- **Notes:** password compared constant-time (`check_password`); empty stored password never grants access. Cookie is an HMAC-signed expiring token (`app_master_key`), verified by `require_admin`. `GET /admin/session` does NO DB access (a DB hiccup can't log anyone out). Rate limit via slowapi keyed on remote address. All `/admin` requests >1 MiB Content-Length → 413 (`AdminBodyCapMiddleware`, before body parse). **Security-review (2026-07-30):** (a) cookie Secure from `app_env`, prod always forces it; (b) EVERY `/admin` response (JSON API + `/admin/ui`) carries `Content-Security-Policy` / `X-Frame-Options: DENY` / `X-Content-Type-Options: nosniff` / `Referrer-Policy: no-referrer` / `Cache-Control: no-store` (`AdminSecurityHeadersMiddleware`); (c) a body-validation 422 (any route) NO LONGER echoes the submitted `input` — a global `RequestValidationError` handler strips `input`/`url`/`ctx`, so over-length creds (password/api_key/client_secret/access_token) never reach the error body.
+- **Notes:** password compared constant-time (`check_password`); empty stored password never grants access. Login success/failure/not_configured is audit-logged (actor-free, never the password, 2026-08-06). Cookie is an HMAC-signed expiring token (`app_master_key`), verified by `require_admin`. `GET /admin/session` does NO DB access (a DB hiccup can't log anyone out). Rate limit via slowapi keyed on remote address. All `/admin` requests >1 MiB Content-Length → 413 (`AdminBodyCapMiddleware`, before body parse). **Security-review (2026-07-30):** (a) cookie Secure from `app_env`, prod always forces it; (b) EVERY `/admin` response (JSON API + `/admin/ui`) carries `Content-Security-Policy` / `X-Frame-Options: DENY` / `X-Content-Type-Options: nosniff` / `Referrer-Policy: no-referrer` / `Cache-Control: no-store` (`AdminSecurityHeadersMiddleware`); (c) a body-validation 422 (any route) NO LONGER echoes the submitted `input` — a global `RequestValidationError` handler strips `input`/`url`/`ctx`, so over-length creds (password/api_key/client_secret/access_token) never reach the error body.
 
 ## [admin] Credentials — GET|POST /admin/shopify, GET|POST /admin/whatsapp
 - **Handler:** backend/app/admin/router.py (`shopify_status`/`set_shopify`, `whatsapp_status`/`set_whatsapp`)
@@ -68,9 +68,15 @@
 
 ## [admin] Controls — GET|PUT /admin/controls
 - **Handler:** backend/app/admin/router.py (`get_controls`, `put_controls`)
-- **Request:** PUT full `AdminControls` document (send_mode, allowlist_phones, push_policy, reveal_fields, tags, default_language, push_staleness_hours, public_base_url, owner_alert_number).
+- **Request:** PUT full `AdminControls` document (send_mode, allowlist_phones, push_policy, reveal_fields, tags, default_language, push_staleness_hours, `retention_days`, public_base_url, owner_alert_number).
 - **Response:** GET the current document (stored-or-default); PUT 422 on any invalid value, 200 `{"ok": true}`.
-- **Notes:** require_admin (401). ADR-002 send-mode kill switch + ADR-005 decisions-as-config. Each field persists as its OWN plain `app_config` key so runtime readers keep their existing keys; corrupt stored values fall back to defaults (never crash the panel).
+- **Notes:** require_admin (401). ADR-002 send-mode kill switch + ADR-005 decisions-as-config. Each field persists as its OWN plain `app_config` key so runtime readers keep their existing keys; corrupt stored values fall back to defaults (never crash the panel). `retention_days` (0..3650, DEFAULT 0 = disabled) is the DPDP retention window read by the `retention_purge` job (2026-08-06). PUT is audit-logged (`controls_set`).
+
+## [admin] DPDP erasure — POST /admin/erasure
+- **Handler:** backend/app/admin/router.py (`erase_by_phone`)
+- **Request:** `{"phone": str}` — E.164 `^\+\d{7,15}$`, ≤32.
+- **Response:** 401 without a valid cookie; 422 on a non-E.164 phone (input NOT echoed — global handler strips it, PII-safe); 200 `{"ok": true, "deleted": {"order_mappings", "outbound_messages", "conversations", "messages"}}`.
+- **Notes:** require_admin (401). DPDP right-to-erasure — `ingest.delete_by_phone` purges every row keyed to that number across order_mappings + outbound_messages (by `phone_e164`) + conversations/messages (by `user_id`) in one Postgres transaction; works today regardless of the (pending) retention period. Audit-logged as `erasure resource=phone` — the number itself is NEVER written to the log line (PII).
 
 ## [admin] Read-only views — GET /admin/mappings, GET /admin/outbox
 - **Handler:** backend/app/admin/router.py (`list_mappings`, `list_outbox`)

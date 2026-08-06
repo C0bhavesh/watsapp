@@ -1,15 +1,50 @@
+import asyncio
 import hashlib
 import hmac as hmac_lib
 import json
+import logging
+from dataclasses import dataclass, field
 
 import httpx
 import pytest
 
 from app.deps import get_container, reset_container
+from app.providers.base import CompletionResult, Message
 
 SECRET = "app-secret-webhook"
 VERIFY_TOKEN = "verify-me"
 PHONE_NUMBER_ID = "1298805403309058"
+
+# Intent -> the agent module `core.conversation` dispatches to for it (module path used to
+# monkeypatch `.run` directly, proving each dispatch arm wires to its OWN specialist).
+_INTENT_MODULES = {
+    "order_tracking": "app.agents.order_tracking",
+    "product_search": "app.agents.product_search",
+    "policy": "app.agents.policy",
+    "recommendations": "app.agents.recommendations",
+    "customer_support": "app.agents.customer_support",
+}
+
+
+@dataclass
+class FakeProvider:
+    """Scripted LLMProvider double -- returns each response text in order, one per call."""
+
+    responses: list[str]
+    calls: list[list[Message]] = field(default_factory=list)
+
+    async def complete(
+        self, model, messages, api_key, timeout, *, extra_params=None
+    ) -> CompletionResult:
+        self.calls.append(list(messages))
+        return CompletionResult(text=self.responses[len(self.calls) - 1], model=model)
+
+
+def _fake_active_llm(provider: FakeProvider):
+    async def _active_llm(settings, config):
+        return provider, "fake-model", "fake-key", None
+
+    return _active_llm
 
 
 @pytest.fixture(autouse=True)
@@ -264,7 +299,7 @@ async def test_post_text_event_without_llm_configured_sends_safe_fallback(
         sent["body"] = body
         return SendResult(ok=True, status_code=200, wamid="wamid.reply", error=None)
 
-    monkeypatch.setattr("app.channels.whatsapp.send_text", fake_send_text)
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
     from app.admin.controls import AdminControls, save_controls
     from app.deps import get_container
 
@@ -292,7 +327,11 @@ async def test_post_text_event_without_llm_configured_sends_safe_fallback(
 async def test_post_text_event_send_mode_off_does_not_send(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    called = {"sent": False}
+    # Strengthened (security-review follow-up): proves the gate stops the pipeline BEFORE any
+    # Shopify/LLM/history call -- not just that the final send is suppressed. If the off-check
+    # were ever moved to the wrong spot (e.g. after these calls), these flags would go True and
+    # the test would fail even though "sent" would still correctly be False.
+    called = {"sent": False, "resolved_orders": False, "active_llm": False, "loaded_history": False}
 
     async def fake_send_text(*args, **kwargs):
         from app.channels.whatsapp_sender import SendResult
@@ -300,7 +339,22 @@ async def test_post_text_event_send_mode_off_does_not_send(
         called["sent"] = True
         return SendResult(ok=True, status_code=200, wamid="x", error=None)
 
-    monkeypatch.setattr("app.channels.whatsapp.send_text", fake_send_text)
+    async def fake_resolve_by_phone(*args, **kwargs):
+        called["resolved_orders"] = True
+        return []
+
+    async def fake_active_llm(*args, **kwargs):
+        called["active_llm"] = True
+        return None
+
+    async def fake_load_history(*args, **kwargs):
+        called["loaded_history"] = True
+        return 1, []
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+    monkeypatch.setattr("app.core.conversation.resolve_by_phone", fake_resolve_by_phone)
+    monkeypatch.setattr("app.core.conversation.active_llm", fake_active_llm)
+    monkeypatch.setattr("app.core.conversation.load_history", fake_load_history)
     # send_mode defaults to "off" -- no controls saved in this test.
 
     body = json.dumps(
@@ -318,12 +372,19 @@ async def test_post_text_event_send_mode_off_does_not_send(
 
     assert resp.status_code == 200
     assert called["sent"] is False
+    assert called["resolved_orders"] is False
+    assert called["active_llm"] is False
+    assert called["loaded_history"] is False
 
 
 async def test_post_text_event_paused_conversation_stays_silent_but_records_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    called = {"sent": False}
+    # Strengthened (security-review follow-up): proves the pause gate stops the pipeline before
+    # Shopify/LLM calls, not just before the send. load_history running is already implicitly
+    # proven below (the pause check needs conversation_id, and the assertion reads back the
+    # persisted message), so it is not separately flag-checked here.
+    called = {"sent": False, "resolved_orders": False, "active_llm": False}
 
     async def fake_send_text(*args, **kwargs):
         from app.channels.whatsapp_sender import SendResult
@@ -331,7 +392,17 @@ async def test_post_text_event_paused_conversation_stays_silent_but_records_mess
         called["sent"] = True
         return SendResult(ok=True, status_code=200, wamid="x", error=None)
 
-    monkeypatch.setattr("app.channels.whatsapp.send_text", fake_send_text)
+    async def fake_resolve_by_phone(*args, **kwargs):
+        called["resolved_orders"] = True
+        return []
+
+    async def fake_active_llm(*args, **kwargs):
+        called["active_llm"] = True
+        return None
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+    monkeypatch.setattr("app.core.conversation.resolve_by_phone", fake_resolve_by_phone)
+    monkeypatch.setattr("app.core.conversation.active_llm", fake_active_llm)
     from datetime import UTC, datetime, timedelta
 
     from app.admin.controls import AdminControls, save_controls
@@ -357,6 +428,8 @@ async def test_post_text_event_paused_conversation_stays_silent_but_records_mess
 
     assert resp.status_code == 200
     assert called["sent"] is False
+    assert called["resolved_orders"] is False
+    assert called["active_llm"] is False
     messages = await c.conversations.recent_messages(conversation_id, 10)
     assert any(m.content == "still there?" for m in messages)
 
@@ -372,7 +445,7 @@ async def test_post_text_event_shadow_mode_processes_but_does_not_send(
         called["sent"] = True
         return SendResult(ok=True, status_code=200, wamid="x", error=None)
 
-    monkeypatch.setattr("app.channels.whatsapp.send_text", fake_send_text)
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
     from app.admin.controls import AdminControls, save_controls
     from app.deps import get_container
 
@@ -409,7 +482,7 @@ async def test_post_button_tap_still_unaffected_by_conversation_wiring(
         called["sent"] = True
         raise AssertionError("send_text must not be called for a button tap")
 
-    monkeypatch.setattr("app.channels.whatsapp.send_text", fake_send_text)
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
 
     body = json.dumps(
         envelope(
@@ -433,3 +506,349 @@ async def test_post_button_tap_still_unaffected_by_conversation_wiring(
         ],
     }
     assert called["sent"] is False
+
+
+async def test_post_text_event_live_mode_uses_llm_pipeline_end_to_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Proves the router + agent LLM path actually runs (not just the no-LLM fallback) --
+    the provider is called twice (router classify, then the dispatched agent's completion) and
+    the sent body is the agent's own reply text, not the fixed fallback copy."""
+    sent: dict[str, object] = {}
+
+    async def fake_send_text(http, cfg, to, body, timeout=20.0):
+        from app.channels.whatsapp_sender import SendResult
+
+        sent["body"] = body
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+
+    provider = FakeProvider(
+        responses=[
+            json.dumps({"intent": "policy"}),
+            json.dumps({"reply": "Our returns window is 7 days."}),
+        ]
+    )
+    monkeypatch.setattr("app.core.conversation.active_llm", _fake_active_llm(provider))
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    await save_controls(get_container().config, AdminControls(send_mode="live"))
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.live1",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "what is your return policy?"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert len(provider.calls) == 2
+    assert sent["body"] == "Our returns window is 7 days."
+
+
+async def test_post_text_event_shadow_mode_uses_llm_pipeline_but_does_not_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = {"sent": False}
+
+    async def fake_send_text(*args, **kwargs):
+        from app.channels.whatsapp_sender import SendResult
+
+        called["sent"] = True
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+
+    provider = FakeProvider(
+        responses=[
+            json.dumps({"intent": "policy"}),
+            json.dumps({"reply": "Our returns window is 7 days."}),
+        ]
+    )
+    monkeypatch.setattr("app.core.conversation.active_llm", _fake_active_llm(provider))
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="shadow"))
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.shadow-llm",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "what is your return policy?"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert called["sent"] is False
+    assert len(provider.calls) == 2
+    conversation_id = await c.conversations.get_or_create("919999999999")
+    messages = await c.conversations.recent_messages(conversation_id, 10)
+    assert len(messages) == 2
+
+
+@pytest.mark.parametrize("intent", list(_INTENT_MODULES))
+async def test_post_text_event_dispatches_to_correct_agent(
+    intent: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each of the 5 router intents must reach its OWN specialist agent -- not just 'some
+    agent', which a single end-to-end test can't distinguish since every agent's reply flows
+    through the same send_text call."""
+    from app.agents.base import AgentReply
+
+    sent: dict[str, object] = {}
+
+    async def fake_send_text(http, cfg, to, body, timeout=20.0):
+        from app.channels.whatsapp_sender import SendResult
+
+        sent["body"] = body
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+
+    provider = FakeProvider(responses=[json.dumps({"intent": intent})])
+    monkeypatch.setattr("app.core.conversation.active_llm", _fake_active_llm(provider))
+
+    stub_reply = AgentReply(text=f"stub-reply-for-{intent}")
+
+    async def fake_run(*args, **kwargs):
+        return stub_reply
+
+    monkeypatch.setattr(f"{_INTENT_MODULES[intent]}.run", fake_run)
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    await save_controls(get_container().config, AdminControls(send_mode="live"))
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": f"wamid.intent.{intent}",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "some message"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert sent["body"] == f"stub-reply-for-{intent}"
+
+
+async def test_post_text_event_allowlist_mode_sends_to_allowed_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: dict[str, object] = {}
+
+    async def fake_send_text(http, cfg, to, body, timeout=20.0):
+        from app.channels.whatsapp_sender import SendResult
+
+        sent["to"] = to
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    # normalize_phone("919999999999") -> "+919999999999" -- the allowlist must be checked
+    # against that same E.164 form, not the raw wa_id.
+    await save_controls(
+        get_container().config,
+        AdminControls(send_mode="allowlist", allowlist_phones=["+919999999999"]),
+    )
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.allow1",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "hello"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert sent["to"] == "919999999999"
+
+
+async def test_post_text_event_allowlist_mode_skips_non_allowed_number_but_still_persists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = {"sent": False}
+
+    async def fake_send_text(*args, **kwargs):
+        from app.channels.whatsapp_sender import SendResult
+
+        called["sent"] = True
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    c = get_container()
+    # A DIFFERENT number is allowlisted -- 919999999999 must be skipped, but still processed.
+    await save_controls(
+        c.config, AdminControls(send_mode="allowlist", allowlist_phones=["+911111111111"])
+    )
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.allow2",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "hello"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert called["sent"] is False
+    conversation_id = await c.conversations.get_or_create("919999999999")
+    messages = await c.conversations.recent_messages(conversation_id, 10)
+    assert len(messages) == 2
+
+
+async def test_post_text_event_send_failure_logs_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def fake_send_text(*args, **kwargs):
+        from app.channels.whatsapp_sender import SendResult
+
+        return SendResult(
+            ok=False, status_code=470, wamid=None, error="code=470; message=blocked"
+        )
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    await save_controls(get_container().config, AdminControls(send_mode="live"))
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.sendfail",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "hello"},
+            }
+        )
+    ).encode()
+
+    with caplog.at_level(logging.WARNING, logger="app.core.conversation"):
+        resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert "whatsapp send failed" in caplog.text
+    assert "470" in caplog.text
+
+
+async def test_post_text_event_empty_agent_reply_falls_back_to_safe_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: dict[str, object] = {}
+
+    async def fake_send_text(http, cfg, to, body, timeout=20.0):
+        from app.channels.whatsapp_sender import SendResult
+
+        sent["body"] = body
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+
+    # Garbage router completion degrades to the documented "customer_support" fallback intent;
+    # that agent is monkeypatched directly so the empty-reply guard is proven independent of
+    # what any real completion happens to contain.
+    provider = FakeProvider(responses=["not json"])
+    monkeypatch.setattr("app.core.conversation.active_llm", _fake_active_llm(provider))
+
+    from app.agents.base import AgentReply
+
+    async def fake_customer_support_run(*args, **kwargs):
+        return AgentReply(text="   ")  # whitespace-only -- strip_markdown collapses it to ""
+
+    monkeypatch.setattr("app.agents.customer_support.run", fake_customer_support_run)
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    await save_controls(get_container().config, AdminControls(send_mode="live"))
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.empty1",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "hello"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert sent["body"]
+    assert "team" in sent["body"]  # the fixed error_fallback copy, never a blank message
+
+
+async def test_post_text_event_timeout_is_caught_and_logged(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr("app.core.conversation.TURN_TIMEOUT_SECONDS", 0.01)
+
+    async def slow_active_llm(*args, **kwargs):
+        await asyncio.sleep(0.05)
+        return None
+
+    monkeypatch.setattr("app.core.conversation.active_llm", slow_active_llm)
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    await save_controls(get_container().config, AdminControls(send_mode="live"))
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.timeout1",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "hello"},
+            }
+        )
+    ).encode()
+
+    with caplog.at_level(logging.WARNING, logger="app.core.conversation"):
+        resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert "timed out" in caplog.text

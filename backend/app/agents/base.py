@@ -8,6 +8,9 @@ from app.shopify.models import AuthorizedOrder
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+# Greedy on purpose: a completion with two independent {...} fragments is malformed input
+# either way, and spanning first-`{` to last-`}` fails json.loads cleanly (falls through to
+# fallback) rather than silently picking one fragment and guessing which the model meant.
 _BRACES_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 # Shared "Friendly Fashion Advisor" personality, injected into every agent's system prompt so
@@ -46,6 +49,22 @@ class AgentReply:
     handoff: bool = False
 
 
+def _think_stripped(raw_text: str) -> str:
+    """Remove <think>...</think> reasoning blocks a model may prepend to its completion."""
+    return _THINK_RE.sub("", raw_text)
+
+
+def _candidate_text(raw_text: str) -> str:
+    """Return the JSON-parse candidate: think-stripped text with ``` fencing peeled off.
+
+    Shared by extract_json_blob (to parse) and extract_reply_text (to detect a failed JSON
+    attempt) so the fence/think logic lives in exactly one place.
+    """
+    text = _think_stripped(raw_text)
+    fence_match = _FENCE_RE.search(text)
+    return fence_match.group(1) if fence_match else text.strip()
+
+
 def extract_json_blob(raw_text: str) -> dict[str, object] | None:
     """Hardened JSON-object extraction from a raw LLM completion.
 
@@ -53,9 +72,7 @@ def extract_json_blob(raw_text: str) -> dict[str, object] | None:
     ``json.loads``, falling back to extracting the outermost ``{...}`` span. Returns None
     (never raises) if no JSON object can be recovered -- callers own their own fallback.
     """
-    text = _THINK_RE.sub("", raw_text)
-    fence_match = _FENCE_RE.search(text)
-    candidate = fence_match.group(1) if fence_match else text.strip()
+    candidate = _candidate_text(raw_text)
     try:
         data: Any = json.loads(candidate)
         return data if isinstance(data, dict) else None
@@ -79,6 +96,12 @@ def extract_reply_text(raw_text: str, fallback: str) -> str:
     to the customer). If the completion isn't JSON at all, the plain text is trusted as-is --
     some models drift from the requested format but still produce a safe natural-language
     reply, and treating "wasn't JSON" as a hard failure would reject good replies.
+
+    But a completion that clearly *attempted* the requested JSON/fenced shape and failed to
+    parse (a code fence, or text starting with ``{``) is never trusted verbatim -- that's
+    broken JSON syntax, not natural-language prose, and leaking it to the customer would be a
+    real safety gap. Only text with no sign of a JSON attempt at all falls through as plain
+    text.
     """
     data = extract_json_blob(raw_text)
     if data is not None:
@@ -86,5 +109,9 @@ def extract_reply_text(raw_text: str, fallback: str) -> str:
         if isinstance(reply, str) and reply.strip():
             return reply.strip()
         return fallback
-    plain = raw_text.strip()
+    stripped = _think_stripped(raw_text)
+    candidate = _candidate_text(raw_text)
+    if "```" in stripped or candidate.startswith("{"):
+        return fallback
+    plain = stripped.strip()
     return plain if plain else fallback

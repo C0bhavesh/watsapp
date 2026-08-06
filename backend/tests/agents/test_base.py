@@ -39,3 +39,17 @@ def test_extract_reply_text_tolerates_plain_text_completion() -> None:
 
 def test_extract_reply_text_empty_completion_falls_back() -> None:
     assert extract_reply_text("   ", "fallback") == "fallback"
+
+
+def test_extract_reply_text_falls_back_on_broken_fenced_json() -> None:
+    text = '```json\n{reply: "broken}\n```'
+    assert extract_reply_text(text, "FALLBACK") == "FALLBACK"
+
+
+def test_extract_reply_text_falls_back_on_trailing_comma_json() -> None:
+    assert extract_reply_text('{"reply": "hi",}', "FALLBACK") == "FALLBACK"
+
+
+def test_extract_reply_text_falls_back_on_unquoted_key_json() -> None:
+    text = '{reply: "hi there, unquoted key"}'
+    assert extract_reply_text(text, "FALLBACK") == "FALLBACK"

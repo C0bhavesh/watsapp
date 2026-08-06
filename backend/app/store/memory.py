@@ -1,4 +1,7 @@
+from datetime import datetime
+
 from app.store.base import (
+    DeletionResult,
     IngestResult,
     MappingUpsert,
     MappingView,
@@ -83,6 +86,32 @@ class InMemoryIngestStore:
             for o in self.outbound.values()
         ]
         return list(reversed(views))[:limit]
+
+    async def delete_by_phone(self, phone_e164: str) -> DeletionResult:
+        removed_mappings = [
+            gid for gid, m in self.mappings.items() if m.phone_e164 == phone_e164
+        ]
+        for gid in removed_mappings:
+            del self.mappings[gid]
+        removed_outbound = [
+            key for key, o in self.outbound.items() if o.phone_e164 == phone_e164
+        ]
+        for key in removed_outbound:
+            del self.outbound[key]
+        # No in-memory conversation/message store yet (Phase 4) -> those counts stay 0.
+        return DeletionResult(
+            order_mappings=len(removed_mappings),
+            outbound_messages=len(removed_outbound),
+            conversations=0,
+            messages=0,
+        )
+
+    async def purge_older_than(self, cutoff: datetime) -> DeletionResult:
+        # In-memory rows carry no created_at timestamp, so there is nothing to age out;
+        # the real age-based purge is the Postgres implementation.
+        return DeletionResult(
+            order_mappings=0, outbound_messages=0, conversations=0, messages=0
+        )
 
 
 class InMemoryMessageStore:

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 
 
@@ -64,6 +65,16 @@ class OutboundView:
     created_at: str | None
 
 
+@dataclass(frozen=True)
+class DeletionResult:
+    """Row counts removed by a DPDP erasure/retention purge, per table."""
+
+    order_mappings: int
+    outbound_messages: int
+    conversations: int
+    messages: int
+
+
 class IngestStore(Protocol):
     async def ingest_order_created(
         self,
@@ -76,6 +87,10 @@ class IngestStore(Protocol):
     async def recent_mappings(self, limit: int) -> list[MappingView]: ...
 
     async def recent_outbound(self, limit: int) -> list[OutboundView]: ...
+
+    async def delete_by_phone(self, phone_e164: str) -> DeletionResult: ...
+
+    async def purge_older_than(self, cutoff: datetime) -> DeletionResult: ...
 
 
 class MessageStore(Protocol):

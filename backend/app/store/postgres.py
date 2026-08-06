@@ -1,4 +1,7 @@
+from datetime import datetime
+
 from app.store.base import (
+    DeletionResult,
     IngestResult,
     MappingUpsert,
     MappingView,
@@ -161,6 +164,65 @@ class PostgresIngestStore:
             )
             for r in rows
         ]
+
+    async def delete_by_phone(self, phone_e164: str) -> DeletionResult:
+        """DPDP right-to-erasure: purge every row keyed to one phone number, atomically.
+
+        Children (messages) are deleted before parents (conversations) for FK integrity.
+        conversations/messages have no repo writer yet (Phase 4) but are cleaned defensively
+        so erasure is complete the moment that layer starts persisting.
+        """
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                msgs = await conn.execute(
+                    "DELETE FROM messages WHERE conversation_id IN "
+                    "(SELECT id FROM conversations WHERE user_id = $1)",
+                    phone_e164,
+                )
+                convs = await conn.execute(
+                    "DELETE FROM conversations WHERE user_id = $1", phone_e164
+                )
+                outbound = await conn.execute(
+                    "DELETE FROM outbound_messages WHERE phone_e164 = $1", phone_e164
+                )
+                mappings = await conn.execute(
+                    "DELETE FROM order_mappings WHERE phone_e164 = $1", phone_e164
+                )
+        return DeletionResult(
+            order_mappings=_rows_affected(mappings),
+            outbound_messages=_rows_affected(outbound),
+            conversations=_rows_affected(convs),
+            messages=_rows_affected(msgs),
+        )
+
+    async def purge_older_than(self, cutoff: datetime) -> DeletionResult:
+        """DPDP retention: delete rows older than ``cutoff``, atomically.
+
+        Order/outbound rows age on ``created_at``; conversations age on ``last_active_at``
+        (matches "N months after their last order or message"). Children first (FK).
+        """
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                msgs = await conn.execute(
+                    "DELETE FROM messages WHERE conversation_id IN "
+                    "(SELECT id FROM conversations WHERE last_active_at < $1)",
+                    cutoff,
+                )
+                convs = await conn.execute(
+                    "DELETE FROM conversations WHERE last_active_at < $1", cutoff
+                )
+                outbound = await conn.execute(
+                    "DELETE FROM outbound_messages WHERE created_at < $1", cutoff
+                )
+                mappings = await conn.execute(
+                    "DELETE FROM order_mappings WHERE created_at < $1", cutoff
+                )
+        return DeletionResult(
+            order_mappings=_rows_affected(mappings),
+            outbound_messages=_rows_affected(outbound),
+            conversations=_rows_affected(convs),
+            messages=_rows_affected(msgs),
+        )
 
 
 class PostgresMessageStore:

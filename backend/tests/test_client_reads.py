@@ -244,3 +244,33 @@ async def test_search_products_empty_query_returns_empty_without_calling_shopify
     await seed(config)
     assert await client.search_products("") == []
     assert calls == []
+
+
+async def test_search_products_rejects_search_operators(settings, master_key) -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if request.url.path.endswith("/oauth/access_token"):
+            return httpx.Response(200, json={"access_token": "shpat_t1", "expires_in": 86399})
+        return httpx.Response(200, json={"data": {"products": {"edges": []}}})
+
+    client, config = make_client(settings, master_key, handler)
+    await seed(config)
+    # Crafted malicious input with OR/status injection
+    assert await client.search_products("wedding lehenga) OR status:archived OR (blue") == []
+    assert calls == []
+
+
+async def test_search_products_legitimate_free_text_works(settings, master_key) -> None:
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"data": {"products": {"edges": [{"node": PRODUCT_NODE}]}}}
+        )
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    # Legitimate product description with English words and punctuation
+    results = await client.search_products("blue kurti for wedding")
+    assert len(results) == 1
+    assert results[0].title == "Blue Chikankari Kurti"

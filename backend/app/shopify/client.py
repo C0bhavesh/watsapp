@@ -57,6 +57,42 @@ PRODUCT_FIELDS = (
 )
 
 
+def _is_safe_product_query(query: str) -> bool:
+    """Check if a product search query is safe from Shopify search-operator injection.
+
+    Rejects queries containing:
+    - Quotes (single or double)
+    - Colons (field prefixes like status:, title:)
+    - Wildcards (*)
+    - Standalone boolean operators (AND, OR, NOT) with word boundaries
+    - Unbalanced parentheses
+
+    Allows legitimate product descriptions like "blue kurti for wedding".
+    """
+    # Check for quotes (both single and double)
+    if '"' in query or "'" in query:
+        return False
+
+    # Check for field prefix colons
+    if ":" in query:
+        return False
+
+    # Check for wildcards
+    if "*" in query:
+        return False
+
+    # Check for standalone AND/OR/NOT operators (case-insensitive, word boundary)
+    # This rejects " OR " or " AND " but allows words like "andaman" or "order"
+    if re.search(r"\b(and|or|not)\b", query, re.IGNORECASE):
+        return False
+
+    # Check for unbalanced parentheses
+    if query.count("(") != query.count(")"):
+        return False
+
+    return True
+
+
 def _product_from_node(node: dict[str, Any]) -> Product:
     price_node = (node.get("priceRangeV2") or {}).get("minVariantPrice")
     total_inventory = node.get("totalInventory")
@@ -179,7 +215,7 @@ class ShopifyClient:
 
     async def search_products(self, query: str, limit: int = 5) -> list[Product]:
         stripped = query.strip()
-        if not stripped:
+        if not stripped or not _is_safe_product_query(stripped):
             return []
         # status:active only -- never surface a draft/archived product to a customer.
         gql_query = f"({stripped}) AND status:active"

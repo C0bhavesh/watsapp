@@ -100,6 +100,9 @@ async def active_llm(
     None if nothing is active yet, or an api_key provider is active but has no stored key.
     """
     active = await config.get_plain("llm:active_provider")
+    # active is never "" in practice -- only real provider keys are written (see
+    # admin/router.py::set_provider, which validates via get_provider() before any write); using
+    # is None here to match the brief's spec.
     if active is None:
         return None
     info = get_provider(active)

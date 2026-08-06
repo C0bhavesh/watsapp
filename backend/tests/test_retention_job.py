@@ -31,7 +31,14 @@ class _SpyIngest:
     async def purge_older_than(self, cutoff: datetime) -> DeletionResult:
         self.cutoff = cutoff
         self.calls += 1
-        return DeletionResult(order_mappings=3, outbound_messages=1, conversations=0, messages=0)
+        return DeletionResult(
+            order_mappings=3,
+            outbound_messages=1,
+            conversations=0,
+            messages=0,
+            pending_actions=2,
+            order_actions=1,
+        )
 
 
 async def test_disabled_at_zero_does_not_purge() -> None:

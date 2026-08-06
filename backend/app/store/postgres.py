@@ -170,7 +170,13 @@ class PostgresIngestStore:
 
         Children (messages) are deleted before parents (conversations) for FK integrity.
         conversations/messages have no repo writer yet (Phase 4) but are cleaned defensively
-        so erasure is complete the moment that layer starts persisting.
+        so erasure is complete the moment that layer starts persisting. pending_actions is
+        scoped by ``wa_id`` and order_actions by ``actor_wa_id`` (both the requester's number).
+
+        Known residual: processed_messages retains dedupe rows whose message_id embeds the
+        requester's phone in Meta's wamid encoding; these age out via purge_older_than's
+        received_at cutoff but are not covered by an on-demand phone-scoped delete (decoding
+        wamids to recover the sender number is deliberately out of scope).
         """
         async with self._pool.acquire() as conn:
             async with conn.transaction():
@@ -188,18 +194,28 @@ class PostgresIngestStore:
                 mappings = await conn.execute(
                     "DELETE FROM order_mappings WHERE phone_e164 = $1", phone_e164
                 )
+                pending = await conn.execute(
+                    "DELETE FROM pending_actions WHERE wa_id = $1", phone_e164
+                )
+                actions = await conn.execute(
+                    "DELETE FROM order_actions WHERE actor_wa_id = $1", phone_e164
+                )
         return DeletionResult(
             order_mappings=_rows_affected(mappings),
             outbound_messages=_rows_affected(outbound),
             conversations=_rows_affected(convs),
             messages=_rows_affected(msgs),
+            pending_actions=_rows_affected(pending),
+            order_actions=_rows_affected(actions),
         )
 
     async def purge_older_than(self, cutoff: datetime) -> DeletionResult:
         """DPDP retention: delete rows older than ``cutoff``, atomically.
 
-        Order/outbound rows age on ``created_at``; conversations age on ``last_active_at``
-        (matches "N months after their last order or message"). Children first (FK).
+        Order/outbound/pending/action rows age on ``created_at``; conversations age on
+        ``last_active_at`` (matches "N months after their last order or message"). Children
+        first (FK). processed_messages is a dedupe table with no phone column — it is aged out
+        blindly on ``received_at`` (its blanket count is not reported in DeletionResult).
         """
         async with self._pool.acquire() as conn:
             async with conn.transaction():
@@ -217,11 +233,23 @@ class PostgresIngestStore:
                 mappings = await conn.execute(
                     "DELETE FROM order_mappings WHERE created_at < $1", cutoff
                 )
+                pending = await conn.execute(
+                    "DELETE FROM pending_actions WHERE created_at < $1", cutoff
+                )
+                actions = await conn.execute(
+                    "DELETE FROM order_actions WHERE created_at < $1", cutoff
+                )
+                # Blanket age-out of the dedupe table (no phone column, not attributable).
+                await conn.execute(
+                    "DELETE FROM processed_messages WHERE received_at < $1", cutoff
+                )
         return DeletionResult(
             order_mappings=_rows_affected(mappings),
             outbound_messages=_rows_affected(outbound),
             conversations=_rows_affected(convs),
             messages=_rows_affected(msgs),
+            pending_actions=_rows_affected(pending),
+            order_actions=_rows_affected(actions),
         )
 
 

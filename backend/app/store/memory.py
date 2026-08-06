@@ -98,19 +98,26 @@ class InMemoryIngestStore:
         ]
         for key in removed_outbound:
             del self.outbound[key]
-        # No in-memory conversation/message store yet (Phase 4) -> those counts stay 0.
+        # No in-memory conversation/message/action store yet (Phase 4) -> those counts stay 0.
         return DeletionResult(
             order_mappings=len(removed_mappings),
             outbound_messages=len(removed_outbound),
             conversations=0,
             messages=0,
+            pending_actions=0,
+            order_actions=0,
         )
 
     async def purge_older_than(self, cutoff: datetime) -> DeletionResult:
         # In-memory rows carry no created_at timestamp, so there is nothing to age out;
         # the real age-based purge is the Postgres implementation.
         return DeletionResult(
-            order_mappings=0, outbound_messages=0, conversations=0, messages=0
+            order_mappings=0,
+            outbound_messages=0,
+            conversations=0,
+            messages=0,
+            pending_actions=0,
+            order_actions=0,
         )
 
 

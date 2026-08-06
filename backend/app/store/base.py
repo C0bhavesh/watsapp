@@ -67,12 +67,19 @@ class OutboundView:
 
 @dataclass(frozen=True)
 class DeletionResult:
-    """Row counts removed by a DPDP erasure/retention purge, per table."""
+    """Row counts removed by a DPDP erasure/retention purge, per phone-bearing table.
+
+    ``processed_messages`` is intentionally absent: it is a dedupe table with no
+    ``phone_e164`` column, aged out blindly by ``purge_older_than`` (received_at cutoff) and
+    not attributable to a single phone, so its blanket age-purge count is not reported here.
+    """
 
     order_mappings: int
     outbound_messages: int
     conversations: int
     messages: int
+    pending_actions: int
+    order_actions: int
 
 
 class IngestStore(Protocol):

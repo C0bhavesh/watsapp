@@ -76,15 +76,32 @@ async def test_delete_by_phone_purges_that_number(pool: LazyPool) -> None:
     )
     await store.ingest_order_created(f"wh-{uuid.uuid4()}", "orders/create", m, draft)
     await store.ingest_order_created(f"wh-{uuid.uuid4()}", "orders/create", keep, None)
+    # Seed the two additional phone-bearing tables for this number.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO pending_actions (wa_id, order_gid, action, expires_at) "
+            "VALUES ($1, $2, 'cancel', now() + interval '1 hour')",
+            phone, gid,
+        )
+        await conn.execute(
+            "INSERT INTO order_actions (order_gid, action, actor_wa_id, result) "
+            "VALUES ($1, 'cancel', $2, 'ok')",
+            gid, phone,
+        )
 
     result = await store.delete_by_phone(phone)
 
     assert result.order_mappings == 1
     assert result.outbound_messages == 1
+    assert result.pending_actions == 1
+    assert result.order_actions == 1
     async with pool.acquire() as conn:
         gone = await conn.fetchval("SELECT 1 FROM order_mappings WHERE order_gid = $1", gid)
         kept = await conn.fetchval("SELECT 1 FROM order_mappings WHERE order_gid = $1", keep_gid)
+        pa = await conn.fetchval("SELECT 1 FROM pending_actions WHERE wa_id = $1", phone)
+        oa = await conn.fetchval("SELECT 1 FROM order_actions WHERE actor_wa_id = $1", phone)
     assert gone is None and kept == 1
+    assert pa is None and oa is None
 
 
 async def test_purge_older_than_deletes_only_aged_rows(pool: LazyPool) -> None:

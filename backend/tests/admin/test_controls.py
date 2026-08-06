@@ -130,5 +130,58 @@ def test_schema_invalid_stored_value_returns_defaults_not_500(client: TestClient
     assert r.json()["reveal_fields"] == ["order_number", "email", "status"]
 
 
+def test_unicode_digit_int_value_falls_back_to_safe_default(client: TestClient) -> None:
+    login(client)
+
+    async def _seed_arabic_int() -> None:
+        # Arabic-Indic digits: int("٣٠") == 30, so a bare int() gate would silently enable a
+        # 30-day retention purge from a corrupted stored value. The ASCII-digit gate rejects it,
+        # falling back to the safe disabled default (0) instead of an unintended purge period.
+        await get_container().config_repo.set("retention_days", "٣٠")
+
+    asyncio.run(_seed_arabic_int())
+    r = client.get("/admin/controls")
+    assert r.status_code == 200
+    assert r.json()["retention_days"] == 0
+
+
+def test_one_corrupt_field_does_not_reset_the_whole_document(client: TestClient) -> None:
+    login(client)
+
+    async def _seed() -> None:
+        repo = get_container().config_repo
+        # A deliberately narrowed reveal_fields (hiding email/status) is a real admin choice.
+        await repo.set("reveal_fields", json.dumps(["order_number"]))
+        # An UNRELATED field is corrupted out of range (le=3650). It must NOT drag the whole
+        # document back to defaults and silently re-widen reveal_fields (PII over-disclosure).
+        await repo.set("retention_days", "40000")
+
+    asyncio.run(_seed())
+    body = client.get("/admin/controls").json()
+    # The corrupt field falls back to its OWN default...
+    assert body["retention_days"] == 0
+    # ...while the valid, intentionally-narrowed field is preserved.
+    assert body["reveal_fields"] == ["order_number"]
+
+
+def test_trailing_newline_phone_rejected(client: TestClient) -> None:
+    login(client)
+    base = client.get("/admin/controls").json()
+    # Python's re `$` matches before a trailing newline; `\\Z` does not. A phone with a trailing
+    # newline must be rejected outright, not silently accepted then failing to compare elsewhere.
+    assert (
+        client.put(
+            "/admin/controls", json={**base, "owner_alert_number": "+919111111111\n"}
+        ).status_code
+        == 422
+    )
+    assert (
+        client.put(
+            "/admin/controls", json={**base, "allowlist_phones": ["+919111111111\n"]}
+        ).status_code
+        == 422
+    )
+
+
 def test_requires_auth(client: TestClient) -> None:
     assert client.get("/admin/controls").status_code == 401

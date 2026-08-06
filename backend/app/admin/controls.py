@@ -13,8 +13,10 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from app.config.service import ConfigService
 
 # ASCII digits only: \d is Unicode-aware, so Arabic-Indic/fullwidth digit strings would pass
-# a \d pattern yet are not real phone numbers — pin to [0-9].
-_E164_RE = re.compile(r"^\+[0-9]{7,15}$")
+# a \d pattern yet are not real phone numbers — pin to [0-9]. `\Z` (not `$`) anchors the true
+# end of the string: Python's `$` also matches just before a trailing "\n", so a value like
+# "+919111111111\n" would slip past a `$`-anchored pattern.
+_E164_RE = re.compile(r"^\+[0-9]{7,15}\Z")
 
 REVEAL_ALLOWED: tuple[str, ...] = ("order_number", "email", "status")
 
@@ -103,14 +105,12 @@ async def load_controls(config: ConfigService) -> AdminControls:
             data[key] = value
     for key in _INT_KEYS:
         raw_int = await config.get_plain(key)
-        if raw_int is not None:
-            # int() is the parse authority — NOT str.isdigit(), which is Unicode-aware and
-            # disagrees with int() (e.g. "²".isdigit() is True but int("²") raises). A corrupt
-            # stored value degrades to the model default instead of crashing the panel.
-            try:
-                data[key] = int(raw_int)
-            except ValueError:
-                pass
+        # Require ASCII digits, not str.isdigit()/int() alone. int("٣٠") == 30, so a bare int()
+        # (or a plain isdigit(), which is Unicode-aware) would silently accept an Arabic-Indic
+        # stored value and enable an unintended retention period; str.isascii() AND str.isdigit()
+        # is what closes it. A non-matching value is left unset -> the field's own model default.
+        if raw_int is not None and raw_int.isascii() and raw_int.isdigit():
+            data[key] = int(raw_int)
     for key in _JSON_KEYS:
         raw = await config.get_plain(key)
         if raw is not None:
@@ -118,12 +118,27 @@ async def load_controls(config: ConfigService) -> AdminControls:
                 data[key] = json.loads(raw)
             except ValueError:
                 pass  # corrupt stored value -> default (never crash the panel)
+    return _validate_per_field(data)
+
+
+def _validate_per_field(data: dict[str, object]) -> AdminControls:
+    """Validate the assembled dict, defaulting ONLY the field(s) that fail — never the whole doc.
+
+    Validating the model as a whole and falling back to ``AdminControls()`` on any error means one
+    corrupt field silently resets every other (e.g. an unrelated bad value re-widening a
+    deliberately narrowed ``reveal_fields`` back to the PII-exposing default). Instead, drop the
+    top-level keys pydantic reports as invalid and re-validate, so each good field is preserved.
+    """
     try:
         return AdminControls.model_validate(data)
-    except ValidationError:
-        # Valid JSON but schema-invalid (e.g. an out-of-vocabulary reveal field written by
-        # another path) must not brick the panel — fall back to all defaults.
-        return AdminControls()
+    except ValidationError as exc:
+        bad_keys = {loc[0] for loc in (e["loc"] for e in exc.errors()) if loc}
+        clean = {k: v for k, v in data.items() if k not in bad_keys}
+        try:
+            return AdminControls.model_validate(clean)
+        except ValidationError:
+            # Should not happen (only known-valid keys remain), but never brick the panel.
+            return AdminControls()
 
 
 async def save_controls(config: ConfigService, controls: AdminControls) -> None:

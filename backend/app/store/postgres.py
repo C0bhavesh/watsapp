@@ -210,12 +210,23 @@ class PostgresIngestStore:
         )
 
     async def purge_older_than(self, cutoff: datetime) -> DeletionResult:
-        """DPDP retention: delete rows older than ``cutoff``, atomically.
+        """DPDP age-based retention: delete only the deletable tables older than ``cutoff``.
 
-        Order/outbound/pending/action rows age on ``created_at``; conversations age on
-        ``last_active_at`` (matches "N months after their last order or message"). Children
-        first (FK). processed_messages is a dedupe table with no phone column — it is aged out
-        blindly on ``received_at`` (its blanket count is not reported in DeletionResult).
+        ``order_mappings`` and ``outbound_messages`` are DELIBERATELY EXCLUDED and are never
+        touched by this automatic job — the client decided (round 3, 2026-08-06,
+        docs/FR/client-decisions-all.md Q15) that customer/order data (profile, name, phone,
+        order history/number/date, products, SKU, payment method, status, spend, count, tags)
+        is kept INDEFINITELY. Do NOT re-add DELETEs for those tables here: on-demand
+        right-to-erasure (``delete_by_phone`` / POST /admin/erasure) is the only path allowed to
+        remove order/outbound rows, and only for a specific number on request.
+
+        Only the "AI conversation history / temporary AI context / processed-message logs /
+        operational data" category (client-approved for deletion after 365 days) ages out:
+        conversations/messages on ``last_active_at``, pending_actions/order_actions on
+        ``created_at``, processed_messages on ``received_at``. Children first (FK). The
+        ``order_mappings``/``outbound_messages`` counts in the returned DeletionResult are
+        therefore always 0 (kept indefinitely); processed_messages' blanket count is not
+        reported (no phone column, not attributable).
         """
         async with self._pool.acquire() as conn:
             async with conn.transaction():
@@ -226,12 +237,6 @@ class PostgresIngestStore:
                 )
                 convs = await conn.execute(
                     "DELETE FROM conversations WHERE last_active_at < $1", cutoff
-                )
-                outbound = await conn.execute(
-                    "DELETE FROM outbound_messages WHERE created_at < $1", cutoff
-                )
-                mappings = await conn.execute(
-                    "DELETE FROM order_mappings WHERE created_at < $1", cutoff
                 )
                 pending = await conn.execute(
                     "DELETE FROM pending_actions WHERE created_at < $1", cutoff
@@ -244,8 +249,8 @@ class PostgresIngestStore:
                     "DELETE FROM processed_messages WHERE received_at < $1", cutoff
                 )
         return DeletionResult(
-            order_mappings=_rows_affected(mappings),
-            outbound_messages=_rows_affected(outbound),
+            order_mappings=0,  # kept indefinitely — never age-purged (client Q15)
+            outbound_messages=0,  # kept indefinitely — never age-purged (client Q15)
             conversations=_rows_affected(convs),
             messages=_rows_affected(msgs),
             pending_actions=_rows_affected(pending),

@@ -184,3 +184,39 @@ async def test_pg_purge_older_than_ages_actions_and_dedupe_tables() -> None:
     assert "DELETE FROM order_actions WHERE created_at < $1" in joined
     # processed_messages is a dedupe table: not phone-scoped, aged on its own received_at.
     assert "DELETE FROM processed_messages WHERE received_at < $1" in joined
+
+
+class _PurgeOneConn(_FakeConn):
+    """Every DELETE removes one row, so a table only shows a non-zero count if it was queried."""
+
+    async def execute(self, sql: str, *_: object) -> str:
+        self.executed.append(" ".join(sql.split()))
+        return "DELETE 1"
+
+
+async def test_pg_purge_older_than_never_deletes_order_or_outbound() -> None:
+    """Client decision (round 3, 2026-08-06): order/customer data is kept INDEFINITELY.
+
+    Seed conceptually collides an old conversation/message row and an old order row under one
+    cutoff; the age-based purge must age out the conversation/operational tables while the
+    order (order_mappings) and its outbound_messages survive untouched — those may only ever be
+    removed by delete_by_phone (erasure-on-request), never by this automatic job.
+    """
+    conn = _PurgeOneConn()
+    store = PostgresIngestStore(_FakePool(conn))  # type: ignore[arg-type]
+
+    result = await store.purge_older_than(datetime.now(UTC))
+
+    tables = _targets(conn)
+    # Order/customer data survives the age-based job entirely — never even queried.
+    assert "order_mappings" not in tables
+    assert "outbound_messages" not in tables
+    assert result.order_mappings == 0
+    assert result.outbound_messages == 0
+    # Conversation/operational rows still age out (purged, count reflects the deletion).
+    assert "conversations" in tables
+    assert "messages" in tables
+    assert result.conversations == 1
+    assert result.messages == 1
+    joined = " ".join(conn.executed)
+    assert "DELETE FROM conversations WHERE last_active_at < $1" in joined

@@ -31,11 +31,13 @@ class _SpyIngest:
     async def purge_older_than(self, cutoff: datetime) -> DeletionResult:
         self.cutoff = cutoff
         self.calls += 1
+        # Age-based purge keeps order/customer data indefinitely (client Q15): order_mappings
+        # and outbound_messages are always 0; only conversation/operational tables age out.
         return DeletionResult(
-            order_mappings=3,
-            outbound_messages=1,
-            conversations=0,
-            messages=0,
+            order_mappings=0,
+            outbound_messages=0,
+            conversations=4,
+            messages=9,
             pending_actions=2,
             order_actions=1,
         )
@@ -61,7 +63,10 @@ async def test_enabled_purges_with_cutoff() -> None:
 
     assert result["status"] == "purged"
     assert result["retention_days"] == 30
-    assert result["deleted"]["order_mappings"] == 3
+    # Order/customer data is never age-purged (kept indefinitely); only operational rows age out.
+    assert result["deleted"]["order_mappings"] == 0
+    assert result["deleted"]["outbound_messages"] == 0
+    assert result["deleted"]["conversations"] == 4
     assert spy.calls == 1
     expected = before - timedelta(days=30)
     assert spy.cutoff is not None

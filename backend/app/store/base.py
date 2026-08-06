@@ -67,7 +67,14 @@ class OutboundView:
 
 @dataclass(frozen=True)
 class DeletionResult:
-    """Row counts removed by a DPDP erasure/retention purge, per phone-bearing table.
+    """Row counts removed by a DPDP erasure/retention operation, per phone-bearing table.
+
+    Shared by both ``delete_by_phone`` (on-demand right-to-erasure) and ``purge_older_than``
+    (automatic age-based retention). ``order_mappings`` and ``outbound_messages`` are only ever
+    non-zero for ``delete_by_phone``: the age-based ``purge_older_than`` keeps customer/order
+    data INDEFINITELY (client decision, round 3 2026-08-06, Q15) and always reports 0 for those
+    two fields — one shared shape is kept rather than a narrower type because the difference is a
+    pair of guaranteed-zero counts, not a structural change.
 
     ``processed_messages`` is intentionally absent: it is a dedupe table with no
     ``phone_e164`` column, aged out blindly by ``purge_older_than`` (received_at cutoff) and

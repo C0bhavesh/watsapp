@@ -250,3 +250,186 @@ async def test_post_corrupt_secret_fails_closed_403() -> None:
     )).encode()
     resp = await post(body, {"X-Hub-Signature-256": sign(body)})
     assert resp.status_code == 403
+
+
+async def test_post_text_event_without_llm_configured_sends_safe_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: dict[str, object] = {}
+
+    async def fake_send_text(http, cfg, to, body, timeout=20.0):
+        from app.channels.whatsapp_sender import SendResult
+
+        sent["to"] = to
+        sent["body"] = body
+        return SendResult(ok=True, status_code=200, wamid="wamid.reply", error=None)
+
+    monkeypatch.setattr("app.channels.whatsapp.send_text", fake_send_text)
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    await save_controls(get_container().config, AdminControls(send_mode="live"))
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.text1",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "where is my order"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert resp.json()["processed"] == 1
+    assert sent["to"] == "919999999999"
+    assert "team" in sent["body"]
+
+
+async def test_post_text_event_send_mode_off_does_not_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = {"sent": False}
+
+    async def fake_send_text(*args, **kwargs):
+        from app.channels.whatsapp_sender import SendResult
+
+        called["sent"] = True
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.channels.whatsapp.send_text", fake_send_text)
+    # send_mode defaults to "off" -- no controls saved in this test.
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.text2",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "hello"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert called["sent"] is False
+
+
+async def test_post_text_event_paused_conversation_stays_silent_but_records_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = {"sent": False}
+
+    async def fake_send_text(*args, **kwargs):
+        from app.channels.whatsapp_sender import SendResult
+
+        called["sent"] = True
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.channels.whatsapp.send_text", fake_send_text)
+    from datetime import UTC, datetime, timedelta
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    conversation_id = await c.conversations.get_or_create("919999999999")
+    await c.conversations.pause_until(conversation_id, datetime.now(UTC) + timedelta(hours=1))
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.text3",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "still there?"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert called["sent"] is False
+    messages = await c.conversations.recent_messages(conversation_id, 10)
+    assert any(m.content == "still there?" for m in messages)
+
+
+async def test_post_text_event_shadow_mode_processes_but_does_not_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = {"sent": False}
+
+    async def fake_send_text(*args, **kwargs):
+        from app.channels.whatsapp_sender import SendResult
+
+        called["sent"] = True
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.channels.whatsapp.send_text", fake_send_text)
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="shadow"))
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.text4",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "hello"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert called["sent"] is False
+    conversation_id = await c.conversations.get_or_create("919999999999")
+    messages = await c.conversations.recent_messages(conversation_id, 10)
+    assert len(messages) == 2  # user turn + assistant turn, persisted even though not sent
+
+
+async def test_post_button_tap_still_unaffected_by_conversation_wiring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 4 only wires InboundText -- button/interactive taps still just echo event_type."""
+    called = {"sent": False}
+
+    async def fake_send_text(*args, **kwargs):
+        called["sent"] = True
+        raise AssertionError("send_text must not be called for a button tap")
+
+    monkeypatch.setattr("app.channels.whatsapp.send_text", fake_send_text)
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.btn1",
+                "timestamp": "1",
+                "type": "button",
+                "button": {"text": "Confirm Order", "payload": "order:confirm:gid://1"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.json() == {
+        "ok": True,
+        "processed": 1,
+        "duplicate": 0,
+        "results": [
+            {"message_id": "wamid.btn1", "duplicate": False, "event_type": "InboundButton"}
+        ],
+    }
+    assert called["sent"] is False

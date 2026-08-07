@@ -474,6 +474,60 @@ async def test_post_text_event_paused_conversation_stays_silent_but_records_mess
     assert any(m.content == "still there?" for m in messages)
 
 
+async def test_post_text_event_expired_pause_lets_the_ai_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the handoff pause: it self-expires after its window with no admin
+    action, and the AI answers normally again."""
+    sent: dict[str, object] = {}
+
+    async def fake_send_text(http, cfg, to, body, timeout=20.0):
+        from app.channels.whatsapp_sender import SendResult
+
+        sent["body"] = body
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+
+    provider = FakeProvider(
+        responses=[
+            json.dumps({"intent": "policy"}),
+            json.dumps({"reply": "Our returns window is 7 days."}),
+        ]
+    )
+    monkeypatch.setattr("app.core.conversation.active_llm", _fake_active_llm(provider))
+
+    from datetime import UTC, datetime, timedelta
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    conversation_id = await c.conversations.get_or_create("919999999999")
+    # Pause already elapsed (a handoff from more than 24h ago).
+    await c.conversations.pause_until(conversation_id, datetime.now(UTC) - timedelta(minutes=1))
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.resume1",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "what is your return policy?"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert sent["body"] == "Our returns window is 7 days."  # not silence
+    assert len(provider.calls) == 2  # the router + agent pipeline really ran
+    messages = await c.conversations.recent_messages(conversation_id, 10)
+    assert len(messages) == 2  # user turn + assistant turn
+
+
 async def test_post_text_event_shadow_mode_processes_but_does_not_send(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

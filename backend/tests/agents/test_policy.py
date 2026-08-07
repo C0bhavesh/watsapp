@@ -41,7 +41,10 @@ class _CapturingProvider:
 
 
 def _context(
-    provider: _FixedProvider | _CapturingProvider, user_text: str, knowledge: dict[str, str]
+    provider: _FixedProvider | _CapturingProvider,
+    user_text: str,
+    knowledge: dict[str, str],
+    is_vip: bool = False,
 ) -> AgentContext:
     return AgentContext(
         wa_id="919999999999",
@@ -49,7 +52,7 @@ def _context(
         user_text=user_text,
         history=[],
         orders=[],
-        is_vip=False,
+        is_vip=is_vip,
         knowledge=knowledge,
         provider=provider,
         model="m",
@@ -85,6 +88,21 @@ async def test_run_renders_knowledge_in_system_prompt() -> None:
     assert system_message.role == "system"
     assert faq_content in system_message.content
     assert business_content in system_message.content
+
+
+async def test_run_renders_brand_voice_and_vip_hint_in_system_prompt() -> None:
+    """The admin-editable brand_voice seed must actually reach the prompt, and a VIP's
+    returning-customer hint with it."""
+    from app.agents.base import VIP_HINT
+
+    knowledge = {"faq": "[]", "business": "{}", "brand_voice": "Always close with a namaste."}
+    provider = _CapturingProvider('{"reply": "Sure."}')
+    await run(_context(provider, "do you ship to Pune", knowledge, is_vip=True))
+
+    assert provider.captured_messages is not None
+    system_message = provider.captured_messages[0]
+    assert "Always close with a namaste." in system_message.content
+    assert VIP_HINT in system_message.content
 
 
 async def test_run_on_provider_error_returns_safe_fallback() -> None:

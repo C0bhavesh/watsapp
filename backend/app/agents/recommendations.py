@@ -1,4 +1,4 @@
-from app.agents.base import PERSONALITY, AgentContext, AgentReply, extract_reply_text
+from app.agents.base import AgentContext, AgentReply, extract_reply_text, personality_for
 from app.agents.product_search import ProductSource
 from app.channels.copy import copy_for
 from app.providers.base import Message, ProviderError
@@ -47,7 +47,7 @@ async def run(context: AgentContext, shopify: ProductSource) -> AgentReply:
     # by name and still deserves to hear it exists.
     products = [p for p in found if p.available]
     system_prompt = _SYSTEM_TEMPLATE.format(
-        personality=PERSONALITY, results_context=_results_context(products)
+        personality=personality_for(context), results_context=_results_context(products)
     )
     messages = [
         Message(role="system", content=system_prompt),

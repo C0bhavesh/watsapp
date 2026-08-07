@@ -1,4 +1,4 @@
-from app.agents.base import PERSONALITY, AgentContext, AgentReply, extract_reply_text
+from app.agents.base import AgentContext, AgentReply, extract_reply_text, personality_for
 from app.channels.copy import copy_for
 from app.providers.base import Message, ProviderError
 from app.shopify.models import AuthorizedOrder
@@ -61,7 +61,7 @@ async def run(context: AgentContext) -> AgentReply:
     """
     fallback = copy_for("error_fallback", "en")
     system_prompt = _SYSTEM_TEMPLATE.format(
-        personality=PERSONALITY, order_context=_order_context(context.orders)
+        personality=personality_for(context), order_context=_order_context(context.orders)
     )
     messages = [
         Message(role="system", content=system_prompt),

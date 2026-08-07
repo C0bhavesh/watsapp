@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 
-from app.agents.base import PERSONALITY, AgentContext, AgentReply, extract_reply_text
+from app.agents.base import AgentContext, AgentReply, extract_reply_text, personality_for
 from app.channels.copy import copy_for
 from app.providers.base import Message, ProviderError
 from app.store.base import ConversationStore
@@ -72,7 +72,7 @@ async def run(
     if wants_human and not already_attempted:
         await store.mark_handoff_attempted(conversation_id, now)
 
-    system_prompt = _SYSTEM_TEMPLATE.format(personality=PERSONALITY)
+    system_prompt = _SYSTEM_TEMPLATE.format(personality=personality_for(context))
     messages = [
         Message(role="system", content=system_prompt),
         *context.history,

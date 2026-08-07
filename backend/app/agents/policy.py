@@ -1,4 +1,4 @@
-from app.agents.base import PERSONALITY, AgentContext, AgentReply, extract_reply_text
+from app.agents.base import AgentContext, AgentReply, extract_reply_text, personality_for
 from app.channels.copy import copy_for
 from app.providers.base import Message, ProviderError
 
@@ -22,7 +22,7 @@ Respond with STRICT JSON only, no other text: {{"reply": "<your reply to the cus
 async def run(context: AgentContext) -> AgentReply:
     fallback = copy_for("error_fallback", "en")
     system_prompt = _SYSTEM_TEMPLATE.format(
-        personality=PERSONALITY,
+        personality=personality_for(context),
         faq=context.knowledge.get("faq", ""),
         business=context.knowledge.get("business", ""),
     )

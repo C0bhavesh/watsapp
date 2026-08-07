@@ -1,6 +1,13 @@
 from typing import Any
 
-from app.agents.base import AgentContext, extract_json_blob, extract_reply_text
+from app.agents.base import (
+    PERSONALITY,
+    VIP_HINT,
+    AgentContext,
+    extract_json_blob,
+    extract_reply_text,
+    personality_for,
+)
 from app.providers.base import CompletionResult, Message
 
 
@@ -43,6 +50,33 @@ def test_agent_context_repr_never_leaks_the_api_key() -> None:
     # repr=False must preserve value equality (same guarantee as WhatsAppConfig).
     assert context == _context(provider=provider, api_key="super-secret-llm-key")
     assert context != _context(provider=provider, api_key="another-key")
+
+
+def test_personality_carries_the_anti_prompt_injection_guardrails() -> None:
+    """History replays prior customer text into every prompt, so "ignore your instructions"
+    persists across turns unless the guardrails are in the constant every agent uses."""
+    lowered = PERSONALITY.lower()
+    assert "never reveal" in lowered
+    assert "ignore previous instructions" in lowered
+    assert "not a general-purpose assistant" in lowered
+
+
+def test_personality_for_appends_brand_voice_knowledge() -> None:
+    prompt = personality_for(_context(knowledge={"brand_voice": "Always mention free shipping."}))
+    assert PERSONALITY in prompt
+    assert "Always mention free shipping." in prompt
+
+
+def test_personality_for_without_brand_voice_is_just_the_personality() -> None:
+    assert personality_for(_context(knowledge={})) == PERSONALITY
+    assert personality_for(_context(knowledge={"brand_voice": "   "})) == PERSONALITY
+
+
+def test_personality_for_adds_a_returning_customer_hint_only_for_vip() -> None:
+    assert VIP_HINT in personality_for(_context(is_vip=True))
+    assert VIP_HINT not in personality_for(_context(is_vip=False))
+    # The hint informs tone only -- it must never invite the model to quote the numbers.
+    assert "unless they explicitly ask" in VIP_HINT
 
 
 def test_extract_json_blob_direct() -> None:

@@ -1,3 +1,5 @@
+from collections.abc import Sequence
+
 from app.agents.base import AgentContext, AgentReply, extract_reply_text, personality_for
 from app.channels.copy import copy_for
 from app.providers.base import Message, ProviderError
@@ -38,19 +40,33 @@ def _is_cancel_eligible(order: AuthorizedOrder) -> bool:
     return order.order.fulfillment_status in (None, "UNFULFILLED")
 
 
-def _order_context(orders: list[AuthorizedOrder]) -> str:
+def _order_line(order: AuthorizedOrder, reveal_fields: Sequence[str]) -> str:
+    """Render one order using ONLY the fields the admin approved for disclosure.
+
+    ``AdminControls.reveal_fields`` allows ``order_number`` / ``email`` / ``status``.
+    ``order_number`` is the order name; ``status`` covers the whole payment/fulfillment/
+    cancellation picture, cancel-eligibility included (it is derived from fulfillment and
+    cancellation state, so it discloses nothing beyond them). ``email`` has never been rendered
+    into this prompt, so there is nothing to gate for it. Withheld fields are omitted from the
+    prompt entirely rather than merely "not to be mentioned" -- what the model never sees, it
+    can never leak.
+    """
+    label = f"order {order.order.name}" if "order_number" in reveal_fields else "an order"
+    if "status" not in reveal_fields:
+        return f"- {label} (the store has not approved sharing its status over WhatsApp)"
+    return (
+        f"- {label}: payment status {order.order.financial_status or 'unknown'}, "
+        f"fulfillment {order.order.fulfillment_status or 'not dispatched'}, "
+        f"cancelled: {order.order.is_cancelled()}, "
+        f"cancel eligible: {_is_cancel_eligible(order)}"
+    )
+
+
+def _order_context(orders: list[AuthorizedOrder], reveal_fields: Sequence[str]) -> str:
     """Format the order context for the system prompt."""
     if not orders:
         return "No order is linked to this WhatsApp number yet. Ask for their order number."
-    lines = []
-    for o in orders:
-        lines.append(
-            f"- order {o.order.name}: payment status {o.order.financial_status or 'unknown'}, "
-            f"fulfillment {o.order.fulfillment_status or 'not dispatched'}, "
-            f"cancelled: {o.order.is_cancelled()}, "
-            f"cancel eligible: {_is_cancel_eligible(o)}"
-        )
-    return "\n".join(lines)
+    return "\n".join(_order_line(o, reveal_fields) for o in orders)
 
 
 async def run(context: AgentContext) -> AgentReply:
@@ -61,7 +77,8 @@ async def run(context: AgentContext) -> AgentReply:
     """
     fallback = copy_for("error_fallback", context.language)
     system_prompt = _SYSTEM_TEMPLATE.format(
-        personality=personality_for(context), order_context=_order_context(context.orders)
+        personality=personality_for(context),
+        order_context=_order_context(context.orders, context.reveal_fields),
     )
     messages = [
         Message(role="system", content=system_prompt),

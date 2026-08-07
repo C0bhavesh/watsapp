@@ -14,7 +14,7 @@ import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
-from app.admin.controls import load_controls
+from app.admin.controls import AdminControls, load_controls
 from app.agents import customer_support, order_tracking, policy, product_search, recommendations
 from app.agents.base import AgentContext, AgentReply
 from app.agents.router import Intent, classify_intent
@@ -124,7 +124,7 @@ async def _run_turn(c: Container, event: InboundText) -> None:
     else:
         try:
             reply_text, handoff = await _agent_reply(
-                c, event, history, phone, is_vip, llm, controls.default_language
+                c, event, history, phone, is_vip, llm, controls
             )
         except Exception:
             # Each agent catches ProviderError itself; anything ELSE raised in this section
@@ -171,7 +171,7 @@ async def _agent_reply(
     phone: str | None,
     is_vip: bool,
     llm: tuple[LLMProvider, str, str, dict[str, object] | None],
-    language: str,
+    controls: AdminControls,
 ) -> tuple[str, bool]:
     """Classify, dispatch to the specialist, and return its (reply text, handoff) pair."""
     provider, model, api_key, extra_params = llm
@@ -200,7 +200,10 @@ async def _agent_reply(
         model=model,
         api_key=api_key,
         extra_params=extra_params,
-        language=language,
+        # The admin's disclosure control, carried per-turn exactly like is_vip: order_tracking
+        # renders only these fields into its prompt, so an unticked field never reaches the model.
+        reveal_fields=tuple(controls.reveal_fields),
+        language=controls.default_language,
     )
     agent_reply = await _run_agent(context, intent, c)
     return strip_markdown(agent_reply.text), agent_reply.handoff

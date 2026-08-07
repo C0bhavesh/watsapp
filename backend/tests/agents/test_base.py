@@ -131,3 +131,14 @@ def test_extract_reply_text_falls_back_on_trailing_comma_json() -> None:
 def test_extract_reply_text_falls_back_on_unquoted_key_json() -> None:
     text = '{reply: "hi there, unquoted key"}'
     assert extract_reply_text(text, "FALLBACK") == "FALLBACK"
+
+
+def test_default_reveal_fields_tracks_the_admin_allowed_set() -> None:
+    """``agents`` deliberately does not import the admin adapter, so the mirrored default is
+    pinned here instead -- if REVEAL_ALLOWED or the AdminControls default ever changes, this
+    fails rather than silently leaving order_tracking on a stale disclosure set."""
+    from app.admin.controls import REVEAL_ALLOWED, AdminControls
+    from app.agents.base import DEFAULT_REVEAL_FIELDS
+
+    assert DEFAULT_REVEAL_FIELDS == REVEAL_ALLOWED
+    assert DEFAULT_REVEAL_FIELDS == tuple(AdminControls().reveal_fields)

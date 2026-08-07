@@ -805,6 +805,56 @@ async def test_post_text_event_resolves_orders_only_for_order_tracking(
     assert called["resolved_orders"] is expect_resolved
 
 
+async def test_post_text_event_threads_the_admins_reveal_fields_to_the_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The admin's disclosure control has to actually reach the specialist -- it was configured
+    but never read, so a narrowed reveal_fields changed nothing about what the model was told."""
+    from app.agents.base import AgentReply
+
+    seen: dict[str, object] = {}
+
+    async def fake_send_text(*args, **kwargs):
+        from app.channels.whatsapp_sender import SendResult
+
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+
+    provider = FakeProvider(responses=[json.dumps({"intent": "order_tracking"})])
+    monkeypatch.setattr("app.core.conversation.active_llm", _fake_active_llm(provider))
+
+    async def fake_run(context, *args, **kwargs):
+        seen["reveal_fields"] = context.reveal_fields
+        return AgentReply(text="ok")
+
+    monkeypatch.setattr("app.agents.order_tracking.run", fake_run)
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    await save_controls(
+        get_container().config,
+        AdminControls(send_mode="live", reveal_fields=["order_number"]),
+    )
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.reveal1",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "where is my order"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert seen["reveal_fields"] == ("order_number",)
+
+
 async def test_post_text_event_agent_handoff_pauses_the_conversation_for_any_agent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

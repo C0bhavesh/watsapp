@@ -1,4 +1,4 @@
-from app.agents.base import AgentContext
+from app.agents.base import DEFAULT_REVEAL_FIELDS, AgentContext
 from app.agents.order_tracking import run
 from app.providers.base import CompletionResult, Message, ProviderError, ProviderErrorKind
 from app.shopify.models import AuthorizedOrder, Order
@@ -55,13 +55,23 @@ class _CapturingProvider:
 
 
 def _context(
-    provider: _FixedProvider | _CapturingProvider, user_text: str, orders: list[AuthorizedOrder]
+    provider: _FixedProvider | _CapturingProvider,
+    user_text: str,
+    orders: list[AuthorizedOrder],
+    reveal_fields: tuple[str, ...] = DEFAULT_REVEAL_FIELDS,
 ) -> AgentContext:
     return AgentContext(
         wa_id="919999999999", phone_e164="+919999999999", user_text=user_text, history=[],
         orders=orders, is_vip=False, knowledge={}, provider=provider, model="m", api_key="k",
-        extra_params=None,
+        extra_params=None, reveal_fields=reveal_fields,
     )
+
+
+def _system_prompt(provider: _CapturingProvider) -> str:
+    assert provider.captured_messages is not None
+    system_msg = next((m for m in provider.captured_messages if m.role == "system"), None)
+    assert system_msg is not None
+    return system_msg.content
 
 
 async def test_run_returns_parsed_reply() -> None:
@@ -133,3 +143,50 @@ async def test_already_cancelled_order_is_not_eligible() -> None:
     assert system_msg is not None
     assert "cancel eligible: False" in system_msg.content
     assert "cancelled: True" in system_msg.content
+
+
+async def test_reveal_fields_without_status_withholds_status_and_cancellation() -> None:
+    """AdminControls.reveal_fields is a disclosure control, so it must gate what reaches the
+    prompt -- an admin who unticks "status" must not have payment/fulfillment/cancellation
+    state handed to the model anyway."""
+    provider = _CapturingProvider(text='{"reply": "Let me check on that."}')
+    order = AuthorizedOrder(
+        order=_order("tavas1", "+919999999999", fulfillment_status="FULFILLED"),
+        verified_phone="+919999999999",
+    )
+    await run(_context(provider, "where is my order", [order], reveal_fields=("order_number",)))
+
+    prompt = _system_prompt(provider)
+    assert "tavas1" in prompt  # order_number IS approved
+    assert "payment status" not in prompt
+    assert "fulfillment FULFILLED" not in prompt
+    assert "cancelled: " not in prompt
+    assert "cancel eligible" not in prompt
+    assert "paid" not in prompt  # the financial_status value itself
+
+
+async def test_reveal_fields_without_order_number_withholds_the_order_name() -> None:
+    provider = _CapturingProvider(text='{"reply": "Let me check on that."}')
+    order = AuthorizedOrder(
+        order=_order("tavas1", "+919999999999", fulfillment_status="UNFULFILLED"),
+        verified_phone="+919999999999",
+    )
+    await run(_context(provider, "where is my order", [order], reveal_fields=("status",)))
+
+    prompt = _system_prompt(provider)
+    assert "tavas1" not in prompt
+    assert "cancel eligible: True" in prompt  # status IS approved
+
+
+async def test_reveal_fields_empty_withholds_every_order_detail() -> None:
+    provider = _CapturingProvider(text='{"reply": "Let me check on that."}')
+    order = AuthorizedOrder(
+        order=_order("tavas1", "+919999999999", fulfillment_status="UNFULFILLED"),
+        verified_phone="+919999999999",
+    )
+    await run(_context(provider, "where is my order", [order], reveal_fields=()))
+
+    prompt = _system_prompt(provider)
+    assert "tavas1" not in prompt
+    assert "payment status" not in prompt
+    assert "cancel eligible" not in prompt

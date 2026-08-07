@@ -40,6 +40,13 @@ VIP_HINT = (
     "unless they explicitly ask."
 )
 
+# Mirrors ``AdminControls.reveal_fields``' default (the full ``REVEAL_ALLOWED`` set in
+# ``app/admin/controls.py``). Declared here as a literal rather than imported so ``agents``
+# never depends on the admin adapter (fastapi-layering.md: dependencies point inward); the two
+# are pinned together by a test. Production always passes the admin's own configured value --
+# this default only covers callers that do not care about disclosure gating.
+DEFAULT_REVEAL_FIELDS: tuple[str, ...] = ("order_number", "email", "status")
+
 
 @dataclass(frozen=True)
 class AgentContext:
@@ -58,6 +65,10 @@ class AgentContext:
     # `channels/whatsapp_config.WhatsAppConfig`; repr=False preserves __eq__.
     api_key: str = field(repr=False)
     extra_params: dict[str, object] | None
+    # Order fields the admin has approved for disclosure (AdminControls.reveal_fields). It is a
+    # disclosure control, so agents must render ONLY these into the prompt -- anything omitted
+    # never reaches the model, and so can never reach the customer.
+    reveal_fields: tuple[str, ...] = DEFAULT_REVEAL_FIELDS
     # The configured default language (AdminControls.default_language), used for the fixed
     # fallback copy so a non-English-speaking customer's failed turn is not answered in English.
     language: str = DEFAULT_LANGUAGE

@@ -1265,3 +1265,123 @@ async def test_post_batch_within_budget_runs_every_turn(
 
     assert resp.status_code == 200
     assert turns == ["wamid.ok1", "wamid.ok2", "wamid.ok3"]
+
+
+def _handoff_scenario(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Wire a policy-agent handoff and record every (recipient, body) send_text takes."""
+    from app.agents.base import AgentReply
+
+    sends: list[tuple[str, str]] = []
+
+    async def fake_send_text(http, cfg, to, body, timeout=20.0):
+        from app.channels.whatsapp_sender import SendResult
+
+        sends.append((to, body))
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+
+    provider = FakeProvider(responses=[json.dumps({"intent": "policy"})])
+    monkeypatch.setattr("app.core.conversation.active_llm", _fake_active_llm(provider))
+
+    async def fake_policy_run(*args, **kwargs):
+        return AgentReply(text="Let me bring in a teammate.", handoff=True)
+
+    monkeypatch.setattr("app.agents.policy.run", fake_policy_run)
+    return sends
+
+
+async def _post_handoff_message(message_id: str) -> httpx.Response:
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": message_id,
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "this is not going well"},
+            }
+        )
+    ).encode()
+    return await post(body, {"X-Hub-Signature-256": sign(body)})
+
+
+async def test_post_text_event_handoff_alerts_the_configured_owner_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HANDOFF_MESSAGE promises "they'll continue helping you right here in this chat", but the
+    bot just went silent for 24h and nobody was told. The owner must actually be paged."""
+    sends = _handoff_scenario(monkeypatch)
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    await save_controls(
+        get_container().config,
+        AdminControls(send_mode="live", owner_alert_number="+918888888888"),
+    )
+
+    assert (await _post_handoff_message("wamid.alert1")).status_code == 200
+
+    assert len(sends) == 2
+    assert sends[0] == ("919999999999", "Let me bring in a teammate.")
+    owner_to, owner_body = sends[1]
+    assert owner_to == "+918888888888"
+    assert "+919999999999" in owner_body  # the customer's number, so the owner can reply
+
+
+async def test_post_text_event_handoff_without_owner_number_only_sends_the_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unconfigured owner_alert_number degrades silently, like an empty allowlist."""
+    sends = _handoff_scenario(monkeypatch)
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    await save_controls(get_container().config, AdminControls(send_mode="live"))
+
+    assert (await _post_handoff_message("wamid.alert2")).status_code == 200
+    assert [to for to, _ in sends] == ["919999999999"]
+
+
+async def test_post_text_event_handoff_in_shadow_mode_does_not_alert_the_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """shadow suppresses ALL outbound WhatsApp traffic -- the owner alert included."""
+    sends = _handoff_scenario(monkeypatch)
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    await save_controls(
+        get_container().config,
+        AdminControls(send_mode="shadow", owner_alert_number="+918888888888"),
+    )
+
+    assert (await _post_handoff_message("wamid.alert3")).status_code == 200
+    assert sends == []
+
+
+async def test_post_text_event_no_handoff_never_alerts_the_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.agents.base import AgentReply
+
+    sends = _handoff_scenario(monkeypatch)
+
+    async def fake_policy_run(*args, **kwargs):
+        return AgentReply(text="Our returns window is 7 days.")
+
+    monkeypatch.setattr("app.agents.policy.run", fake_policy_run)
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    await save_controls(
+        get_container().config,
+        AdminControls(send_mode="live", owner_alert_number="+918888888888"),
+    )
+
+    assert (await _post_handoff_message("wamid.alert4")).status_code == 200
+    assert [to for to, _ in sends] == ["919999999999"]

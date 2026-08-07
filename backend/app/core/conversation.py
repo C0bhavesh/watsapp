@@ -19,9 +19,9 @@ from app.agents import customer_support, order_tracking, policy, product_search,
 from app.agents.base import AgentContext, AgentReply
 from app.agents.router import Intent, classify_intent
 from app.channels.copy import copy_for
-from app.channels.whatsapp_config import load_whatsapp_config
+from app.channels.whatsapp_config import WhatsAppConfig, load_whatsapp_config
 from app.channels.whatsapp_inbound import InboundText
-from app.channels.whatsapp_sender import send_text
+from app.channels.whatsapp_sender import WhatsAppSendError, send_text
 from app.core.memory import load_history, persist_turn
 from app.core.order_resolver import resolve_by_phone
 from app.core.phone import normalize_phone
@@ -49,6 +49,14 @@ TURN_TIMEOUT_SECONDS = 55.0
 # How long the AI stays silent after a handoff, so a human can take the conversation over in
 # the same chat. Self-expiring -- no admin action is needed to resume (design spec).
 HANDOFF_PAUSE_WINDOW = timedelta(hours=24)
+
+# Internal notification sent to AdminControls.owner_alert_number when a handoff triggers. Plain
+# text, no emojis (client-facing copy rule), and carries only what the owner needs to act: which
+# customer to reply to and how long the AI will stay out of the way.
+OWNER_ALERT_TEMPLATE = (
+    "Thetavas bot: {customer_phone} has asked for a person. The AI is paused for that chat for "
+    "the next {hours} hours -- please reply to them on WhatsApp directly."
+)
 
 
 async def _run_agent(context: AgentContext, intent: Intent, c: Container) -> AgentReply:
@@ -163,6 +171,41 @@ async def _run_turn(c: Container, event: InboundText) -> None:
         # safe to log directly.
         logger.warning(
             "whatsapp send failed: status=%s error=%s", result.status_code, result.error
+        )
+
+    if handoff:
+        # Deliberately after the customer's reply and inside the same send_mode gating above:
+        # off/shadow suppress all outbound traffic, and in allowlist mode a conversation that
+        # was never answered must not page the owner either.
+        await _alert_owner(c, wa_cfg, controls.owner_alert_number, phone or event.wa_id)
+
+
+async def _alert_owner(
+    c: Container, wa_cfg: WhatsAppConfig, owner_number: str, customer_phone: str
+) -> None:
+    """Tell the store owner a customer is waiting for a human, if an alert number is configured.
+
+    ``HANDOFF_MESSAGE`` promises the customer that the team will continue in this same chat, and
+    the AI then stays silent for ``HANDOFF_PAUSE_WINDOW`` -- without this notification nobody
+    ever learns the customer is waiting, so the promise is false and the chat simply goes dead.
+    An unset ``owner_alert_number`` degrades silently (same posture as an empty
+    ``allowlist_phones``), and a failed alert only warns: the customer's reply already went out
+    and must not be re-sent by a retry of the whole turn.
+    """
+    if not owner_number:
+        return
+    alert = OWNER_ALERT_TEMPLATE.format(
+        customer_phone=customer_phone,
+        hours=int(HANDOFF_PAUSE_WINDOW.total_seconds() // 3600),
+    )
+    try:
+        result = await send_text(c.http, wa_cfg, owner_number, alert)
+    except WhatsAppSendError:
+        logger.warning("owner handoff alert failed to send (transport error)")
+        return
+    if not result.ok:
+        logger.warning(
+            "owner handoff alert failed: status=%s error=%s", result.status_code, result.error
         )
 
 

@@ -110,10 +110,30 @@ async def test_product_data_rendered_in_system_prompt() -> None:
     assert system_message.role == "system"
     assert "Gold Earrings" in system_message.content
     assert "999 INR" in system_message.content
-    assert "in stock" in system_message.content
-    assert "Silver Bracelet" in system_message.content
-    assert "599 INR" in system_message.content
-    assert "currently out of stock" in system_message.content
+    # Recommendations are always filtered to currently-available-for-sale (design spec):
+    # an out-of-stock item must never reach the prompt, labelled or not.
+    assert "Silver Bracelet" not in system_message.content
+    assert "599 INR" not in system_message.content
+
+
+async def test_all_results_out_of_stock_reads_as_no_recommendation() -> None:
+    products = [
+        Product(
+            gid="1",
+            title="Sold Out Saree",
+            handle="sold-out-saree",
+            price=Money("1999", "INR"),
+            available=False,
+            product_type="Saree",
+            tags=(),
+        )
+    ]
+    shopify = _FakeShopify(products=products)
+    provider = _FixedProvider('{"reply": "Let me connect you with our team."}')
+    await run(_context(provider, "what goes with a red kurti"), shopify)
+    system_message = provider.captured_messages[0]
+    assert "Sold Out Saree" not in system_message.content
+    assert "No matching products" in system_message.content
 
 
 async def test_fallback_on_provider_error() -> None:

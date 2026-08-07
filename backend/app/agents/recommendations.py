@@ -23,13 +23,13 @@ Respond with STRICT JSON only, no other text: {{"reply": "<your reply to the cus
 
 
 def _results_context(products: list[Product]) -> str:
+    """Render only what may be recommended. Callers pass an already in-stock-filtered list."""
     if not products:
         return "No matching products were found for this recommendation."
     lines = []
     for p in products:
         price = f"{p.price.amount} {p.price.currency}" if p.price else "price unavailable"
-        stock = "in stock" if p.available else "currently out of stock"
-        lines.append(f"- {p.title} ({price}) -- {stock}")
+        lines.append(f"- {p.title} ({price}) -- in stock")
     return "\n".join(lines)
 
 
@@ -38,9 +38,14 @@ async def run(context: AgentContext, shopify: ProductSource) -> AgentReply:
     try:
         # None ("nothing searchable in the message") and [] ("searched, no match") both mean
         # "nothing to recommend" here -- recommendations never broadens or re-searches.
-        products = await shopify.search_products(context.user_text, limit=5) or []
+        found = await shopify.search_products(context.user_text, limit=5) or []
     except ShopifyError:
-        products = []
+        found = []
+    # Recommendations are ALWAYS filtered to currently-available-for-sale (design spec).
+    # Labelling an out-of-stock item in the prompt did not stop the model recommending it, so
+    # it is dropped outright -- unlike product_search, where the customer asked for that item
+    # by name and still deserves to hear it exists.
+    products = [p for p in found if p.available]
     system_prompt = _SYSTEM_TEMPLATE.format(
         personality=PERSONALITY, results_context=_results_context(products)
     )

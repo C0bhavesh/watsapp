@@ -98,14 +98,20 @@ async def _run_turn(c: Container, event: InboundText) -> None:
     if wa_cfg is None:
         return
 
-    conversation_id, history = await load_history(c.conversations, event.wa_id)
+    phone = normalize_phone(event.wa_id)
+    # DPDP right-to-erasure depends on this key: POST /admin/erasure deletes conversations and
+    # messages with `WHERE user_id = $1` bound to the customer's E.164 `phone_e164`. Keying the
+    # conversation on the raw Meta `wa_id` ("919876543210") instead made that delete match zero
+    # rows -- the endpoint reported success while the whole chat history survived. Fall back to
+    # the raw wa_id only when normalization fails, so an unparseable number degrades to a
+    # working (if un-erasable) conversation rather than crashing the turn.
+    conversation_id, history = await load_history(c.conversations, phone or event.wa_id)
     now = datetime.now(UTC)
     paused_until = await c.conversations.get_paused_until(conversation_id)
     if paused_until is not None and now < paused_until:
         await c.conversations.append_message(conversation_id, "user", event.text)
         return
 
-    phone = normalize_phone(event.wa_id)
     # A single cheap DB count -- unlike order resolution below, it costs no Shopify call, so
     # it stays unconditional and every agent's prompt can use it.
     order_count = await c.ingest.count_orders_by_phone(phone) if phone else 0

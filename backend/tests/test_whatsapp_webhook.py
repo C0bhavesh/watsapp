@@ -450,7 +450,9 @@ async def test_post_text_event_paused_conversation_stays_silent_but_records_mess
 
     c = get_container()
     await save_controls(c.config, AdminControls(send_mode="live"))
-    conversation_id = await c.conversations.get_or_create("919999999999")
+    # Conversations are keyed on the normalized E.164 phone (what DPDP erasure deletes by),
+    # not the raw wa_id "919999999999" -- seed the pause under that same key.
+    conversation_id = await c.conversations.get_or_create("+919999999999")
     await c.conversations.pause_until(conversation_id, datetime.now(UTC) + timedelta(hours=1))
 
     body = json.dumps(
@@ -504,7 +506,7 @@ async def test_post_text_event_expired_pause_lets_the_ai_resume(
 
     c = get_container()
     await save_controls(c.config, AdminControls(send_mode="live"))
-    conversation_id = await c.conversations.get_or_create("919999999999")
+    conversation_id = await c.conversations.get_or_create("+919999999999")
     # Pause already elapsed (a handoff from more than 24h ago).
     await c.conversations.pause_until(conversation_id, datetime.now(UTC) - timedelta(minutes=1))
 
@@ -561,7 +563,7 @@ async def test_post_text_event_shadow_mode_processes_but_does_not_send(
 
     assert resp.status_code == 200
     assert called["sent"] is False
-    conversation_id = await c.conversations.get_or_create("919999999999")
+    conversation_id = await c.conversations.get_or_create("+919999999999")
     messages = await c.conversations.recent_messages(conversation_id, 10)
     assert len(messages) == 2  # user turn + assistant turn, persisted even though not sent
 
@@ -692,7 +694,7 @@ async def test_post_text_event_shadow_mode_uses_llm_pipeline_but_does_not_send(
     assert resp.status_code == 200
     assert called["sent"] is False
     assert len(provider.calls) == 2
-    conversation_id = await c.conversations.get_or_create("919999999999")
+    conversation_id = await c.conversations.get_or_create("+919999999999")
     messages = await c.conversations.recent_messages(conversation_id, 10)
     assert len(messages) == 2
 
@@ -851,7 +853,7 @@ async def test_post_text_event_agent_handoff_pauses_the_conversation_for_any_age
 
     assert resp.status_code == 200
     assert sent["body"] == "Let me bring in a teammate."  # the reply still goes out
-    conversation_id = await c.conversations.get_or_create("919999999999")
+    conversation_id = await c.conversations.get_or_create("+919999999999")
     paused = await c.conversations.get_paused_until(conversation_id)
     assert paused is not None and paused > datetime.now(UTC)
     assert await c.conversations.get_handoff_attempted_at(conversation_id) is not None
@@ -932,7 +934,7 @@ async def test_post_text_event_allowlist_mode_skips_non_allowed_number_but_still
 
     assert resp.status_code == 200
     assert called["sent"] is False
-    conversation_id = await c.conversations.get_or_create("919999999999")
+    conversation_id = await c.conversations.get_or_create("+919999999999")
     messages = await c.conversations.recent_messages(conversation_id, 10)
     assert len(messages) == 2
 
@@ -1070,7 +1072,7 @@ async def test_post_text_event_agent_crash_still_sends_the_fallback_copy(
     assert resp.status_code == 200
     assert "team" in str(sent.get("body", ""))  # the fixed error_fallback copy went out
     assert "KeyError" in caplog.text
-    conversation_id = await c.conversations.get_or_create("919999999999")
+    conversation_id = await c.conversations.get_or_create("+919999999999")
     messages = await c.conversations.recent_messages(conversation_id, 10)
     assert len(messages) == 2  # the turn is still persisted, not lost
 

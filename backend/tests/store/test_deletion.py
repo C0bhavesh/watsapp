@@ -108,16 +108,19 @@ class _FakeTx:
 
 
 class _FakeConn:
-    """Records executed SQL so we can assert which tables a purge touches (no live DB)."""
+    """Records executed SQL (and its bound args) so we can assert what a purge touches."""
 
     def __init__(self) -> None:
         self.executed: list[str] = []
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
 
     def transaction(self) -> _FakeTx:
         return _FakeTx()
 
-    async def execute(self, sql: str, *_: object) -> str:
-        self.executed.append(" ".join(sql.split()))
+    async def execute(self, sql: str, *args: object) -> str:
+        normalized = " ".join(sql.split())
+        self.executed.append(normalized)
+        self.calls.append((normalized, args))
         return "DELETE 0"
 
 
@@ -161,6 +164,27 @@ async def test_pg_delete_by_phone_targets_every_phone_bearing_table() -> None:
     joined = " ".join(conn.executed)
     assert "DELETE FROM pending_actions WHERE wa_id = $1" in joined
     assert "DELETE FROM order_actions WHERE actor_wa_id = $1" in joined
+
+
+async def test_pg_delete_by_phone_binds_the_e164_phone_to_conversations_user_id() -> None:
+    """The other half of the DPDP key match (see tests/admin/test_erasure.py).
+
+    `core.conversation` stores a conversation under the customer's normalized E.164 phone; this
+    pins the erasure delete to binding that exact same string to `conversations.user_id`. If
+    either side drifts again, the delete silently matches zero rows and chat history survives an
+    apparently-successful erasure.
+    """
+    conn = _FakeConn()
+    store = PostgresIngestStore(_FakePool(conn))  # type: ignore[arg-type]
+
+    await store.delete_by_phone("+919111111111")
+
+    bound = {sql: args for sql, args in conn.calls}
+    assert bound["DELETE FROM conversations WHERE user_id = $1"] == ("+919111111111",)
+    assert bound[
+        "DELETE FROM messages WHERE conversation_id IN "
+        "(SELECT id FROM conversations WHERE user_id = $1)"
+    ] == ("+919111111111",)
 
 
 async def test_pg_delete_by_phone_returns_new_counts() -> None:

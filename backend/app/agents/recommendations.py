@@ -1,4 +1,12 @@
-from app.agents.base import AgentContext, AgentReply, extract_reply_text, personality_for
+from app.agents.base import (
+    HANDOFF_JSON_CONTRACT,
+    AgentContext,
+    AgentReply,
+    extract_json_blob,
+    extract_reply_text,
+    model_asked_for_handoff,
+    personality_for,
+)
 from app.agents.product_search import ProductSource
 from app.channels.copy import copy_for
 from app.providers.base import Message, ProviderError
@@ -18,7 +26,7 @@ one or two genuine suggestions is enough.
 If nothing suitable is available, say so honestly and offer to connect the customer with the
 team instead of forcing a recommendation.
 
-Respond with STRICT JSON only, no other text: {{"reply": "<your reply to the customer>"}}
+{contract}
 """
 
 
@@ -47,7 +55,9 @@ async def run(context: AgentContext, shopify: ProductSource) -> AgentReply:
     # by name and still deserves to hear it exists.
     products = [p for p in found if p.available]
     system_prompt = _SYSTEM_TEMPLATE.format(
-        personality=personality_for(context), results_context=_results_context(products)
+        personality=personality_for(context),
+        results_context=_results_context(products),
+        contract=HANDOFF_JSON_CONTRACT,
     )
     messages = [
         Message(role="system", content=system_prompt),
@@ -63,5 +73,10 @@ async def run(context: AgentContext, shopify: ProductSource) -> AgentReply:
             extra_params=context.extra_params,
         )
     except ProviderError:
+        # A transient provider failure is not an escalation -- handing off here would pause the
+        # AI for 24h on every blip. Only the model's own judgment escalates.
         return AgentReply(text=fallback)
-    return AgentReply(text=extract_reply_text(result.text, fallback))
+    return AgentReply(
+        text=extract_reply_text(result.text, fallback),
+        handoff=model_asked_for_handoff(extract_json_blob(result.text)),
+    )

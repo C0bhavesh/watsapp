@@ -47,6 +47,18 @@ VIP_HINT = (
 # this default only covers callers that do not care about disclosure gating.
 DEFAULT_REVEAL_FIELDS: tuple[str, ...] = ("order_number", "email", "status")
 
+# The reply contract each specialist appends to its own system prompt. ``handoff`` is the ONLY
+# thing that actually pauses the AI and brings a human into the chat (core/conversation.py) --
+# an agent whose prompt tells the model to "offer to connect the customer with the team" but
+# never asks for this field makes a promise the code structurally cannot keep. customer_support
+# states its own stricter one-attempt policy and keeps its own wording.
+HANDOFF_JSON_CONTRACT = """Whenever you tell the customer you will connect them with the team, \
+also set "handoff" to true -- that is what actually brings a teammate into this chat. Set it to \
+false on every reply you handle yourself.
+
+Respond with STRICT JSON only, no other text:
+{"reply": "<your reply to the customer>", "handoff": <true or false>}"""
+
 
 @dataclass(frozen=True)
 class AgentContext:
@@ -99,6 +111,20 @@ def personality_for(context: AgentContext) -> str:
     if context.is_vip:
         parts.append(VIP_HINT)
     return "\n\n".join(parts)
+
+
+def model_asked_for_handoff(data: dict[str, object] | None) -> bool:
+    """Read the model's own ``handoff`` judgment, strictly.
+
+    ``bool("false")`` is True, so a model that emits the flag as a string must be compared by
+    value -- anything that is not a real true never escalates by accident.
+    """
+    if data is None:
+        return False
+    value = data.get("handoff")
+    if isinstance(value, bool):
+        return value
+    return isinstance(value, str) and value.strip().lower() == "true"
 
 
 def _think_stripped(raw_text: str) -> str:

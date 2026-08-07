@@ -1,6 +1,14 @@
 from collections.abc import Sequence
 
-from app.agents.base import AgentContext, AgentReply, extract_reply_text, personality_for
+from app.agents.base import (
+    HANDOFF_JSON_CONTRACT,
+    AgentContext,
+    AgentReply,
+    extract_json_blob,
+    extract_reply_text,
+    model_asked_for_handoff,
+    personality_for,
+)
 from app.channels.copy import copy_for
 from app.providers.base import Message, ProviderError
 from app.shopify.models import AuthorizedOrder
@@ -20,7 +28,7 @@ tell them clearly and do not offer a cancel option for it.
 If the customer wants to cancel an order that IS still eligible, tell them you'll bring up a
 Confirm/Cancel button for them to tap -- you never cancel anything yourself.
 
-Respond with STRICT JSON only, no other text: {{"reply": "<your reply to the customer>"}}
+{contract}
 """
 
 
@@ -79,6 +87,7 @@ async def run(context: AgentContext) -> AgentReply:
     system_prompt = _SYSTEM_TEMPLATE.format(
         personality=personality_for(context),
         order_context=_order_context(context.orders, context.reveal_fields),
+        contract=HANDOFF_JSON_CONTRACT,
     )
     messages = [
         Message(role="system", content=system_prompt),
@@ -91,5 +100,10 @@ async def run(context: AgentContext) -> AgentReply:
             extra_params=context.extra_params,
         )
     except ProviderError:
+        # A transient provider failure is not an escalation -- handing off here would pause the
+        # AI for 24h on every blip. Only the model's own judgment escalates.
         return AgentReply(text=fallback)
-    return AgentReply(text=extract_reply_text(result.text, fallback))
+    return AgentReply(
+        text=extract_reply_text(result.text, fallback),
+        handoff=model_asked_for_handoff(extract_json_blob(result.text)),
+    )

@@ -141,9 +141,11 @@ async def _run_turn(c: Container, event: InboundText) -> None:
         reply_text = copy_for("error_fallback", controls.default_language)
 
     if handoff:
-        # Honored for EVERY agent, not just customer_support: a model-judged "I can't resolve
-        # this" (the multilingual path the English phrase list cannot match) escalates from
-        # whichever specialist answered. The reply itself is still sent below.
+        # All five specialists ask the model for the same {"reply", "handoff"} contract and
+        # parse the flag, so a model-judged "I can't resolve this" (the multilingual path the
+        # English phrase list cannot match) escalates from whichever one answered -- previously
+        # only customer_support requested the flag, so the other four told the customer they
+        # were connecting the team while nothing paused. The reply itself is still sent below.
         await c.conversations.pause_until(conversation_id, now + HANDOFF_PAUSE_WINDOW)
         await c.conversations.mark_handoff_attempted(conversation_id, now)
 

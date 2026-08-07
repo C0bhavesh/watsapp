@@ -155,3 +155,25 @@ async def test_fallback_on_provider_error() -> None:
     # Fallback should be a non-empty string (from copy_for("error_fallback", "en"))
     assert result.text
     assert len(result.text) > 0
+
+
+async def test_model_handoff_flag_is_honored() -> None:
+    """The prompt tells the model to offer to connect the customer with the team when nothing
+    suitable is available -- that offer only means something if it also sets handoff."""
+    provider = _FixedProvider(
+        '{"reply": "Nothing suitable right now -- shall I get our team?", "handoff": true}'
+    )
+    result = await run(_context(provider, "what goes with a red saree"), _FakeShopify())
+    assert result.handoff is True
+
+
+async def test_reply_without_handoff_flag_does_not_hand_off() -> None:
+    provider = _FixedProvider('{"reply": "Gold Jhumka Earrings would look lovely."}')
+    result = await run(_context(provider, "what goes with a red saree"), _FakeShopify())
+    assert result.handoff is False
+
+
+async def test_system_prompt_requests_the_handoff_field() -> None:
+    provider = _FixedProvider('{"reply": "Sure.", "handoff": false}')
+    await run(_context(provider, "what goes with a red saree"), _FakeShopify())
+    assert '"handoff"' in provider.captured_messages[0].content

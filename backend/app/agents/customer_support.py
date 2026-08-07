@@ -3,6 +3,7 @@ from app.agents.base import (
     AgentReply,
     extract_json_blob,
     extract_reply_text,
+    model_asked_for_handoff,
     personality_for,
 )
 from app.channels.copy import copy_for
@@ -43,20 +44,6 @@ def _wants_human(text: str) -> bool:
     return any(phrase in lowered for phrase in _HUMAN_REQUEST_PHRASES)
 
 
-def _model_asked_for_handoff(data: dict[str, object] | None) -> bool:
-    """Read the model's own ``handoff`` judgment, strictly.
-
-    ``bool("false")`` is True, so a model that emits the flag as a string must be compared by
-    value -- anything that is not a real true never escalates by accident.
-    """
-    if data is None:
-        return False
-    value = data.get("handoff")
-    if isinstance(value, bool):
-        return value
-    return isinstance(value, str) and value.strip().lower() == "true"
-
-
 async def run(context: AgentContext) -> AgentReply:
     """One AI attempt, then handoff -- no second attempt, no persuasion (design spec).
 
@@ -91,6 +78,6 @@ async def run(context: AgentContext) -> AgentReply:
         return AgentReply(text=f"{fallback} {HANDOFF_MESSAGE}", handoff=True)
 
     reply = extract_reply_text(result.text, fallback)
-    if reply == fallback or _model_asked_for_handoff(extract_json_blob(result.text)):
+    if reply == fallback or model_asked_for_handoff(extract_json_blob(result.text)):
         return AgentReply(text=f"{reply} {HANDOFF_MESSAGE}", handoff=True)
     return AgentReply(text=reply)

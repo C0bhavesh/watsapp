@@ -190,3 +190,25 @@ async def test_reveal_fields_empty_withholds_every_order_detail() -> None:
     assert "tavas1" not in prompt
     assert "payment status" not in prompt
     assert "cancel eligible" not in prompt
+
+
+async def test_model_handoff_flag_is_honored() -> None:
+    """order_tracking's prompt can end in "let me connect you with the team"; that has to set
+    handoff so core.conversation actually pauses the AI for a human."""
+    provider = _FixedProvider(
+        text='{"reply": "Let me connect you with our team.", "handoff": true}'
+    )
+    result = await run(_context(provider, "this is still not delivered", []))
+    assert result.handoff is True
+
+
+async def test_reply_without_handoff_flag_does_not_hand_off() -> None:
+    provider = _FixedProvider(text='{"reply": "Your order tavas1 is on its way."}')
+    result = await run(_context(provider, "where is my order", []))
+    assert result.handoff is False
+
+
+async def test_system_prompt_requests_the_handoff_field() -> None:
+    provider = _CapturingProvider(text='{"reply": "Sure.", "handoff": false}')
+    await run(_context(provider, "where is my order", []))
+    assert '"handoff"' in _system_prompt(provider)

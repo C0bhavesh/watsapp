@@ -124,3 +124,27 @@ async def test_run_fallback_uses_the_context_language() -> None:
     )
     result = await run(context)
     assert result.text == copy_for("error_fallback", "gu")
+
+
+async def test_model_handoff_flag_is_honored() -> None:
+    """The prompt tells the model to offer to connect the customer with the team when the
+    answer isn't covered -- without the handoff flag in the contract that offer was a promise
+    nothing could keep (the AI just answered again on the next turn)."""
+    provider = _FixedProvider(
+        '{"reply": "I am not certain -- let me connect you with our team.", "handoff": true}'
+    )
+    result = await run(_context(provider, "do you price match", {"faq": "[]", "business": "{}"}))
+    assert result.handoff is True
+
+
+async def test_reply_without_handoff_flag_does_not_hand_off() -> None:
+    provider = _FixedProvider('{"reply": "Returns are accepted within 7 days."}')
+    result = await run(_context(provider, "return window", {"faq": "[]", "business": "{}"}))
+    assert result.handoff is False
+
+
+async def test_system_prompt_requests_the_handoff_field() -> None:
+    provider = _CapturingProvider('{"reply": "Sure.", "handoff": false}')
+    await run(_context(provider, "return window", {"faq": "[]", "business": "{}"}))
+    assert provider.captured_messages is not None
+    assert '"handoff"' in provider.captured_messages[0].content

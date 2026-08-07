@@ -1,4 +1,12 @@
-from app.agents.base import AgentContext, AgentReply, extract_reply_text, personality_for
+from app.agents.base import (
+    HANDOFF_JSON_CONTRACT,
+    AgentContext,
+    AgentReply,
+    extract_json_blob,
+    extract_reply_text,
+    model_asked_for_handoff,
+    personality_for,
+)
 from app.channels.copy import copy_for
 from app.providers.base import Message, ProviderError
 
@@ -15,7 +23,7 @@ Frequently asked questions:
 Store information:
 {business}
 
-Respond with STRICT JSON only, no other text: {{"reply": "<your reply to the customer>"}}
+{contract}
 """
 
 
@@ -25,6 +33,7 @@ async def run(context: AgentContext) -> AgentReply:
         personality=personality_for(context),
         faq=context.knowledge.get("faq", ""),
         business=context.knowledge.get("business", ""),
+        contract=HANDOFF_JSON_CONTRACT,
     )
     messages = [
         Message(role="system", content=system_prompt),
@@ -40,5 +49,10 @@ async def run(context: AgentContext) -> AgentReply:
             extra_params=context.extra_params,
         )
     except ProviderError:
+        # A transient provider failure is not an escalation -- handing off here would pause the
+        # AI for 24h on every blip. Only the model's own judgment escalates.
         return AgentReply(text=fallback)
-    return AgentReply(text=extract_reply_text(result.text, fallback))
+    return AgentReply(
+        text=extract_reply_text(result.text, fallback),
+        handoff=model_asked_for_handoff(extract_json_blob(result.text)),
+    )

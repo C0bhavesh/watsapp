@@ -157,3 +157,25 @@ async def test_product_data_rendered_in_system_prompt() -> None:
     assert "Red Cotton Kurti" in system_message.content
     assert "1200 INR" in system_message.content
     assert "currently out of stock" in system_message.content
+
+
+async def test_model_handoff_flag_is_honored() -> None:
+    """The prompt tells the model to offer to connect the customer with the team when nothing
+    matches -- that offer only means something if it also sets handoff."""
+    provider = _FixedProvider(
+        '{"reply": "Nothing matches -- shall I connect you with our team?", "handoff": true}'
+    )
+    result = await run(_context(provider, "red saree"), _FakeShopify())
+    assert result.handoff is True
+
+
+async def test_reply_without_handoff_flag_does_not_hand_off() -> None:
+    provider = _FixedProvider('{"reply": "We have a Blue Chikankari Kurti at 1299 INR."}')
+    result = await run(_context(provider, "kurti"), _FakeShopify())
+    assert result.handoff is False
+
+
+async def test_system_prompt_requests_the_handoff_field() -> None:
+    provider = _FixedProvider('{"reply": "Sure.", "handoff": false}')
+    await run(_context(provider, "kurti"), _FakeShopify())
+    assert '"handoff"' in provider.captured_messages[0].content

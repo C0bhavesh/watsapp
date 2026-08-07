@@ -1,3 +1,4 @@
+import asyncio
 from typing import Protocol
 
 from app.core.phone import normalize_phone
@@ -29,21 +30,37 @@ async def resolve_by_phone(
     if the live phone no longer matches -- a stale mapping is silently dropped, never
     surfaced. A Shopify outage degrades to whatever was already resolved (often empty) rather
     than raising, so a temporary Shopify blip does not stop the conversation.
+
+    The mapped orders are re-fetched CONCURRENTLY: awaiting them one at a time added a full
+    Shopify round-trip per extra order to the customer's wait for a reply.
     """
     phone = normalize_phone(wa_id)
     if phone is None:
         return []
     orders: list[AuthorizedOrder] = []
     try:
-        for mapping in await ingest.find_mappings_by_phone(phone):
-            order = await shopify.get_order(mapping.order_gid)
-            if order is None:
+        mappings = await ingest.find_mappings_by_phone(phone)
+        fetched = await asyncio.gather(
+            *(shopify.get_order(mapping.order_gid) for mapping in mappings),
+            return_exceptions=True,
+        )
+        degraded = False
+        for item in fetched:
+            if isinstance(item, BaseException):
+                if isinstance(item, ShopifyError):
+                    degraded = True
+                    continue
+                raise item
+            if item is None:
                 continue
             try:
-                orders.append(AuthorizedOrder(order=order, verified_phone=phone))
+                orders.append(AuthorizedOrder(order=item, verified_phone=phone))
             except ValueError:
                 continue
-        if orders:
+        # `degraded` keeps the sequential version's behaviour: once Shopify has failed on this
+        # turn, fall back to whatever resolved rather than spending another call on the
+        # customer-by-phone lookup.
+        if orders or degraded:
             return orders
         for order in await shopify.find_customer_orders_by_phone(phone):
             try:

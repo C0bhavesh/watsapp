@@ -654,6 +654,61 @@ async def test_post_text_event_dispatches_to_correct_agent(
     assert sent["body"] == f"stub-reply-for-{intent}"
 
 
+@pytest.mark.parametrize(
+    ("intent", "expect_resolved"),
+    [("order_tracking", True), ("policy", False), ("customer_support", False)],
+)
+async def test_post_text_event_resolves_orders_only_for_order_tracking(
+    intent: str, expect_resolved: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """resolve_by_phone re-fetches every mapped order from Shopify. Only order_tracking reads
+    context.orders, so every other intent must not pay that latency."""
+    called = {"resolved_orders": False}
+
+    async def fake_send_text(*args, **kwargs):
+        from app.channels.whatsapp_sender import SendResult
+
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    async def fake_resolve_by_phone(*args, **kwargs):
+        called["resolved_orders"] = True
+        return []
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+    monkeypatch.setattr("app.core.conversation.resolve_by_phone", fake_resolve_by_phone)
+
+    provider = FakeProvider(responses=[json.dumps({"intent": intent})])
+    monkeypatch.setattr("app.core.conversation.active_llm", _fake_active_llm(provider))
+
+    from app.agents.base import AgentReply
+
+    async def fake_run(*args, **kwargs):
+        return AgentReply(text="ok")
+
+    monkeypatch.setattr(f"{_INTENT_MODULES[intent]}.run", fake_run)
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    await save_controls(get_container().config, AdminControls(send_mode="live"))
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": f"wamid.resolve.{intent}",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "some message"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert called["resolved_orders"] is expect_resolved
+
+
 async def test_post_text_event_agent_handoff_pauses_the_conversation_for_any_agent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -906,3 +961,64 @@ async def test_post_text_event_timeout_is_caught_and_logged(
 
     assert resp.status_code == 200
     assert "timed out" in caplog.text
+
+
+async def test_post_batch_stops_running_turns_once_the_request_budget_is_spent(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Meta batches several messages into one delivery. A per-turn timeout gave an N-message
+    batch an N x 55s ceiling; the budget must cover the whole request instead."""
+    turns: list[str] = []
+
+    async def slow_run_turn(c, event, budget_seconds=None):
+        turns.append(event.message_id)
+        await asyncio.sleep(0.06)
+
+    monkeypatch.setattr("app.channels.whatsapp.run_turn", slow_run_turn)
+    monkeypatch.setattr("app.channels.whatsapp.TURN_TIMEOUT_SECONDS", 0.05)
+
+    body = json.dumps({
+        "entry": [{"changes": [{"value": {
+            "metadata": {"phone_number_id": PHONE_NUMBER_ID},
+            "messages": [
+                {"from": "919999999999", "id": f"wamid.budget{i}", "timestamp": str(i),
+                 "type": "text", "text": {"body": "hello"}}
+                for i in range(1, 4)
+            ],
+        }}]}],
+    }).encode()
+
+    with caplog.at_level(logging.WARNING, logger="app.channels.whatsapp"):
+        resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["processed"] == 3  # every message is still deduped and acked
+    assert turns == ["wamid.budget1"]  # the budget was spent by the first turn
+    assert "budget" in caplog.text
+
+
+async def test_post_batch_within_budget_runs_every_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    turns: list[str] = []
+
+    async def fast_run_turn(c, event, budget_seconds=None):
+        turns.append(event.message_id)
+
+    monkeypatch.setattr("app.channels.whatsapp.run_turn", fast_run_turn)
+
+    body = json.dumps({
+        "entry": [{"changes": [{"value": {
+            "metadata": {"phone_number_id": PHONE_NUMBER_ID},
+            "messages": [
+                {"from": "919999999999", "id": f"wamid.ok{i}", "timestamp": str(i),
+                 "type": "text", "text": {"body": "hello"}}
+                for i in range(1, 4)
+            ],
+        }}]}],
+    }).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert turns == ["wamid.ok1", "wamid.ok2", "wamid.ok3"]

@@ -62,20 +62,29 @@ async def _run_agent(context: AgentContext, intent: Intent, c: Container) -> Age
     return await customer_support.run(context)
 
 
-async def run_turn(c: Container, event: InboundText) -> None:
+async def run_turn(c: Container, event: InboundText, budget_seconds: float | None = None) -> None:
     """Run one conversation turn for a fresh inbound text message and send the reply.
 
     Failures anywhere in this pipeline (Shopify, the LLM provider, sending the reply) are
     swallowed here -- the webhook must still ack 200 for a message it already deduped, and a
     failed reply is a degraded conversation, not a failed webhook delivery. A turn that runs
-    past ``TURN_TIMEOUT_SECONDS`` is cancelled and logged as a WARNING rather than left to an
-    uncaught platform-level 504 (see the module docstring for why that distinction matters).
+    past its timeout is cancelled and logged as a WARNING rather than left to an uncaught
+    platform-level 504 (see the module docstring for why that distinction matters).
+
+    ``budget_seconds`` is what is left of the CALLER's whole-request budget (the webhook
+    handler batches several messages per delivery); the turn gets whichever of that and
+    ``TURN_TIMEOUT_SECONDS`` is smaller, so neither ceiling can be exceeded.
     """
+    timeout = (
+        TURN_TIMEOUT_SECONDS
+        if budget_seconds is None
+        else min(budget_seconds, TURN_TIMEOUT_SECONDS)
+    )
     try:
-        async with asyncio.timeout(TURN_TIMEOUT_SECONDS):
+        async with asyncio.timeout(timeout):
             await _run_turn(c, event)
     except TimeoutError:
-        logger.warning("conversation turn timed out after %.0fs", TURN_TIMEOUT_SECONDS)
+        logger.warning("conversation turn timed out after %.2fs", timeout)
     except Exception:
         logger.exception("conversation turn failed for a fresh inbound text message")
 
@@ -96,7 +105,8 @@ async def _run_turn(c: Container, event: InboundText) -> None:
         return
 
     phone = normalize_phone(event.wa_id)
-    orders = await resolve_by_phone(c.shopify, c.ingest, event.wa_id)
+    # A single cheap DB count -- unlike order resolution below, it costs no Shopify call, so
+    # it stays unconditional and every agent's prompt can use it.
     order_count = await c.ingest.count_orders_by_phone(phone) if phone else 0
     is_vip = order_count >= controls.vip_order_count_threshold
 
@@ -106,6 +116,17 @@ async def _run_turn(c: Container, event: InboundText) -> None:
         reply_text = copy_for("error_fallback", "en")
     else:
         provider, model, api_key, extra_params = llm
+        intent = await classify_intent(
+            provider, model, api_key, event.text, extra_params=extra_params
+        )
+        # Classify FIRST, then resolve: resolve_by_phone re-fetches every mapped order live
+        # from Shopify, and order_tracking is the only agent that reads context.orders. Doing
+        # it unconditionally put that latency on every "hi".
+        orders = (
+            await resolve_by_phone(c.shopify, c.ingest, event.wa_id)
+            if intent == "order_tracking"
+            else []
+        )
         loader = KnowledgeLoader(c.config_repo, SEEDS_DIR)
         knowledge = await loader.assemble_all()
         context = AgentContext(
@@ -120,9 +141,6 @@ async def _run_turn(c: Container, event: InboundText) -> None:
             model=model,
             api_key=api_key,
             extra_params=extra_params,
-        )
-        intent = await classify_intent(
-            provider, model, api_key, event.text, extra_params=extra_params
         )
         agent_reply = await _run_agent(context, intent, c)
         reply_text = strip_markdown(agent_reply.text)

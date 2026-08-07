@@ -1,5 +1,7 @@
 import hmac
 import json
+import logging
+import time
 from typing import Any
 
 from fastapi import APIRouter, Request, Response
@@ -9,8 +11,10 @@ from app.channels.whatsapp_config import load_whatsapp_config
 from app.channels.whatsapp_inbound import InboundText, extract_events
 from app.channels.whatsapp_signature import verify_meta_hmac
 from app.config.crypto import VaultError
-from app.core.conversation import run_turn
+from app.core.conversation import TURN_TIMEOUT_SECONDS, run_turn
 from app.deps import get_container
+
+logger = logging.getLogger("app.channels.whatsapp")
 
 router = APIRouter()
 
@@ -86,12 +90,25 @@ async def receive_webhook(request: Request) -> Response:
     results: list[dict[str, Any]] = []
     processed = 0
     duplicate = 0
+    # ONE budget for the whole delivery, not one per turn: Meta batches several messages into
+    # a single webhook, so a per-turn ceiling let an N-message batch run for N x the ceiling
+    # with nothing capping the request itself. Every event is still recorded and acked below,
+    # so a loop that stops early leaves nothing unacknowledged to Meta.
+    deadline = time.monotonic() + TURN_TIMEOUT_SECONDS
     for event in events:
         is_new = await c.messages.record_if_new(event.message_id)
         if is_new:
             processed += 1
             if isinstance(event, InboundText):
-                await run_turn(c, event)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning(
+                        "request budget spent; skipping conversation turn for %s remaining "
+                        "message(s) in this delivery",
+                        len(events) - processed + 1,
+                    )
+                else:
+                    await run_turn(c, event, budget_seconds=remaining)
         else:
             duplicate += 1
         results.append(

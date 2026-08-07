@@ -324,6 +324,46 @@ async def test_post_text_event_without_llm_configured_sends_safe_fallback(
     assert "team" in sent["body"]
 
 
+async def test_post_text_event_fallback_uses_the_configured_default_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-English-speaking customer must not get an English error message."""
+    sent: dict[str, object] = {}
+
+    async def fake_send_text(http, cfg, to, body, timeout=20.0):
+        from app.channels.whatsapp_sender import SendResult
+
+        sent["body"] = body
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.channels.copy import copy_for
+    from app.deps import get_container
+
+    # No LLM configured -> the fixed fallback copy is what goes out.
+    await save_controls(
+        get_container().config, AdminControls(send_mode="live", default_language="hi")
+    )
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.lang1",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "मेरा ऑर्डर कहाँ है"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert sent["body"] == copy_for("error_fallback", "hi")
+
+
 async def test_post_text_event_send_mode_off_does_not_send(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

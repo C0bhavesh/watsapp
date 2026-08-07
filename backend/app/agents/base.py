@@ -3,6 +3,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.channels.copy import DEFAULT_LANGUAGE
 from app.providers.base import LLMProvider, Message
 from app.shopify.models import AuthorizedOrder
 
@@ -57,6 +58,9 @@ class AgentContext:
     # `channels/whatsapp_config.WhatsAppConfig`; repr=False preserves __eq__.
     api_key: str = field(repr=False)
     extra_params: dict[str, object] | None
+    # The configured default language (AdminControls.default_language), used for the fixed
+    # fallback copy so a non-English-speaking customer's failed turn is not answered in English.
+    language: str = DEFAULT_LANGUAGE
     timeout: float = 20.0
 
 

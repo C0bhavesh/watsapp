@@ -69,7 +69,7 @@ async def run(context: AgentContext) -> AgentReply:
     Setting the conversation pause is NOT this agent's job -- it returns ``handoff`` and
     ``core.conversation`` applies the same pause for whichever agent asked for it.
     """
-    fallback = copy_for("error_fallback", "en")
+    fallback = copy_for("error_fallback", context.language)
     if _wants_human(context.user_text):
         return AgentReply(text=HANDOFF_MESSAGE, handoff=True)
 

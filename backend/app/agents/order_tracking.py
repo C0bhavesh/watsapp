@@ -59,7 +59,7 @@ async def run(context: AgentContext) -> AgentReply:
     Calls the LLM provider with order context and returns a parsed reply.
     On provider error, returns a safe fallback message.
     """
-    fallback = copy_for("error_fallback", "en")
+    fallback = copy_for("error_fallback", context.language)
     system_prompt = _SYSTEM_TEMPLATE.format(
         personality=personality_for(context), order_context=_order_context(context.orders)
     )

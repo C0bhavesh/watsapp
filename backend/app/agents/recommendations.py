@@ -34,7 +34,7 @@ def _results_context(products: list[Product]) -> str:
 
 
 async def run(context: AgentContext, shopify: ProductSource) -> AgentReply:
-    fallback = copy_for("error_fallback", "en")
+    fallback = copy_for("error_fallback", context.language)
     try:
         # None ("nothing searchable in the message") and [] ("searched, no match") both mean
         # "nothing to recommend" here -- recommendations never broadens or re-searches.

@@ -114,23 +114,25 @@ async def _run_turn(c: Container, event: InboundText) -> None:
     llm = await active_llm(c.settings, c.config)
     handoff = False
     if llm is None:
-        reply_text = copy_for("error_fallback", "en")
+        reply_text = copy_for("error_fallback", controls.default_language)
     else:
         try:
-            reply_text, handoff = await _agent_reply(c, event, history, phone, is_vip, llm)
+            reply_text, handoff = await _agent_reply(
+                c, event, history, phone, is_vip, llm, controls.default_language
+            )
         except Exception:
             # Each agent catches ProviderError itself; anything ELSE raised in this section
             # (a KeyError in prompt formatting, an unexpected store error) used to reach
             # run_turn's blanket handler, which logs and sends nothing. A specialist failure
             # must degrade to the fixed copy and still be delivered -- never silence.
             logger.exception("agent dispatch failed; degrading to the fixed fallback reply")
-            reply_text = copy_for("error_fallback", "en")
+            reply_text = copy_for("error_fallback", controls.default_language)
             handoff = False
 
     if not reply_text.strip():
         # A completion that's e.g. only a code fence, or an agent's own degraded reply, can
         # strip down to nothing -- never persist/send a blank WhatsApp message.
-        reply_text = copy_for("error_fallback", "en")
+        reply_text = copy_for("error_fallback", controls.default_language)
 
     if handoff:
         # Honored for EVERY agent, not just customer_support: a model-judged "I can't resolve
@@ -163,6 +165,7 @@ async def _agent_reply(
     phone: str | None,
     is_vip: bool,
     llm: tuple[LLMProvider, str, str, dict[str, object] | None],
+    language: str,
 ) -> tuple[str, bool]:
     """Classify, dispatch to the specialist, and return its (reply text, handoff) pair."""
     provider, model, api_key, extra_params = llm
@@ -191,6 +194,7 @@ async def _agent_reply(
         model=model,
         api_key=api_key,
         extra_params=extra_params,
+        language=language,
     )
     agent_reply = await _run_agent(context, intent, c)
     return strip_markdown(agent_reply.text), agent_reply.handoff

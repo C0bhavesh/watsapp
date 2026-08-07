@@ -110,3 +110,17 @@ async def test_run_on_provider_error_returns_safe_fallback() -> None:
     knowledge: dict[str, str] = {"faq": "[]", "business": "{}"}
     result = await run(_context(provider, "what is your return policy", knowledge))
     assert "team" in result.text
+
+
+async def test_run_fallback_uses_the_context_language() -> None:
+    from dataclasses import replace
+
+    from app.channels.copy import copy_for
+
+    provider = _FixedProvider(raises=ProviderError("service unavailable", "TIMEOUT"))
+    context = replace(
+        _context(provider, "what is your return policy", {"faq": "[]", "business": "{}"}),
+        language="gu",
+    )
+    result = await run(context)
+    assert result.text == copy_for("error_fallback", "gu")

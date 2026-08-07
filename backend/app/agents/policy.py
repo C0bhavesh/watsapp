@@ -20,7 +20,7 @@ Respond with STRICT JSON only, no other text: {{"reply": "<your reply to the cus
 
 
 async def run(context: AgentContext) -> AgentReply:
-    fallback = copy_for("error_fallback", "en")
+    fallback = copy_for("error_fallback", context.language)
     system_prompt = _SYSTEM_TEMPLATE.format(
         personality=personality_for(context),
         faq=context.knowledge.get("faq", ""),

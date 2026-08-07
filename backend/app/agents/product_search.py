@@ -54,7 +54,7 @@ def _results_context(products: list[Product] | None) -> str:
 
 
 async def run(context: AgentContext, shopify: ProductSource) -> AgentReply:
-    fallback = copy_for("error_fallback", "en")
+    fallback = copy_for("error_fallback", context.language)
     query = sanitize_product_query(context.user_text)
     products: list[Product] | None = None
     if query is not None:

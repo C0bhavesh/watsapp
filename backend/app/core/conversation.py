@@ -28,6 +28,7 @@ from app.core.phone import normalize_phone
 from app.core.sanitize import strip_markdown
 from app.deps import Container, active_llm
 from app.knowledge.loader import SEEDS_DIR, KnowledgeLoader
+from app.providers.base import LLMProvider, Message
 
 logger = logging.getLogger("app.core.conversation")
 
@@ -115,36 +116,16 @@ async def _run_turn(c: Container, event: InboundText) -> None:
     if llm is None:
         reply_text = copy_for("error_fallback", "en")
     else:
-        provider, model, api_key, extra_params = llm
-        intent = await classify_intent(
-            provider, model, api_key, event.text, extra_params=extra_params
-        )
-        # Classify FIRST, then resolve: resolve_by_phone re-fetches every mapped order live
-        # from Shopify, and order_tracking is the only agent that reads context.orders. Doing
-        # it unconditionally put that latency on every "hi".
-        orders = (
-            await resolve_by_phone(c.shopify, c.ingest, event.wa_id)
-            if intent == "order_tracking"
-            else []
-        )
-        loader = KnowledgeLoader(c.config_repo, SEEDS_DIR)
-        knowledge = await loader.assemble_all()
-        context = AgentContext(
-            wa_id=event.wa_id,
-            phone_e164=phone or event.wa_id,
-            user_text=event.text,
-            history=history,
-            orders=orders,
-            is_vip=is_vip,
-            knowledge=knowledge,
-            provider=provider,
-            model=model,
-            api_key=api_key,
-            extra_params=extra_params,
-        )
-        agent_reply = await _run_agent(context, intent, c)
-        reply_text = strip_markdown(agent_reply.text)
-        handoff = agent_reply.handoff
+        try:
+            reply_text, handoff = await _agent_reply(c, event, history, phone, is_vip, llm)
+        except Exception:
+            # Each agent catches ProviderError itself; anything ELSE raised in this section
+            # (a KeyError in prompt formatting, an unexpected store error) used to reach
+            # run_turn's blanket handler, which logs and sends nothing. A specialist failure
+            # must degrade to the fixed copy and still be delivered -- never silence.
+            logger.exception("agent dispatch failed; degrading to the fixed fallback reply")
+            reply_text = copy_for("error_fallback", "en")
+            handoff = False
 
     if not reply_text.strip():
         # A completion that's e.g. only a code fence, or an agent's own degraded reply, can
@@ -173,3 +154,43 @@ async def _run_turn(c: Container, event: InboundText) -> None:
         logger.warning(
             "whatsapp send failed: status=%s error=%s", result.status_code, result.error
         )
+
+
+async def _agent_reply(
+    c: Container,
+    event: InboundText,
+    history: list[Message],
+    phone: str | None,
+    is_vip: bool,
+    llm: tuple[LLMProvider, str, str, dict[str, object] | None],
+) -> tuple[str, bool]:
+    """Classify, dispatch to the specialist, and return its (reply text, handoff) pair."""
+    provider, model, api_key, extra_params = llm
+    intent = await classify_intent(
+        provider, model, api_key, event.text, extra_params=extra_params
+    )
+    # Classify FIRST, then resolve: resolve_by_phone re-fetches every mapped order live from
+    # Shopify, and order_tracking is the only agent that reads context.orders. Doing it
+    # unconditionally put that latency on every "hi".
+    orders = (
+        await resolve_by_phone(c.shopify, c.ingest, event.wa_id)
+        if intent == "order_tracking"
+        else []
+    )
+    loader = KnowledgeLoader(c.config_repo, SEEDS_DIR)
+    knowledge = await loader.assemble_all()
+    context = AgentContext(
+        wa_id=event.wa_id,
+        phone_e164=phone or event.wa_id,
+        user_text=event.text,
+        history=history,
+        orders=orders,
+        is_vip=is_vip,
+        knowledge=knowledge,
+        provider=provider,
+        model=model,
+        api_key=api_key,
+        extra_params=extra_params,
+    )
+    agent_reply = await _run_agent(context, intent, c)
+    return strip_markdown(agent_reply.text), agent_reply.handoff

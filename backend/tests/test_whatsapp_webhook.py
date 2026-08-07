@@ -928,6 +928,103 @@ async def test_post_text_event_empty_agent_reply_falls_back_to_safe_copy(
     assert "team" in sent["body"]  # the fixed error_fallback copy, never a blank message
 
 
+async def test_post_text_event_agent_crash_still_sends_the_fallback_copy(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A non-ProviderError inside an agent (a KeyError in prompt formatting, an unexpected
+    store error) used to reach run_turn's blanket handler, which logs and sends NOTHING. Any
+    specialist failure must degrade to the fixed error_fallback copy, never silence."""
+    sent: dict[str, object] = {}
+
+    async def fake_send_text(http, cfg, to, body, timeout=20.0):
+        from app.channels.whatsapp_sender import SendResult
+
+        sent["body"] = body
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+
+    provider = FakeProvider(responses=[json.dumps({"intent": "policy"})])
+    monkeypatch.setattr("app.core.conversation.active_llm", _fake_active_llm(provider))
+
+    async def exploding_run(*args, **kwargs):
+        raise KeyError("personality")
+
+    monkeypatch.setattr("app.agents.policy.run", exploding_run)
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.crash1",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "what is your return policy?"},
+            }
+        )
+    ).encode()
+
+    with caplog.at_level(logging.ERROR, logger="app.core.conversation"):
+        resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert "team" in str(sent.get("body", ""))  # the fixed error_fallback copy went out
+    assert "KeyError" in caplog.text
+    conversation_id = await c.conversations.get_or_create("919999999999")
+    messages = await c.conversations.recent_messages(conversation_id, 10)
+    assert len(messages) == 2  # the turn is still persisted, not lost
+
+
+async def test_post_text_event_agent_crash_in_shadow_mode_does_not_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The degraded reply goes through the same send_mode gates as a normal reply."""
+    called = {"sent": False}
+
+    async def fake_send_text(*args, **kwargs):
+        from app.channels.whatsapp_sender import SendResult
+
+        called["sent"] = True
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+
+    provider = FakeProvider(responses=[json.dumps({"intent": "policy"})])
+    monkeypatch.setattr("app.core.conversation.active_llm", _fake_active_llm(provider))
+
+    async def exploding_run(*args, **kwargs):
+        raise KeyError("personality")
+
+    monkeypatch.setattr("app.agents.policy.run", exploding_run)
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    await save_controls(get_container().config, AdminControls(send_mode="shadow"))
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.crash2",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "what is your return policy?"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert called["sent"] is False
+
+
 async def test_post_text_event_timeout_is_caught_and_logged(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

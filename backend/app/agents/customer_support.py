@@ -1,15 +1,16 @@
-from datetime import datetime, timedelta
-
-from app.agents.base import AgentContext, AgentReply, extract_reply_text, personality_for
+from app.agents.base import (
+    AgentContext,
+    AgentReply,
+    extract_json_blob,
+    extract_reply_text,
+    personality_for,
+)
 from app.channels.copy import copy_for
 from app.providers.base import Message, ProviderError
-from app.store.base import ConversationStore
 
 HANDOFF_MESSAGE = (
     "I'm connecting you with our team -- they'll continue helping you right here in this chat."
 )
-
-_HANDOFF_WINDOW = timedelta(hours=24)
 
 _HUMAN_REQUEST_PHRASES = (
     "talk to a human",
@@ -26,10 +27,14 @@ _HUMAN_REQUEST_PHRASES = (
 _SYSTEM_TEMPLATE = """{personality}
 
 The customer's message didn't clearly match order tracking, product search, policy, or
-recommendations -- help with greetings, small talk, or general questions as best you can. If
-you cannot help, say so honestly.
+recommendations -- help with greetings, small talk, or general questions as best you can.
 
-Respond with STRICT JSON only, no other text: {{"reply": "<your reply to the customer>"}}
+You get ONE attempt. If you cannot genuinely resolve what the customer needs -- or if they
+ask to speak to a person, in any language -- do not try to persuade them to stay with you:
+set "handoff" to true and a teammate will take over this same chat.
+
+Respond with STRICT JSON only, no other text:
+{{"reply": "<your reply to the customer>", "handoff": <true or false>}}
 """
 
 
@@ -38,39 +43,35 @@ def _wants_human(text: str) -> bool:
     return any(phrase in lowered for phrase in _HUMAN_REQUEST_PHRASES)
 
 
-async def _already_attempted_recently(
-    store: ConversationStore, conversation_id: int, now: datetime
-) -> bool:
-    attempted_at = await store.get_handoff_attempted_at(conversation_id)
-    if attempted_at is None:
+def _model_asked_for_handoff(data: dict[str, object] | None) -> bool:
+    """Read the model's own ``handoff`` judgment, strictly.
+
+    ``bool("false")`` is True, so a model that emits the flag as a string must be compared by
+    value -- anything that is not a real true never escalates by accident.
+    """
+    if data is None:
         return False
-    return (now - attempted_at) < _HANDOFF_WINDOW
+    value = data.get("handoff")
+    if isinstance(value, bool):
+        return value
+    return isinstance(value, str) and value.strip().lower() == "true"
 
 
-async def _handoff(
-    store: ConversationStore, conversation_id: int, now: datetime, text: str
-) -> AgentReply:
-    await store.pause_until(conversation_id, now + _HANDOFF_WINDOW)
-    return AgentReply(text=text, handoff=True)
+async def run(context: AgentContext) -> AgentReply:
+    """One AI attempt, then handoff -- no second attempt, no persuasion (design spec).
 
+    An explicit English request for a person is matched deterministically and hands off
+    immediately, skipping the LLM call entirely. Everything else gets exactly one attempt: if
+    the model judges it cannot resolve the issue it returns ``handoff: true`` itself, which is
+    how a Hindi/Hinglish/Gujarati request the phrase list cannot match still escalates. A
+    provider failure, or the model's own safe-fallback degradation, is "could not help" too.
 
-async def run(
-    context: AgentContext, store: ConversationStore, conversation_id: int, now: datetime
-) -> AgentReply:
-    """One AI attempt per conversation window, then immediate handoff (client decision,
-    round 3 2026-08-06). A second explicit human request within the window skips the LLM
-    call entirely -- deterministic, no persuasion attempted. Any provider failure, or the
-    LLM's own safe-fallback degradation, is also treated as "could not help" -> handoff.
+    Setting the conversation pause is NOT this agent's job -- it returns ``handoff`` and
+    ``core.conversation`` applies the same pause for whichever agent asked for it.
     """
     fallback = copy_for("error_fallback", "en")
-    wants_human = _wants_human(context.user_text)
-    already_attempted = await _already_attempted_recently(store, conversation_id, now)
-
-    if wants_human and already_attempted:
-        return await _handoff(store, conversation_id, now, HANDOFF_MESSAGE)
-
-    if wants_human and not already_attempted:
-        await store.mark_handoff_attempted(conversation_id, now)
+    if _wants_human(context.user_text):
+        return AgentReply(text=HANDOFF_MESSAGE, handoff=True)
 
     system_prompt = _SYSTEM_TEMPLATE.format(personality=personality_for(context))
     messages = [
@@ -87,9 +88,9 @@ async def run(
             extra_params=context.extra_params,
         )
     except ProviderError:
-        return await _handoff(store, conversation_id, now, f"{fallback} {HANDOFF_MESSAGE}")
+        return AgentReply(text=f"{fallback} {HANDOFF_MESSAGE}", handoff=True)
 
     reply = extract_reply_text(result.text, fallback)
-    if reply == fallback:
-        return await _handoff(store, conversation_id, now, f"{reply} {HANDOFF_MESSAGE}")
+    if reply == fallback or _model_asked_for_handoff(extract_json_blob(result.text)):
+        return AgentReply(text=f"{reply} {HANDOFF_MESSAGE}", handoff=True)
     return AgentReply(text=reply)

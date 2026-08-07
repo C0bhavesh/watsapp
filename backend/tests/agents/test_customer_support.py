@@ -1,9 +1,8 @@
-from datetime import UTC, datetime, timedelta
+import json
 
 from app.agents.base import AgentContext
-from app.agents.customer_support import run
+from app.agents.customer_support import HANDOFF_MESSAGE, run
 from app.providers.base import CompletionResult, Message, ProviderError, ProviderErrorKind
-from app.store.memory import InMemoryConversationStore
 
 
 class _FixedProvider:
@@ -44,65 +43,60 @@ def _context(provider: _FixedProvider, user_text: str) -> AgentContext:
 
 
 async def test_greeting_replies_normally_no_handoff() -> None:
-    store = InMemoryConversationStore()
-    conversation_id = await store.get_or_create("919999999999")
-    provider = _FixedProvider(text='{"reply": "Hello! How can I help you today?"}')
-    result = await run(_context(provider, "hi"), store, conversation_id, datetime.now(UTC))
-    assert result.handoff is False
-    assert await store.get_paused_until(conversation_id) is None
-
-
-async def test_first_human_request_gets_one_attempt_not_immediate_handoff() -> None:
-    store = InMemoryConversationStore()
-    conversation_id = await store.get_or_create("919999999999")
-    provider = _FixedProvider(text='{"reply": "I will do my best to help -- what do you need?"}')
-    result = await run(
-        _context(provider, "I want to talk to a human"), store, conversation_id, datetime.now(UTC)
+    provider = _FixedProvider(
+        text='{"reply": "Hello! How can I help you today?", "handoff": false}'
     )
+    result = await run(_context(provider, "hi"))
     assert result.handoff is False
-    assert await store.get_handoff_attempted_at(conversation_id) is not None
-    assert await store.get_paused_until(conversation_id) is None
-    assert provider.called is True
+    assert result.text == "Hello! How can I help you today?"
 
 
-async def test_second_human_request_triggers_immediate_handoff_no_llm_call() -> None:
-    store = InMemoryConversationStore()
-    conversation_id = await store.get_or_create("919999999999")
-    now = datetime.now(UTC)
-    await store.mark_handoff_attempted(conversation_id, now - timedelta(minutes=5))
-    provider = _FixedProvider(text="should not be called for a decisive second ask")
-    result = await run(_context(provider, "I need a real person"), store, conversation_id, now)
+async def test_first_human_request_hands_off_immediately_without_calling_the_llm() -> None:
+    """No free first attempt: the first explicit ask for a person hands off (design spec)."""
+    provider = _FixedProvider(text="should not be called")
+    result = await run(_context(provider, "I want to talk to a human"))
     assert result.handoff is True
-    paused = await store.get_paused_until(conversation_id)
-    assert paused is not None and paused > now
+    assert result.text == HANDOFF_MESSAGE
     assert provider.called is False
 
 
-async def test_provider_failure_triggers_handoff() -> None:
-    store = InMemoryConversationStore()
-    conversation_id = await store.get_or_create("919999999999")
-    provider = _FixedProvider(raises=ProviderError("down", ProviderErrorKind.TIMEOUT))
-    result = await run(_context(provider, "hi"), store, conversation_id, datetime.now(UTC))
+async def test_model_judged_handoff_is_honored() -> None:
+    """The multilingual path: the phrase list misses "मुझे किसी व्यक्ति से बात करनी है",
+    but the model's own handoff judgment still escalates."""
+    provider = _FixedProvider(
+        text=json.dumps({"reply": "Main aapko team se connect karta hoon.", "handoff": True})
+    )
+    result = await run(_context(provider, "मुझे किसी व्यक्ति से बात करनी है"))
     assert result.handoff is True
-    assert await store.get_paused_until(conversation_id) is not None
+    assert "Main aapko team se connect karta hoon." in result.text
+    assert HANDOFF_MESSAGE in result.text
 
 
-async def test_handoff_attempt_outside_24h_window_resets() -> None:
-    store = InMemoryConversationStore()
-    conversation_id = await store.get_or_create("919999999999")
-    now = datetime.now(UTC)
-    await store.mark_handoff_attempted(conversation_id, now - timedelta(hours=25))
-    provider = _FixedProvider(text='{"reply": "Sure, let me help."}')
-    result = await run(_context(provider, "talk to a human"), store, conversation_id, now)
-    assert result.handoff is False
-    assert provider.called is True
+async def test_model_handoff_flag_as_string_true_is_honored() -> None:
+    provider = _FixedProvider(text='{"reply": "Let me get someone.", "handoff": "true"}')
+    assert (await run(_context(provider, "kisi se baat karwao"))).handoff is True
+
+
+async def test_model_handoff_flag_as_string_false_does_not_hand_off() -> None:
+    provider = _FixedProvider(text='{"reply": "Happy to help!", "handoff": "false"}')
+    assert (await run(_context(provider, "hi"))).handoff is False
+
+
+async def test_missing_handoff_key_does_not_hand_off() -> None:
+    provider = _FixedProvider(text='{"reply": "Happy to help!"}')
+    assert (await run(_context(provider, "hi"))).handoff is False
+
+
+async def test_provider_failure_triggers_handoff() -> None:
+    provider = _FixedProvider(raises=ProviderError("down", ProviderErrorKind.TIMEOUT))
+    result = await run(_context(provider, "hi"))
+    assert result.handoff is True
+    assert HANDOFF_MESSAGE in result.text
 
 
 async def test_safe_fallback_degradation_also_triggers_handoff() -> None:
     """The LLM's own fallback (unparseable/broken JSON reply) is "could not help" too."""
-    store = InMemoryConversationStore()
-    conversation_id = await store.get_or_create("919999999999")
     provider = _FixedProvider(text="```{not valid json")
-    result = await run(_context(provider, "hi"), store, conversation_id, datetime.now(UTC))
+    result = await run(_context(provider, "hi"))
     assert result.handoff is True
-    assert await store.get_paused_until(conversation_id) is not None
+    assert HANDOFF_MESSAGE in result.text

@@ -654,6 +654,60 @@ async def test_post_text_event_dispatches_to_correct_agent(
     assert sent["body"] == f"stub-reply-for-{intent}"
 
 
+async def test_post_text_event_agent_handoff_pauses_the_conversation_for_any_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AgentReply.handoff must be honored for EVERY agent, not just customer_support --
+    that is what lets a model-judged Hindi/Gujarati "get me a person" escalate."""
+    from datetime import UTC, datetime
+
+    from app.agents.base import AgentReply
+
+    sent: dict[str, object] = {}
+
+    async def fake_send_text(http, cfg, to, body, timeout=20.0):
+        from app.channels.whatsapp_sender import SendResult
+
+        sent["body"] = body
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+
+    provider = FakeProvider(responses=[json.dumps({"intent": "policy"})])
+    monkeypatch.setattr("app.core.conversation.active_llm", _fake_active_llm(provider))
+
+    async def fake_policy_run(*args, **kwargs):
+        return AgentReply(text="Let me bring in a teammate.", handoff=True)
+
+    monkeypatch.setattr("app.agents.policy.run", fake_policy_run)
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.handoff1",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "this is not going well"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert sent["body"] == "Let me bring in a teammate."  # the reply still goes out
+    conversation_id = await c.conversations.get_or_create("919999999999")
+    paused = await c.conversations.get_paused_until(conversation_id)
+    assert paused is not None and paused > datetime.now(UTC)
+    assert await c.conversations.get_handoff_attempted_at(conversation_id) is not None
+
+
 async def test_post_text_event_allowlist_mode_sends_to_allowed_number(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

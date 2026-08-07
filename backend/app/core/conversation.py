@@ -12,7 +12,7 @@ an orchestration module, not an oversight.
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from app.admin.controls import load_controls
 from app.agents import customer_support, order_tracking, policy, product_search, recommendations
@@ -45,10 +45,12 @@ logger = logging.getLogger("app.core.conversation")
 # reply, and nothing is logged. A caught TimeoutError here at least leaves a WARNING.
 TURN_TIMEOUT_SECONDS = 55.0
 
+# How long the AI stays silent after a handoff, so a human can take the conversation over in
+# the same chat. Self-expiring -- no admin action is needed to resume (design spec).
+HANDOFF_PAUSE_WINDOW = timedelta(hours=24)
 
-async def _run_agent(
-    context: AgentContext, intent: Intent, c: Container, conversation_id: int, now: datetime
-) -> AgentReply:
+
+async def _run_agent(context: AgentContext, intent: Intent, c: Container) -> AgentReply:
     if intent == "order_tracking":
         return await order_tracking.run(context)
     if intent == "product_search":
@@ -57,7 +59,7 @@ async def _run_agent(
         return await policy.run(context)
     if intent == "recommendations":
         return await recommendations.run(context, c.shopify)
-    return await customer_support.run(context, c.conversations, conversation_id, now)
+    return await customer_support.run(context)
 
 
 async def run_turn(c: Container, event: InboundText) -> None:
@@ -99,6 +101,7 @@ async def _run_turn(c: Container, event: InboundText) -> None:
     is_vip = order_count >= controls.vip_order_count_threshold
 
     llm = await active_llm(c.settings, c.config)
+    handoff = False
     if llm is None:
         reply_text = copy_for("error_fallback", "en")
     else:
@@ -121,13 +124,21 @@ async def _run_turn(c: Container, event: InboundText) -> None:
         intent = await classify_intent(
             provider, model, api_key, event.text, extra_params=extra_params
         )
-        agent_reply = await _run_agent(context, intent, c, conversation_id, now)
+        agent_reply = await _run_agent(context, intent, c)
         reply_text = strip_markdown(agent_reply.text)
+        handoff = agent_reply.handoff
 
     if not reply_text.strip():
         # A completion that's e.g. only a code fence, or an agent's own degraded reply, can
         # strip down to nothing -- never persist/send a blank WhatsApp message.
         reply_text = copy_for("error_fallback", "en")
+
+    if handoff:
+        # Honored for EVERY agent, not just customer_support: a model-judged "I can't resolve
+        # this" (the multilingual path the English phrase list cannot match) escalates from
+        # whichever specialist answered. The reply itself is still sent below.
+        await c.conversations.pause_until(conversation_id, now + HANDOFF_PAUSE_WINDOW)
+        await c.conversations.mark_handoff_attempted(conversation_id, now)
 
     await persist_turn(c.conversations, conversation_id, event.text, reply_text)
 

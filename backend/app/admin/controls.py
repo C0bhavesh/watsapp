@@ -29,6 +29,12 @@ class TagLists(BaseModel):
     pending: list[_Tag] = Field(default_factory=list, max_length=10)
     confirmed: list[_Tag] = Field(default_factory=list, max_length=10)
     cancelled: list[_Tag] = Field(default_factory=list, max_length=10)
+    # Provisional tag written when a cancel is REQUESTED (before Shopify confirms cancelledAt);
+    # the final `cancelled` tag is applied by the reconcile job once cancellation is confirmed.
+    # Defaults so an older stored `tags` JSON without this key validates (migration-safe).
+    cancel_requested: list[_Tag] = Field(
+        default_factory=lambda: ["bot-cancel-requested"], max_length=10
+    )
 
 
 class AdminControls(BaseModel):

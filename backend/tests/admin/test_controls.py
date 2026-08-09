@@ -48,6 +48,7 @@ def test_put_roundtrip(client: TestClient) -> None:
             "pending": ["COD pending"],
             "confirmed": ["confirmed", "Confirmed by wati"],
             "cancelled": ["cancelled", "Cancel by wati"],
+            "cancel_requested": ["bot-cancel-requested"],
         },
         "default_language": "hi",
         "push_staleness_hours": 12,

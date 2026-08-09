@@ -5,7 +5,9 @@ ownership is re-checked live before any mutation, cancel is two-phase, and no ha
 escapes. Sends are captured (no real Meta call); Shopify is a fake that records mutations.
 """
 
-from dataclasses import dataclass
+import asyncio
+import json
+from dataclasses import dataclass, replace
 
 import pytest
 
@@ -48,11 +50,13 @@ class FakeShopify:
         get_raises: Exception | None = None,
         add_tags_raises: Exception | None = None,
         cancel_raises: Exception | None = None,
+        cancel_gate: asyncio.Event | None = None,
     ) -> None:
         self._order = order
         self.get_raises = get_raises
         self.add_tags_raises = add_tags_raises
         self.cancel_raises = cancel_raises
+        self.cancel_gate = cancel_gate
         self.get_calls: list[str] = []
         self.add_tags_calls: list[tuple[str, list[str]]] = []
         self.cancel_calls: list[str] = []
@@ -64,14 +68,25 @@ class FakeShopify:
         return self._order if (self._order is not None and self._order.gid == gid) else None
 
     async def add_tags(self, auth: object, tags: object) -> None:
-        self.add_tags_calls.append((auth.order.gid, list(tags)))  # type: ignore[attr-defined]
+        gid = auth.order.gid  # type: ignore[attr-defined]
+        tag_list = list(tags)  # type: ignore[call-overload]
+        self.add_tags_calls.append((gid, tag_list))
         if self.add_tags_raises:
             raise self.add_tags_raises
+        # Real Shopify tagsAdd is synchronous: reflect the tag onto the stored order so a later
+        # live re-fetch (a racing second tap) sees it and the cancel idempotency check fires.
+        if self._order is not None and self._order.gid == gid:
+            new_tags = self._order.tags + tuple(t for t in tag_list if t not in self._order.tags)
+            self._order = replace(self._order, tags=new_tags)
 
     async def cancel_order(
         self, auth: object, *, reason: str = "CUSTOMER", restock: bool = True
     ) -> CancelRequested:
         self.cancel_calls.append(auth.order.gid)  # type: ignore[attr-defined]
+        # Only the FIRST cancel blocks (simulating an in-flight async orderCancel), letting a
+        # racing second tap run to completion while the first is still mid-flight.
+        if self.cancel_gate is not None and len(self.cancel_calls) == 1:
+            await self.cancel_gate.wait()
         if self.cancel_raises:
             raise self.cancel_raises
         return CancelRequested(job_id="gid://shopify/Job/1")
@@ -112,7 +127,13 @@ def sends(monkeypatch: pytest.MonkeyPatch) -> Sends:
     return captured
 
 
-async def _container(master_key: str, shopify: FakeShopify) -> FakeContainer:
+async def _container(
+    master_key: str,
+    shopify: FakeShopify,
+    *,
+    send_mode: str = "live",
+    allowlist: list[str] | None = None,
+) -> FakeContainer:
     config = ConfigService(InMemoryConfigRepo(), SecretVault(master_key))
     await config.set_secret("whatsapp:access_token", "tok")
     await config.set_secret("whatsapp:app_secret", "sec")
@@ -120,6 +141,11 @@ async def _container(master_key: str, shopify: FakeShopify) -> FakeContainer:
     await config.set_plain("whatsapp:phone_number_id", "1298805403309058")
     await config.set_plain("whatsapp:waba_id", "2454816495000045")
     await config.set_plain("whatsapp:api_version", "v23.0")
+    # The button-tap kill switch reads these. Existing tests default to "live" (full behavior);
+    # shadow/allowlist tests pass an explicit mode so a suppressed tap has NO live effect.
+    await config.set_plain("send_mode", send_mode)
+    if allowlist is not None:
+        await config.set_plain("allowlist_phones", json.dumps(allowlist))
     return FakeContainer(
         config=config, http=object(), shopify=shopify, ingest=InMemoryIngestStore()
     )
@@ -158,6 +184,55 @@ async def test_unknown_gid_refused(master_key: str, sends: Sends) -> None:
     assert shopify.add_tags_calls == [] and shopify.cancel_calls == []
     assert c.ingest.order_actions == []
     assert sends.last_text == copy_for("not_found", "en")
+
+
+# --- kill switch (ADR-002): shadow / allowlist gate a tap the same way the drain gates a push ---
+
+async def test_shadow_mode_confirm_suppressed_no_mutation_no_send(
+    master_key: str, sends: Sends
+) -> None:
+    shopify = FakeShopify(order=_order())
+    c = await _container(master_key, shopify, send_mode="shadow")
+    await dispatch_button(c, _button(f"order:confirm:{GID}"))
+    assert shopify.get_calls == []  # suppressed BEFORE the live re-fetch -> nothing leaks
+    assert shopify.add_tags_calls == []
+    assert c.ingest.order_actions == []
+    assert sends.texts == [] and sends.buttons == []
+
+
+async def test_shadow_mode_cancel_confirm_suppressed_no_cancel_no_send(
+    master_key: str, sends: Sends
+) -> None:
+    shopify = FakeShopify(order=_order())
+    c = await _container(master_key, shopify, send_mode="shadow")
+    await dispatch_button(c, _interactive(f"order:cancel:confirm:{GID}"))
+    assert shopify.cancel_calls == []
+    assert shopify.get_calls == []
+    assert c.ingest.order_actions == []
+    assert sends.texts == [] and sends.buttons == []
+
+
+async def test_allowlist_miss_suppressed_no_mutation_no_send(
+    master_key: str, sends: Sends
+) -> None:
+    shopify = FakeShopify(order=_order())
+    c = await _container(
+        master_key, shopify, send_mode="allowlist", allowlist=["+911111111111"]
+    )
+    await dispatch_button(c, _button(f"order:confirm:{GID}"))
+    assert shopify.add_tags_calls == []
+    assert shopify.get_calls == []
+    assert c.ingest.order_actions == []
+    assert sends.texts == [] and sends.buttons == []
+
+
+async def test_allowlist_hit_full_confirm_behavior(master_key: str, sends: Sends) -> None:
+    shopify = FakeShopify(order=_order())
+    c = await _container(master_key, shopify, send_mode="allowlist", allowlist=[OWNER_E164])
+    await dispatch_button(c, _button(f"order:confirm:{GID}"))
+    assert shopify.add_tags_calls == [(GID, ["confirmed"])]
+    assert c.ingest._mapping_status[GID] == "confirmed"
+    assert sends.last_text == copy_for("confirm_success", "en")
 
 
 # --- confirm ---
@@ -275,14 +350,39 @@ async def test_cancel_confirm_user_errors_records_and_replies_failed(
     c = await _container(master_key, shopify)
     await dispatch_button(c, _interactive(f"order:cancel:confirm:{GID}"))
     assert shopify.cancel_calls == [GID]
-    assert shopify.add_tags_calls == []  # provisional tag NOT applied on failure
-    assert c.ingest._mapping_status.get(GID) is None  # status NOT advanced
+    # FINDING 4: state is advanced BEFORE the (async) orderCancel, so the provisional tag + status
+    # are already applied when the cancel then fails. The order stays cancel_requested (reconcile
+    # leaves it alone until cancelledAt appears); the customer is told cancel_failed.
+    assert shopify.add_tags_calls == [(GID, ["bot-cancel-requested"])]
+    assert c.ingest._mapping_status.get(GID) == "cancel_requested"
     action = c.ingest.order_actions[-1]
     assert action["action"] == "cancel_requested"
     assert action["result"] == "error"
     assert action["user_errors_json"] is not None
     assert "fulfilled" in action["user_errors_json"].lower()
     assert sends.last_text == copy_for("cancel_failed", "en")
+
+
+async def test_cancel_confirm_race_two_taps_cancel_at_most_once(
+    master_key: str, sends: Sends
+) -> None:
+    # Two racing cancel-confirm taps (distinct message-ids). The first advances state (writes the
+    # provisional tag) BEFORE its orderCancel, so the second tap's live re-fetch — which runs while
+    # the first cancel is still in flight — sees the marker and refuses a duplicate orderCancel.
+    gate = asyncio.Event()
+    shopify = FakeShopify(order=_order(), cancel_gate=gate)
+    c = await _container(master_key, shopify)
+    first = asyncio.create_task(
+        dispatch_button(c, _interactive(f"order:cancel:confirm:{GID}", mid="m1"))
+    )
+    while not shopify.cancel_calls:  # let the first tap's orderCancel become "in flight"
+        await asyncio.sleep(0)
+    # The second tap runs to completion while the first cancel is still blocked on the gate.
+    await dispatch_button(c, _interactive(f"order:cancel:confirm:{GID}", mid="m2"))
+    gate.set()
+    await first
+    assert shopify.cancel_calls == [GID]  # cancelled at most once despite two taps
+    assert sends.last_text == copy_for("cancel_requested", "en")  # 2nd tap: already requested
 
 
 # --- garbage / errors never escape ---
@@ -306,8 +406,43 @@ async def test_shopify_error_degrades_to_fallback_no_escape(
     # Must not raise — the webhook has to still ack 200.
     await dispatch_button(c, _button(f"order:confirm:{GID}"))
     assert sends.last_text == copy_for("error_fallback", "en")
-    assert c.ingest.order_actions == []  # tag failed -> nothing recorded/advanced
-    assert c.ingest._mapping_status.get(GID) is None
+    # FINDING 3 (audit symmetry): a FAILED confirm mutation is still audited, like a success —
+    # every ATTEMPTED mutation leaves an order_actions row.
+    action = c.ingest.order_actions[-1]
+    assert action["action"] == "confirm"
+    assert action["result"] == "error"
+    assert action["user_errors_json"] is None  # transport error carries no structured detail
+    assert c.ingest._mapping_status.get(GID) is None  # status NOT advanced on failure
+
+
+async def test_confirm_graphql_error_records_error_row_with_detail(
+    master_key: str, sends: Sends
+) -> None:
+    err = ShopifyGraphQLError(["tag limit exceeded"], ("TOO_MANY_TAGS",))
+    shopify = FakeShopify(order=_order(), add_tags_raises=err)
+    c = await _container(master_key, shopify)
+    await dispatch_button(c, _button(f"order:confirm:{GID}"))
+    action = c.ingest.order_actions[-1]
+    assert action["action"] == "confirm"
+    assert action["result"] == "error"
+    assert action["user_errors_json"] is not None
+    assert "tag limit" in action["user_errors_json"].lower()
+    assert sends.last_text == copy_for("error_fallback", "en")
+
+
+async def test_cancel_confirm_transport_error_records_error_row(
+    master_key: str, sends: Sends
+) -> None:
+    # A transport (non-GraphQL) ShopifyError on the cancel mutation must ALSO be audited — the
+    # cancel handler only catches GraphQL, so this lands in the outer handler, which records it.
+    shopify = FakeShopify(order=_order(), cancel_raises=ShopifyUnavailable("network down"))
+    c = await _container(master_key, shopify)
+    await dispatch_button(c, _interactive(f"order:cancel:confirm:{GID}"))
+    assert shopify.cancel_calls == [GID]  # the mutation was attempted
+    action = c.ingest.order_actions[-1]
+    assert action["action"] == "cancel_requested"
+    assert action["result"] == "error"
+    assert sends.last_text == copy_for("error_fallback", "en")
 
 
 # --- language ---

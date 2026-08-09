@@ -343,6 +343,138 @@ async def test_post_button_tap_handler_raises_still_acks_200(
     assert resp.json()["processed"] == 1
 
 
+class _ButtonFakeShopify:
+    """Captures the mutations the REAL dispatch_button performs (get_order is unused because
+    resolve_by_gid is stubbed)."""
+
+    def __init__(self) -> None:
+        self.add_tags_calls: list[str] = []
+        self.cancel_calls: list[str] = []
+
+    async def add_tags(self, auth: object, tags: object) -> None:
+        self.add_tags_calls.append(auth.order.gid)  # type: ignore[attr-defined]
+
+    async def cancel_order(
+        self, auth: object, *, reason: str = "CUSTOMER", restock: bool = True
+    ) -> object:
+        from app.shopify.models import CancelRequested
+
+        self.cancel_calls.append(auth.order.gid)  # type: ignore[attr-defined]
+        return CancelRequested(job_id="gid://shopify/Job/1")
+
+
+def _wire_real_dispatch(
+    monkeypatch: pytest.MonkeyPatch, order: object
+) -> tuple[_ButtonFakeShopify, list[str], list[tuple[str, str]]]:
+    """Route the REAL dispatch_button through a fake Shopify + a resolve stub + captured sends.
+
+    Returns (fake_shopify, resolve_calls, sends). resolve_calls stays empty when the kill switch
+    suppresses the tap (suppression happens BEFORE the live re-fetch).
+    """
+    fake = _ButtonFakeShopify()
+    monkeypatch.setattr(get_container(), "shopify", fake)
+
+    resolve_calls: list[str] = []
+
+    async def fake_resolve_by_gid(shopify: object, wa_id: str, gid: str) -> object:
+        resolve_calls.append(gid)
+        return order
+
+    monkeypatch.setattr("app.core.order_actions.resolve_by_gid", fake_resolve_by_gid)
+
+    sends: list[tuple[str, str]] = []
+
+    async def fake_send_text(http, cfg, to, body, timeout=20.0):
+        from app.channels.whatsapp_sender import SendResult
+
+        sends.append((to, body))
+        return SendResult(ok=True, status_code=200, wamid="w", error=None)
+
+    async def fake_send_buttons(http, cfg, to, body_text, buttons, timeout=20.0):
+        from app.channels.whatsapp_sender import SendResult
+
+        sends.append((to, body_text))
+        return SendResult(ok=True, status_code=200, wamid="w", error=None)
+
+    monkeypatch.setattr("app.core.order_actions.send_text", fake_send_text)
+    monkeypatch.setattr("app.core.order_actions.send_buttons", fake_send_buttons)
+    return fake, resolve_calls, sends
+
+
+async def test_post_button_tap_shadow_mode_no_mutation_no_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # shadow reaches dispatch_button (the webhook's off-gate lets it through), but the kill switch
+    # inside dispatch_button suppresses it: no re-fetch, no mutation, no reply.
+    fake, resolve_calls, sends = _wire_real_dispatch(
+        monkeypatch, _owned_order("gid://shopify/Order/1", "tavas1")
+    )
+    await _set_send_mode("shadow")
+    body = _button_body("order:confirm:gid://shopify/Order/1", "wamid.kill1")
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+    assert resp.status_code == 200
+    assert resp.json()["processed"] == 1  # still deduped/acked
+    assert resolve_calls == []
+    assert fake.add_tags_calls == []
+    assert sends == []
+
+
+async def test_post_button_tap_allowlist_miss_no_mutation_no_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake, resolve_calls, sends = _wire_real_dispatch(
+        monkeypatch, _owned_order("gid://shopify/Order/1", "tavas1")
+    )
+    from app.admin.controls import AdminControls, save_controls
+
+    # A DIFFERENT number is allowlisted; the tapper 919999999999 is not.
+    await save_controls(
+        get_container().config,
+        AdminControls(send_mode="allowlist", allowlist_phones=["+911111111111"]),
+    )
+    body = _interactive_body("order:cancel:confirm:gid://shopify/Order/1", "wamid.kill2")
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+    assert resp.status_code == 200
+    assert resolve_calls == []
+    assert fake.cancel_calls == []
+    assert sends == []
+
+
+async def test_post_button_tap_allowlist_hit_full_confirm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake, resolve_calls, sends = _wire_real_dispatch(
+        monkeypatch, _owned_order("gid://shopify/Order/1", "tavas1")
+    )
+    from app.admin.controls import AdminControls, save_controls
+
+    await save_controls(
+        get_container().config,
+        AdminControls(send_mode="allowlist", allowlist_phones=["+919999999999"]),
+    )
+    body = _button_body("order:confirm:gid://shopify/Order/1", "wamid.kill3")
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+    assert resp.status_code == 200
+    assert resolve_calls == ["gid://shopify/Order/1"]  # allowlist hit -> re-fetch runs
+    assert fake.add_tags_calls == ["gid://shopify/Order/1"]  # and the mutation fires
+    assert len(sends) == 1  # a confirm reply goes out
+
+
+async def test_post_button_tap_live_mode_full_confirm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake, resolve_calls, sends = _wire_real_dispatch(
+        monkeypatch, _owned_order("gid://shopify/Order/1", "tavas1")
+    )
+    await _set_send_mode("live")
+    body = _button_body("order:confirm:gid://shopify/Order/1", "wamid.kill4")
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+    assert resp.status_code == 200
+    assert resolve_calls == ["gid://shopify/Order/1"]
+    assert fake.add_tags_calls == ["gid://shopify/Order/1"]
+    assert len(sends) == 1
+
+
 async def test_post_garbage_body_ignored() -> None:
     body = b"not-json"
     resp = await post(body, {"X-Hub-Signature-256": sign(body)})

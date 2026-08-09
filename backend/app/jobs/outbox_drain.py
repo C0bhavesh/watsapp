@@ -34,7 +34,10 @@ _CLAIM_LIMIT = 25
 # error `code` field, surfaced by whatsapp_sender._safe_error as "code=<n>" in SendResult.error
 # (the HTTP status for all of them is 400, so it cannot distinguish them; the Meta code can).
 _UNDELIVERABLE_CODES = {131026, 131047, 131049}
-_META_CODE_RE = re.compile(r"code=(\d+)")
+# Anchored to the TOP-LEVEL `code=` field only: _safe_error renders it as the FIRST part or after
+# a "; " separator, so requiring `^` or "; " before `code=` stops a substring match inside e.g.
+# `error_subcode=131026` (a different field) being misread as the top-level send-error code.
+_META_CODE_RE = re.compile(r"(?:^|; )code=(\d+)")
 
 
 @dataclass(frozen=True)

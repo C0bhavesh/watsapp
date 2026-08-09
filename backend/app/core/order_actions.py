@@ -19,6 +19,7 @@ from app.channels.whatsapp_config import WhatsAppConfig, load_whatsapp_config
 from app.channels.whatsapp_inbound import InboundButton, InboundInteractive
 from app.channels.whatsapp_sender import WhatsAppSendError, send_buttons, send_text
 from app.core.order_resolver import resolve_by_gid
+from app.core.send_policy import send_decision
 from app.deps import Container
 from app.shopify.errors import ShopifyError, ShopifyGraphQLError
 from app.shopify.models import AuthorizedOrder, Order
@@ -33,6 +34,25 @@ Event = InboundButton | InboundInteractive
 # (fulfillment_status in {None, "UNFULFILLED"} = eligible). A false-refuse routes the customer to
 # support (safe); a false-cancel of an already-shipped order is not.
 _CANCELLABLE_FULFILLMENT: frozenset[str | None] = frozenset({None, "UNFULFILLED"})
+
+# Parsed payload action -> the order_actions `action` label recorded when its mutation FAILS in the
+# outer handler. Only the two actions that actually ATTEMPT a Shopify mutation are audited here; the
+# first cancel tap (asks only) and the abort never mutate, so a failure there records nothing.
+_MUTATION_AUDIT_ACTION: dict[str, str] = {
+    "confirm": "confirm",
+    "cancel_confirm": "cancel_requested",
+}
+
+
+def _shopify_error_detail(exc: ShopifyError) -> str | None:
+    """A secret-free audit detail: a GraphQL error's structured messages/codes, else None.
+
+    A transport ShopifyError's raw text is never persisted (it can carry network/URL noise); only
+    a ``ShopifyGraphQLError``'s already-structured, secret-free messages/codes become the detail.
+    """
+    if isinstance(exc, ShopifyGraphQLError):
+        return json.dumps({"messages": exc.messages, "codes": list(exc.codes)})
+    return None
 
 
 def _is_dispatched(order: Order) -> bool:
@@ -89,6 +109,16 @@ async def _safe_send_buttons(
 async def dispatch_button(c: Container, event: Event) -> None:
     """Deterministically handle a confirm/cancel button tap. Never raises."""
     controls = await load_controls(c.config)
+    # Kill switch (ADR-002) — the SINGLE source of truth for button taps, mirroring the outbox
+    # drain and the inbound conversation path. shadow, an allowlist miss, off, or any unknown mode
+    # all suppress: the tap has NO live effect (no resolve, no tagsAdd/orderCancel) AND NO outbound
+    # reply — consistent with the drain suppressing those same numbers' templates. Only a "send"
+    # decision (live, or an allowlist hit) proceeds to resolve + mutate + reply. Compute it before
+    # resolving so a suppressed tap never even re-fetches the order. (The webhook keeps its own
+    # off-gate too, defense in depth.)
+    if send_decision(controls.send_mode, controls.allowlist_phones, event.wa_id) == "suppress":
+        logger.info("button dispatch: suppressed by send policy; no live effect, no reply")
+        return
     cfg = await load_whatsapp_config(c.config)
     if cfg is None:
         logger.warning("button dispatch: whatsapp not configured; tap ignored")
@@ -120,10 +150,19 @@ async def dispatch_button(c: Container, event: Event) -> None:
             await _handle_cancel_confirm(c, cfg, event, auth, controls, lang, gid)
         else:  # cancel_abort
             await _safe_send_text(c, cfg, event.wa_id, copy_for("cancel_kept", lang))
-    except ShopifyError:
-        # A mutation/transport error mid-flow: tell the customer to retry; write nothing so a
-        # re-tap safely retries. Never raise (the webhook must still ack 200).
+    except ShopifyError as exc:
+        # A mutation/transport error mid-flow. Audit the ATTEMPTED mutation symmetrically — a
+        # FAILED confirm/cancel must leave an order_actions row too, not only successes — covering
+        # every ShopifyError subtype (GraphQL + transport), then tell the customer to retry. The
+        # cancel handler's own GraphQL branch records-and-returns, so a GraphQL cancel never reaches
+        # here (no double-write). Never raise (the webhook must still ack 200).
         logger.warning("button dispatch: shopify error for action=%s", action)
+        audit_action = _MUTATION_AUDIT_ACTION.get(action)
+        if audit_action is not None:
+            await c.ingest.record_order_action(
+                gid, audit_action, event.wa_id, event.message_id, "error",
+                _shopify_error_detail(exc),
+            )
         await _safe_send_text(c, cfg, event.wa_id, copy_for("error_fallback", lang))
     except Exception:
         logger.exception("button dispatch: unexpected error for action=%s", action)
@@ -186,6 +225,13 @@ async def _handle_cancel_confirm(
         # orderCancel — confirm the pending state instead (idempotency).
         await _safe_send_text(c, cfg, event.wa_id, copy_for("cancel_requested", lang))
         return
+    # Advance state BEFORE the (async) orderCancel: write the provisional tag + mapping status
+    # FIRST, so a racing second tap's live re-fetch sees the marker (above) and refuses a duplicate
+    # orderCancel. If cancel_order then fails, the order stays cancel_requested (the customer is
+    # told cancel_failed / retry); the reconcile job leaves it alone until Shopify confirms
+    # cancelledAt, and only then applies the final `cancelled` tag.
+    await _add_tags_best_effort(c, auth, controls.tags.cancel_requested)
+    await c.ingest.set_mapping_status(gid, "cancel_requested")
     try:
         await c.shopify.cancel_order(auth)
     except ShopifyGraphQLError as exc:
@@ -195,14 +241,9 @@ async def _handle_cancel_confirm(
         )
         await _safe_send_text(c, cfg, event.wa_id, copy_for("cancel_failed", lang))
         return
-    # Cancel accepted (async job). The provisional tag is best-effort — a tag failure must NOT
-    # reverse the outcome we report; the reconcile job applies the final `cancelled` tag once
-    # Shopify confirms cancelledAt.
-    await _add_tags_best_effort(c, auth, controls.tags.cancel_requested)
     await c.ingest.record_order_action(
         gid, "cancel_requested", event.wa_id, event.message_id, "ok", None
     )
-    await c.ingest.set_mapping_status(gid, "cancel_requested")
     await _safe_send_text(c, cfg, event.wa_id, copy_for("cancel_requested", lang))
 
 

@@ -177,6 +177,50 @@ async def test_undeliverable_meta_code(monkeypatch: pytest.MonkeyPatch) -> None:
     assert view.last_error_code == "131026"
 
 
+async def test_error_subcode_not_misread_as_undeliverable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An error string carrying only `error_subcode=131026` (no TOP-LEVEL `code=`) must NOT be
+    # classified undeliverable off a substring match inside `error_subcode` -> it retries.
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    gid = "gid://shopify/Order/1"
+    await _seed_row(gid)
+    sender = FakeSender(
+        SendResult(
+            ok=False, status_code=400, wamid=None,
+            error="type=OAuthException; error_subcode=131026; message=x",
+        )
+    )
+    _install_sender(monkeypatch, sender)
+
+    result = await run_outbox_drain(c)
+
+    assert result["undeliverable"] == 0
+    views = {v.dedupe_key: v for v in await c.ingest.recent_outbound(10)}
+    view = views[f"order_created:{gid}"]
+    assert view.state == "queued"  # retried, not terminally undeliverable
+    assert view.attempts == 1
+
+
+async def test_top_level_code_is_undeliverable(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The mirror case: a real top-level `code=131026` IS terminal (undeliverable).
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    gid = "gid://shopify/Order/1"
+    await _seed_row(gid)
+    sender = FakeSender(
+        SendResult(ok=False, status_code=400, wamid=None, error="code=131026; message=x")
+    )
+    _install_sender(monkeypatch, sender)
+
+    result = await run_outbox_drain(c)
+
+    assert result["undeliverable"] == 1
+    views = {v.dedupe_key: v for v in await c.ingest.recent_outbound(10)}
+    assert views[f"order_created:{gid}"].state == "undeliverable"
+
+
 async def test_retryable_code_bumps_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
     c = get_container()
     await save_controls(c.config, AdminControls(send_mode="live"))

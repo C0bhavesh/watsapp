@@ -60,6 +60,124 @@ _COPY: Final[dict[str, dict[str, str]]] = {
             "અથવા અમે તમને અમારી ટીમ સાથે જોડીશું."
         ),
     },
+    # --- Phase 5: deterministic confirm/cancel button-tap replies ---
+    "confirm_success": {
+        "en": "Thank you, your order is confirmed. We will ship it soon.",
+        "hi": "धन्यवाद, आपका ऑर्डर कन्फर्म हो गया है। हम इसे जल्द भेजेंगे।",
+        "hinglish": "Thank you, aapka order confirm ho gaya hai. Hum ise jaldi ship karenge.",
+        "gu": "આભાર, તમારો ઓર્ડર કન્ફર્મ થઈ ગયો છે. અમે તેને જલ્દી મોકલીશું.",
+    },
+    "already_confirmed": {
+        "en": "This order is already confirmed. There is nothing more to do.",
+        "hi": "यह ऑर्डर पहले ही कन्फर्म हो चुका है। अब कुछ और करने की ज़रूरत नहीं है।",
+        "hinglish": "Yeh order pehle se confirm hai. Kuch aur karne ki zaroorat nahi hai.",
+        "gu": "આ ઓર્ડર પહેલેથી જ કન્ફર્મ છે. હવે બીજું કંઈ કરવાની જરૂર નથી.",
+    },
+    "cancel_are_you_sure": {
+        "en": "Are you sure you want to cancel this order? This cannot be undone.",
+        "hi": "क्या आप वाकई यह ऑर्डर कैंसल करना चाहते हैं? इसे बाद में वापस नहीं किया जा सकता।",
+        "hinglish": (
+            "Kya aap sach mein yeh order cancel karna chahte hain? "
+            "Yeh baad mein wapas nahi hoga."
+        ),
+        "gu": "શું તમે ખરેખર આ ઓર્ડર કેન્સલ કરવા માંગો છો? આ પછીથી પાછું નહીં થાય.",
+    },
+    "cancel_yes_title": {
+        "en": "Yes, cancel",
+        "hi": "हां, कैंसल करें",
+        "hinglish": "Haan, cancel",
+        "gu": "હા, કેન્સલ કરો",
+    },
+    "cancel_no_title": {
+        "en": "No, keep it",
+        "hi": "नहीं, रखें",
+        "hinglish": "Nahi, rakhein",
+        "gu": "ના, રહેવા દો",
+    },
+    "cancel_requested": {
+        "en": (
+            "We have requested cancellation of your order. "
+            "We will confirm once it is done."
+        ),
+        "hi": (
+            "हमने आपके ऑर्डर को कैंसल करने का अनुरोध कर दिया है। "
+            "पूरा होने पर हम आपको बता देंगे।"
+        ),
+        "hinglish": (
+            "Humne aapke order ko cancel karne ka request kar diya hai. "
+            "Ho jaane par bata denge."
+        ),
+        "gu": (
+            "અમે તમારા ઓર્ડરને કેન્સલ કરવાની વિનંતી કરી છે. "
+            "પૂરું થતાં અમે જણાવીશું."
+        ),
+    },
+    "cancel_kept": {
+        "en": "No problem, we have kept your order as it is.",
+        "hi": "कोई बात नहीं, हमने आपका ऑर्डर वैसे ही रखा है।",
+        "hinglish": "Koi baat nahi, humne aapka order waise hi rakha hai.",
+        "gu": "કોઈ વાંધો નહીં, અમે તમારો ઓર્ડર એમ જ રાખ્યો છે.",
+    },
+    "cancel_too_late": {
+        "en": (
+            "This order has already been dispatched, so it cannot be cancelled here. "
+            "Please contact our support team for help."
+        ),
+        "hi": (
+            "यह ऑर्डर पहले ही भेजा जा चुका है, इसलिए इसे यहां कैंसल नहीं किया जा सकता। "
+            "कृपया सहायता के लिए हमारी टीम से संपर्क करें।"
+        ),
+        "hinglish": (
+            "Yeh order pehle se dispatch ho chuka hai, isliye ise yahan cancel nahi kar sakte. "
+            "Please help ke liye hamari team se baat karein."
+        ),
+        "gu": (
+            "આ ઓર્ડર પહેલેથી જ મોકલાઈ ગયો છે, તેથી તેને અહીં કેન્સલ કરી શકાતો નથી. "
+            "કૃપા કરીને મદદ માટે અમારી ટીમનો સંપર્ક કરો."
+        ),
+    },
+    "already_cancelled": {
+        "en": "This order is already cancelled. There is nothing more to do.",
+        "hi": "यह ऑर्डर पहले ही कैंसल हो चुका है। अब कुछ और करने की ज़रूरत नहीं है।",
+        "hinglish": "Yeh order pehle se cancel ho chuka hai. Kuch aur karne ki zaroorat nahi hai.",
+        "gu": "આ ઓર્ડર પહેલેથી જ કેન્સલ થઈ ગયો છે. હવે બીજું કંઈ કરવાની જરૂર નથી.",
+    },
+    "cancel_failed": {
+        "en": (
+            "We could not cancel your order just now. "
+            "Our team will look into it and get back to you."
+        ),
+        "hi": (
+            "हम अभी आपका ऑर्डर कैंसल नहीं कर सके। "
+            "हमारी टीम इसे देखकर आपसे संपर्क करेगी।"
+        ),
+        "hinglish": (
+            "Hum abhi aapka order cancel nahi kar paaye. "
+            "Hamari team ise dekhkar aapse baat karegi."
+        ),
+        "gu": (
+            "અમે અત્યારે તમારો ઓર્ડર કેન્સલ કરી શક્યા નથી. "
+            "અમારી ટીમ તેને જોઈને તમારો સંપર્ક કરશે."
+        ),
+    },
+    "not_found": {
+        "en": (
+            "We could not access that order for this number. If you need help, "
+            "please share your order number and we will check."
+        ),
+        "hi": (
+            "हम इस नंबर के लिए वह ऑर्डर नहीं देख सके। यदि आपको मदद चाहिए, "
+            "तो कृपया अपना ऑर्डर नंबर बताएं, हम जांच करेंगे।"
+        ),
+        "hinglish": (
+            "Hum is number ke liye woh order access nahi kar paaye. Agar madad chahiye, "
+            "to apna order number bataiye, hum check karenge."
+        ),
+        "gu": (
+            "અમે આ નંબર માટે તે ઓર્ડર જોઈ શક્યા નથી. જો તમને મદદ જોઈએ, "
+            "તો કૃપા કરીને તમારો ઓર્ડર નંબર જણાવો, અમે તપાસ કરીશું."
+        ),
+    },
 }
 
 

@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import datetime
 
 from app.store.base import (
@@ -5,10 +6,22 @@ from app.store.base import (
     IngestResult,
     MappingUpsert,
     MappingView,
+    OutboundClaim,
     OutboundDraft,
     OutboundView,
     StoredMessage,
 )
+
+
+@dataclass
+class _OutboundRow:
+    """Mutable per-row outbox state tracked alongside the frozen ``OutboundDraft``."""
+
+    id: int
+    state: str
+    attempts: int
+    last_error_code: str | None
+    template_wamid: str | None
 
 
 class InMemoryConfigRepo:
@@ -40,6 +53,14 @@ class InMemoryIngestStore:
         self.webhooks: set[tuple[str, str]] = set()
         self.mappings: dict[str, MappingUpsert] = {}
         self.outbound: dict[str, OutboundDraft] = {}
+        # Phase 5: outbox drain state kept parallel to the frozen drafts, plus per-order
+        # status and an audit list. `self.outbound` stays a dict[str, OutboundDraft] so
+        # existing assertions on it are unchanged.
+        self._outbound_meta: dict[str, _OutboundRow] = {}
+        self._outbound_by_id: dict[int, str] = {}
+        self._outbound_next_id = 1
+        self._mapping_status: dict[str, str] = {}
+        self.order_actions: list[dict[str, str | None]] = []
 
     async def ingest_order_created(
         self,
@@ -56,6 +77,16 @@ class InMemoryIngestStore:
         queued = False
         if outbound is not None and outbound.dedupe_key not in self.outbound:
             self.outbound[outbound.dedupe_key] = outbound
+            row = _OutboundRow(
+                id=self._outbound_next_id,
+                state="queued",
+                attempts=0,
+                last_error_code=None,
+                template_wamid=None,
+            )
+            self._outbound_meta[outbound.dedupe_key] = row
+            self._outbound_by_id[row.id] = outbound.dedupe_key
+            self._outbound_next_id += 1
             queued = True
         return IngestResult(duplicate=False, queued=queued)
 
@@ -65,7 +96,7 @@ class InMemoryIngestStore:
                 order_gid=m.order_gid,
                 order_name=m.order_name,
                 phone_e164=m.phone_e164,
-                status="pending",
+                status=self._mapping_status.get(m.order_gid, "pending"),
                 is_cod=m.is_cod,
                 created_at=None,
             )
@@ -77,14 +108,14 @@ class InMemoryIngestStore:
         views = [
             OutboundView(
                 dedupe_key=o.dedupe_key,
-                state="queued",
+                state=self._outbound_meta[key].state,
                 kind=o.kind,
                 phone_e164=o.phone_e164,
-                attempts=0,
-                last_error_code=None,
+                attempts=self._outbound_meta[key].attempts,
+                last_error_code=self._outbound_meta[key].last_error_code,
                 created_at=None,
             )
-            for o in self.outbound.values()
+            for key, o in self.outbound.items()
         ]
         return list(reversed(views))[:limit]
 
@@ -95,7 +126,7 @@ class InMemoryIngestStore:
                 order_gid=m.order_gid,
                 order_name=m.order_name,
                 phone_e164=m.phone_e164,
-                status="pending",
+                status=self._mapping_status.get(m.order_gid, "pending"),
                 is_cod=m.is_cod,
                 created_at=None,
             )
@@ -113,6 +144,9 @@ class InMemoryIngestStore:
             key for key, o in self.outbound.items() if o.phone_e164 == phone_e164
         ]
         for key in removed_outbound:
+            meta = self._outbound_meta.pop(key, None)
+            if meta is not None:
+                self._outbound_by_id.pop(meta.id, None)
             del self.outbound[key]
         # No in-memory conversation/message/action store yet (Phase 4) -> those counts stay 0.
         return DeletionResult(
@@ -142,6 +176,88 @@ class InMemoryIngestStore:
 
     async def count_orders_by_phone(self, phone_e164: str) -> int:
         return len([m for m in self.mappings.values() if m.phone_e164 == phone_e164])
+
+    # --- Phase 5: outbox drain + mutation audit + mapping status ---
+
+    def _meta_by_id(self, id: int) -> _OutboundRow | None:
+        key = self._outbound_by_id.get(id)
+        return self._outbound_meta.get(key) if key is not None else None
+
+    async def claim_queued_outbound(self, limit: int = 20) -> list[OutboundClaim]:
+        # dict preserves insertion order -> oldest first, mirroring ORDER BY created_at.
+        claims: list[OutboundClaim] = []
+        for key, draft in self.outbound.items():
+            meta = self._outbound_meta[key]
+            if meta.state != "queued":
+                continue
+            claims.append(
+                OutboundClaim(
+                    id=meta.id,
+                    dedupe_key=key,
+                    phone_e164=draft.phone_e164,
+                    payload_json=draft.payload_json,
+                    attempts=meta.attempts,
+                )
+            )
+            if len(claims) >= limit:
+                break
+        return claims
+
+    async def mark_outbound_sent(self, id: int, wamid: str | None) -> None:
+        meta = self._meta_by_id(id)
+        if meta is not None:
+            meta.state = "sent"
+            meta.template_wamid = wamid
+
+    async def mark_outbound_suppressed(self, id: int) -> None:
+        meta = self._meta_by_id(id)
+        if meta is not None:
+            meta.state = "suppressed"
+
+    async def mark_outbound_undeliverable(self, id: int, code: str) -> None:
+        meta = self._meta_by_id(id)
+        if meta is not None:
+            meta.state = "undeliverable"
+            meta.last_error_code = code
+
+    async def bump_outbound_attempt(self, id: int, code: str, max_attempts: int = 5) -> str:
+        meta = self._meta_by_id(id)
+        if meta is None:
+            return "failed"  # unknown row -> terminal (never happens in practice)
+        meta.attempts += 1
+        meta.last_error_code = code
+        if meta.attempts >= max_attempts:
+            meta.state = "failed"
+            return "failed"
+        return "queued"
+
+    async def set_mapping_status(self, order_gid: str, status: str) -> None:
+        self._mapping_status[order_gid] = status
+
+    async def record_order_action(
+        self,
+        order_gid: str,
+        action: str,
+        actor_wa_id: str | None,
+        source_wamid: str | None,
+        result: str,
+        user_errors_json: str | None,
+    ) -> None:
+        self.order_actions.append(
+            {
+                "order_gid": order_gid,
+                "action": action,
+                "actor_wa_id": actor_wa_id,
+                "source_wamid": source_wamid,
+                "result": result,
+                "user_errors_json": user_errors_json,
+            }
+        )
+
+    async def orders_awaiting_cancel_reconcile(self, limit: int = 50) -> list[str]:
+        return [
+            gid for gid, status in self._mapping_status.items() if status == "cancel_requested"
+        ][:limit]
 
 
 class InMemoryMessageStore:

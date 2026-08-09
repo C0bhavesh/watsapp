@@ -39,6 +39,17 @@ class OutboundDraft:
 
 
 @dataclass(frozen=True)
+class OutboundClaim:
+    """A queued outbound row handed to the drain job for sending."""
+
+    id: int
+    dedupe_key: str
+    phone_e164: str
+    payload_json: str
+    attempts: int
+
+
+@dataclass(frozen=True)
 class IngestResult:
     duplicate: bool
     queued: bool
@@ -111,6 +122,32 @@ class IngestStore(Protocol):
     async def purge_older_than(self, cutoff: datetime) -> DeletionResult: ...
 
     async def count_orders_by_phone(self, phone_e164: str) -> int: ...
+
+    # --- Phase 5: outbox drain + mutation audit + mapping status ---
+
+    async def claim_queued_outbound(self, limit: int = 20) -> list[OutboundClaim]: ...
+
+    async def mark_outbound_sent(self, id: int, wamid: str | None) -> None: ...
+
+    async def mark_outbound_suppressed(self, id: int) -> None: ...
+
+    async def mark_outbound_undeliverable(self, id: int, code: str) -> None: ...
+
+    async def bump_outbound_attempt(self, id: int, code: str, max_attempts: int = 5) -> str: ...
+
+    async def set_mapping_status(self, order_gid: str, status: str) -> None: ...
+
+    async def record_order_action(
+        self,
+        order_gid: str,
+        action: str,
+        actor_wa_id: str | None,
+        source_wamid: str | None,
+        result: str,
+        user_errors_json: str | None,
+    ) -> None: ...
+
+    async def orders_awaiting_cancel_reconcile(self, limit: int = 50) -> list[str]: ...
 
 
 class MessageStore(Protocol):

@@ -5,6 +5,7 @@ from app.store.base import (
     IngestResult,
     MappingUpsert,
     MappingView,
+    OutboundClaim,
     OutboundDraft,
     OutboundView,
     StoredMessage,
@@ -284,6 +285,107 @@ class PostgresIngestStore:
                 "SELECT count(*) AS n FROM order_mappings WHERE phone_e164 = $1", phone_e164
             )
         return int(row["n"]) if row else 0
+
+    # --- Phase 5: outbox drain + mutation audit + mapping status ---
+
+    async def claim_queued_outbound(self, limit: int = 20) -> list[OutboundClaim]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, dedupe_key, phone_e164, payload_json, attempts"
+                " FROM outbound_messages WHERE state = 'queued'"
+                " ORDER BY created_at LIMIT $1",
+                limit,
+            )
+        return [
+            OutboundClaim(
+                id=int(r["id"]),
+                dedupe_key=str(r["dedupe_key"]),
+                phone_e164=str(r["phone_e164"]),
+                payload_json=str(r["payload_json"]),
+                attempts=int(r["attempts"]),
+            )
+            for r in rows
+        ]
+
+    async def mark_outbound_sent(self, id: int, wamid: str | None) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE outbound_messages SET state = 'sent', template_wamid = $2,"
+                " updated_at = now() WHERE id = $1",
+                id,
+                wamid,
+            )
+
+    async def mark_outbound_suppressed(self, id: int) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE outbound_messages SET state = 'suppressed', updated_at = now()"
+                " WHERE id = $1",
+                id,
+            )
+
+    async def mark_outbound_undeliverable(self, id: int, code: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE outbound_messages SET state = 'undeliverable', last_error_code = $2,"
+                " updated_at = now() WHERE id = $1",
+                id,
+                code,
+            )
+
+    async def bump_outbound_attempt(self, id: int, code: str, max_attempts: int = 5) -> str:
+        # `attempts` in the CASE/SET refers to the pre-update value, so `attempts + 1` is the new
+        # count. RETURNING gives the resulting state so the caller learns 'queued' vs 'failed'.
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "UPDATE outbound_messages"
+                " SET attempts = attempts + 1, last_error_code = $2,"
+                " state = CASE WHEN attempts + 1 >= $3 THEN 'failed' ELSE state END,"
+                " updated_at = now()"
+                " WHERE id = $1 RETURNING state",
+                id,
+                code,
+                max_attempts,
+            )
+        return str(row["state"]) if row else "failed"
+
+    async def set_mapping_status(self, order_gid: str, status: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE order_mappings SET status = $2, updated_at = now() WHERE order_gid = $1",
+                order_gid,
+                status,
+            )
+
+    async def record_order_action(
+        self,
+        order_gid: str,
+        action: str,
+        actor_wa_id: str | None,
+        source_wamid: str | None,
+        result: str,
+        user_errors_json: str | None,
+    ) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO order_actions (order_gid, action, actor_wa_id, source_wamid,"
+                " result, user_errors_json) VALUES ($1, $2, $3, $4, $5, $6)",
+                order_gid,
+                action,
+                actor_wa_id,
+                source_wamid,
+                result,
+                user_errors_json,
+            )
+
+    async def orders_awaiting_cancel_reconcile(self, limit: int = 50) -> list[str]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT order_gid FROM order_mappings WHERE status = 'cancel_requested'"
+                " ORDER BY updated_at LIMIT $1",
+                limit,
+            )
+        return [str(r["order_gid"]) for r in rows]
 
 
 class PostgresMessageStore:

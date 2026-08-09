@@ -72,6 +72,24 @@ async def resolve_by_phone(
     return orders
 
 
+def authorize_own_order(order: Order) -> AuthorizedOrder | None:
+    """Wrap an order in an AuthorizedOrder for a SYSTEM operation on the order itself.
+
+    Used by the reconcile job to apply the final ``cancelled`` tag to an order the bot already
+    cancelled, where there is no WhatsApp tapper. The order's own best phone matches it by
+    definition, so this satisfies AuthorizedOrder's ownership invariant without a sender. Kept
+    here so ADR-004's "only order_resolver constructs AuthorizedOrder" holds. Returns None if the
+    order has no phone to verify against (nothing to authorize).
+    """
+    phone = order.best_phone()
+    if phone is None:
+        return None
+    try:
+        return AuthorizedOrder(order=order, verified_phone=phone)
+    except ValueError:
+        return None
+
+
 async def resolve_by_gid(
     shopify: OrderSource, wa_id: str, gid: str
 ) -> AuthorizedOrder | None:

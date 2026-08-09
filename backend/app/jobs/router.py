@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 from app.deps import Container, get_container
 from app.jobs.outbox_drain import run_outbox_drain
+from app.jobs.reconcile import run_reconcile_cancels
 from app.jobs.retention import run_retention_purge
 from app.shopify.errors import ShopifyError
 from app.shopify.subscriptions import ensure_subscription
@@ -28,6 +29,7 @@ JOBS: dict[str, JobFn] = {
     "ensure_subscription": _job_ensure_subscription,
     "retention_purge": run_retention_purge,
     "outbox_drain": run_outbox_drain,
+    "reconcile_cancels": run_reconcile_cancels,
 }
 
 

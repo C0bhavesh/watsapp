@@ -14,6 +14,7 @@ dependencies = [
     "asyncpg>=0.29",
     "slowapi>=0.1.9",
     "litellm>=1.89,<2",
+    "google-auth>=2.41",  # required by litellm for Vertex AI service-account auth
 ]
 
 [dependency-groups]

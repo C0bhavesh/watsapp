@@ -72,6 +72,32 @@ async def resolve_by_phone(
     return orders
 
 
+async def resolve_by_gid(
+    shopify: OrderSource, wa_id: str, gid: str
+) -> AuthorizedOrder | None:
+    """Re-fetch an order by its gid live and ownership-check it against the tapper's phone.
+
+    The deterministic button-dispatch path (Phase 5) calls this for every tap BEFORE any
+    tag/cancel mutation: it never trusts the outbox snapshot or the button payload's gid.
+    Returns None both when the order is missing/unfetchable AND when it belongs to a different
+    phone, so a foreign or unknown gid yields the same non-enumerable refusal (Critical Rule 3,
+    ADR-004). Only this module constructs the ``AuthorizedOrder`` mutation gate.
+    """
+    phone = normalize_phone(wa_id)
+    if phone is None:
+        return None
+    try:
+        order = await shopify.get_order(gid)
+    except ShopifyError:
+        return None
+    if order is None:
+        return None
+    try:
+        return AuthorizedOrder(order=order, verified_phone=phone)
+    except ValueError:
+        return None
+
+
 async def resolve_by_order_name(
     shopify: OrderSource, wa_id: str, raw_name: str
 ) -> AuthorizedOrder | None:

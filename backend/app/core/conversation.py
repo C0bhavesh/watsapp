@@ -12,6 +12,7 @@ an orchestration module, not an oversight.
 
 import asyncio
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 
 from app.admin.controls import AdminControls, load_controls
@@ -23,12 +24,13 @@ from app.channels.whatsapp_config import WhatsAppConfig, load_whatsapp_config
 from app.channels.whatsapp_inbound import InboundText
 from app.channels.whatsapp_sender import WhatsAppSendError, send_text
 from app.core.memory import load_history, persist_turn
-from app.core.order_resolver import resolve_by_phone
+from app.core.order_resolver import OrderSource, resolve_by_order_name, resolve_by_phone
 from app.core.phone import normalize_phone
 from app.core.sanitize import strip_markdown
 from app.deps import Container, active_llm
 from app.knowledge.loader import SEEDS_DIR, KnowledgeLoader
 from app.providers.base import LLMProvider, Message
+from app.shopify.models import AuthorizedOrder
 
 logger = logging.getLogger("app.core.conversation")
 
@@ -49,6 +51,14 @@ TURN_TIMEOUT_SECONDS = 55.0
 # How long the AI stays silent after a handoff, so a human can take the conversation over in
 # the same chat. Self-expiring -- no admin action is needed to resume (design spec).
 HANDOFF_PAUSE_WINDOW = timedelta(hours=24)
+
+# Thetavas order names look like "tavas3733" -- the store prefix + the order number, with NO
+# "#" prefix (see find_order_by_name / phase0-verification-results). Conservative match anchored
+# to that prefix, case-insensitive; `resolve_by_order_name` re-guards the extracted value
+# (injection guard + live ownership check), so this only has to surface a candidate token. The
+# `[0-9]+` (not `\d+`) and single search keep it linear on arbitrarily long / non-ASCII input --
+# no catastrophic backtracking and no Unicode-digit surprises.
+_ORDER_NAME_RE = re.compile(r"tavas[0-9]+", re.IGNORECASE)
 
 # Internal notification sent to AdminControls.owner_alert_number when a handoff triggers. Plain
 # text, no emojis (client-facing copy rule), and carries only what the owner needs to act: which
@@ -209,6 +219,28 @@ async def _alert_owner(
         )
 
 
+async def _recover_order_by_name(
+    shopify: OrderSource, wa_id: str, text: str
+) -> list[AuthorizedOrder]:
+    """Recover an order the sender OWNS from an order-name token in their own message.
+
+    Used only as a fallback when the phone lookup found nothing: a customer whose WhatsApp
+    number is not mapped to any order can still be helped if they type their order number.
+    ``resolve_by_order_name`` re-fetches the order live and enforces ownership, returning None
+    both for "no such order" AND for "belongs to a different number" -- so nothing is revealed
+    for an order the sender does not own, and a reply can never be used to enumerate order
+    numbers. No token found (or an unowned one) returns an empty list, leaving the turn
+    unchanged (the agent asks for the number / hands off as before). This makes the multi-turn
+    case work for free: "where is my order" (no number -> the agent asks) then "tavas1234" (that
+    reply is scanned on its own turn).
+    """
+    match = _ORDER_NAME_RE.search(text)
+    if match is None:
+        return []
+    order = await resolve_by_order_name(shopify, wa_id, match.group(0))
+    return [order] if order is not None else []
+
+
 async def _agent_reply(
     c: Container,
     event: InboundText,
@@ -226,11 +258,15 @@ async def _agent_reply(
     # Classify FIRST, then resolve: resolve_by_phone re-fetches every mapped order live from
     # Shopify, and order_tracking is the only agent that reads context.orders. Doing it
     # unconditionally put that latency on every "hi".
-    orders = (
-        await resolve_by_phone(c.shopify, c.ingest, event.wa_id)
-        if intent == "order_tracking"
-        else []
-    )
+    orders: list[AuthorizedOrder] = []
+    if intent == "order_tracking":
+        orders = await resolve_by_phone(c.shopify, c.ingest, event.wa_id)
+        if not orders:
+            # The sender's WhatsApp number maps to no order -- fall back to recovering one they
+            # OWN from the order number in THIS message (ownership re-checked, live-refetched,
+            # non-enumerable inside resolve_by_order_name). Only reached when the phone path is
+            # empty, so a customer with mapped orders never pays the extra lookup.
+            orders = await _recover_order_by_name(c.shopify, event.wa_id, event.text)
     loader = KnowledgeLoader(c.config_repo, SEEDS_DIR)
     knowledge = await loader.assemble_all()
     context = AgentContext(

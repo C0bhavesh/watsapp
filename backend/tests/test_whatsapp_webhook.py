@@ -1385,3 +1385,147 @@ async def test_post_text_event_no_handoff_never_alerts_the_owner(
 
     assert (await _post_handoff_message("wamid.alert4")).status_code == 200
     assert [to for to, _ in sends] == ["919999999999"]
+
+
+def _owned_order(gid: str, name: str) -> object:
+    """Build an AuthorizedOrder owned by the +919999999999 test sender."""
+    from app.shopify.models import AuthorizedOrder, Order
+
+    return AuthorizedOrder(
+        order=Order(
+            gid=gid, name=name, email=None, phone="+919999999999", shipping_phone=None,
+            billing_phone=None, financial_status="paid", fulfillment_status="UNFULFILLED",
+            cancelled_at=None, tags=(), payment_gateway_names=(), total=None,
+            customer_locale=None,
+        ),
+        verified_phone="+919999999999",
+    )
+
+
+async def test_post_text_event_recovers_owned_order_from_order_name_when_phone_has_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The MAJOR gap: a sender whose WhatsApp number maps to NO order, but who types an order
+    number they own, must have that order looked up and folded into the order-tracking context
+    (previously resolve_by_order_name had zero callers, so the bot just handed off)."""
+    from app.agents.base import AgentReply
+
+    seen: dict[str, object] = {}
+
+    async def fake_send_text(http, cfg, to, body, timeout=20.0):
+        from app.channels.whatsapp_sender import SendResult
+
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+
+    # The sender's number maps to nothing.
+    async def fake_resolve_by_phone(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr("app.core.conversation.resolve_by_phone", fake_resolve_by_phone)
+
+    owned = _owned_order("gid://99", "tavas4242")
+
+    async def fake_resolve_by_order_name(shopify, wa_id, raw_name):
+        seen["raw_name"] = raw_name
+        seen["wa_id"] = wa_id
+        return owned
+
+    monkeypatch.setattr(
+        "app.core.conversation.resolve_by_order_name", fake_resolve_by_order_name
+    )
+
+    provider = FakeProvider(responses=[json.dumps({"intent": "order_tracking"})])
+    monkeypatch.setattr("app.core.conversation.active_llm", _fake_active_llm(provider))
+
+    async def fake_order_tracking_run(context, *args, **kwargs):
+        seen["orders"] = list(context.orders)
+        return AgentReply(text="Your order tavas4242 is confirmed.")
+
+    monkeypatch.setattr("app.agents.order_tracking.run", fake_order_tracking_run)
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    await save_controls(get_container().config, AdminControls(send_mode="live"))
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.recover1",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "hey where is tavas4242"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    # The token was extracted from the real message and looked up, ownership-checked, for this
+    # sender -- and the resulting order reached the order-tracking agent's context.
+    assert seen["raw_name"] == "tavas4242"
+    assert seen["wa_id"] == "919999999999"
+    assert seen["orders"] == [owned]
+
+
+async def test_post_text_event_with_phone_orders_skips_order_name_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a customer WITH phone-mapped orders keeps the phone path -- the order-name
+    scan must not run (or override) even when the message happens to contain a token."""
+    from app.agents.base import AgentReply
+
+    seen: dict[str, object] = {}
+
+    async def fake_send_text(http, cfg, to, body, timeout=20.0):
+        from app.channels.whatsapp_sender import SendResult
+
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+
+    phone_order = _owned_order("gid://mapped", "tavas1000")
+
+    async def fake_resolve_by_phone(*args, **kwargs):
+        return [phone_order]
+
+    monkeypatch.setattr("app.core.conversation.resolve_by_phone", fake_resolve_by_phone)
+
+    async def must_not_be_called(*args, **kwargs):
+        raise AssertionError("order-name recovery ran despite the phone lookup finding orders")
+
+    monkeypatch.setattr("app.core.conversation.resolve_by_order_name", must_not_be_called)
+
+    provider = FakeProvider(responses=[json.dumps({"intent": "order_tracking"})])
+    monkeypatch.setattr("app.core.conversation.active_llm", _fake_active_llm(provider))
+
+    async def fake_order_tracking_run(context, *args, **kwargs):
+        seen["orders"] = list(context.orders)
+        return AgentReply(text="ok")
+
+    monkeypatch.setattr("app.agents.order_tracking.run", fake_order_tracking_run)
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    await save_controls(get_container().config, AdminControls(send_mode="live"))
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.recover2",
+                "timestamp": "1",
+                # Contains a token, to prove it is ignored because the phone path found orders.
+                "type": "text",
+                "text": {"body": "where is tavas4242"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert seen["orders"] == [phone_order]

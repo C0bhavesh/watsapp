@@ -8,10 +8,16 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from app.channels.whatsapp_config import load_whatsapp_config
-from app.channels.whatsapp_inbound import InboundText, extract_events
+from app.channels.whatsapp_inbound import (
+    InboundButton,
+    InboundInteractive,
+    InboundText,
+    extract_events,
+)
 from app.channels.whatsapp_signature import verify_meta_hmac
 from app.config.crypto import VaultError
 from app.core.conversation import TURN_TIMEOUT_SECONDS, run_turn
+from app.core.order_actions import dispatch_button
 from app.deps import get_container
 
 logger = logging.getLogger("app.channels.whatsapp")
@@ -19,6 +25,12 @@ logger = logging.getLogger("app.channels.whatsapp")
 router = APIRouter()
 
 MAX_WEBHOOK_BODY_BYTES = 1_048_576
+
+# Send modes in which a confirm/cancel button tap is dispatched. off/unset/corrupt = the bot is
+# disabled and a tap does nothing (matches run_turn's own off-gate). The value is read raw here so
+# channels/ stays admin-free (fastapi-layering); an unset or unrecognized value fails safe to
+# disabled because it is simply not in this whitelist.
+_ACTIVE_SEND_MODES: tuple[str, ...] = ("shadow", "allowlist", "live")
 
 
 def _ascii_compare(expected: str, provided: str) -> bool:
@@ -87,6 +99,11 @@ async def receive_webhook(request: Request) -> Response:
     if not events:
         return JSONResponse({"ok": True, "ignored": True})
 
+    # Resolve the button kill-switch once per delivery, and only when a tap is actually present,
+    # so a text-only delivery never pays for the extra config read.
+    has_button = any(isinstance(e, (InboundButton, InboundInteractive)) for e in events)
+    button_send_mode = await c.config.get_plain("send_mode") if has_button else None
+
     results: list[dict[str, Any]] = []
     processed = 0
     duplicate = 0
@@ -109,6 +126,24 @@ async def receive_webhook(request: Request) -> Response:
                     )
                 else:
                     await run_turn(c, event, budget_seconds=remaining)
+            elif isinstance(event, (InboundButton, InboundInteractive)):
+                # Deterministic confirm/cancel dispatch (order:confirm/cancel -> tagsAdd/
+                # orderCancel). NO LLM. A tap is processed even for a paused/handed-off
+                # conversation. Gated on the kill switch: only shadow/allowlist/live dispatch.
+                if button_send_mode in _ACTIVE_SEND_MODES:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        logger.warning(
+                            "request budget spent; skipping button dispatch for %s",
+                            event.message_id,
+                        )
+                    else:
+                        try:
+                            await dispatch_button(c, event)
+                        except Exception:
+                            # dispatch_button self-guards, but a tap must never 500 the signed
+                            # webhook (Rule 5.5) -- swallow and still ack 200.
+                            logger.exception("button dispatch failed; webhook still acks 200")
         else:
             duplicate += 1
         results.append(
@@ -119,8 +154,6 @@ async def receive_webhook(request: Request) -> Response:
             }
         )
 
-    # Deterministic button-tap dispatch (order:confirm/cancel -> tagsAdd/orderCancel) is
-    # Phase 5. InboundText already runs the full router + agent pipeline above.
     return JSONResponse(
         {"ok": True, "processed": processed, "duplicate": duplicate, "results": results}
     )

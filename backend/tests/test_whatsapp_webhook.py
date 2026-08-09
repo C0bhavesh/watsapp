@@ -258,6 +258,91 @@ async def test_post_button_tap_event_type() -> None:
     assert data["results"][0]["event_type"] == "InboundButton"
 
 
+def _button_body(payload: str, mid: str) -> bytes:
+    return json.dumps(envelope({
+        "from": "919999999999", "id": mid, "timestamp": "1", "type": "button",
+        "button": {"text": "Confirm Order", "payload": payload},
+    })).encode()
+
+
+def _interactive_body(button_id: str, mid: str) -> bytes:
+    return json.dumps(envelope({
+        "from": "919999999999", "id": mid, "timestamp": "1", "type": "interactive",
+        "interactive": {
+            "type": "button_reply", "button_reply": {"id": button_id, "title": "Yes, cancel"}
+        },
+    })).encode()
+
+
+async def _set_send_mode(mode: str) -> None:
+    from app.admin.controls import AdminControls, save_controls
+
+    await save_controls(get_container().config, AdminControls(send_mode=mode))
+
+
+async def test_post_button_tap_dispatched_when_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[object] = []
+
+    async def fake_dispatch(c, event):
+        calls.append(event)
+
+    monkeypatch.setattr("app.channels.whatsapp.dispatch_button", fake_dispatch)
+    await _set_send_mode("live")
+    body = _button_body("order:confirm:gid://shopify/Order/1", "wamid.btnA")
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+    assert resp.status_code == 200
+    assert len(calls) == 1
+    assert calls[0].payload == "order:confirm:gid://shopify/Order/1"  # type: ignore[attr-defined]
+    assert resp.json()["results"][0]["event_type"] == "InboundButton"
+
+
+async def test_post_interactive_tap_dispatched_when_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+
+    async def fake_dispatch(c, event):
+        calls.append(event)
+
+    monkeypatch.setattr("app.channels.whatsapp.dispatch_button", fake_dispatch)
+    await _set_send_mode("live")
+    body = _interactive_body("order:cancel:confirm:gid://shopify/Order/1", "wamid.btnC")
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+    assert resp.status_code == 200
+    assert len(calls) == 1
+    assert calls[0].button_id == "order:cancel:confirm:gid://shopify/Order/1"  # type: ignore[attr-defined]
+    assert resp.json()["results"][0]["event_type"] == "InboundInteractive"
+
+
+async def test_post_button_tap_not_dispatched_when_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[object] = []
+
+    async def fake_dispatch(c, event):
+        calls.append(event)
+
+    monkeypatch.setattr("app.channels.whatsapp.dispatch_button", fake_dispatch)
+    # send_mode defaults to "off" (no controls saved) -> the kill switch disables the tap.
+    body = _button_body("order:cancel:gid://shopify/Order/1", "wamid.btnB")
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+    assert resp.status_code == 200
+    assert calls == []
+    assert resp.json()["processed"] == 1
+
+
+async def test_post_button_tap_handler_raises_still_acks_200(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def exploding_dispatch(c, event):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("app.channels.whatsapp.dispatch_button", exploding_dispatch)
+    await _set_send_mode("live")
+    body = _button_body("order:confirm:gid://shopify/Order/1", "wamid.btnD")
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+    assert resp.status_code == 200
+    assert resp.json()["processed"] == 1
+
+
 async def test_post_garbage_body_ignored() -> None:
     body = b"not-json"
     resp = await post(body, {"X-Hub-Signature-256": sign(body)})

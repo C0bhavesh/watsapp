@@ -1869,3 +1869,66 @@ async def test_post_text_event_wrong_digit_order_number_asks_customer_to_recheck
 
     assert resp.status_code == 200
     assert seen["hint"] is not None
+
+
+async def test_post_text_event_threads_history_into_router_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The router's classify_intent call must receive the loaded conversation history, not
+    just the bare current message -- otherwise a short reply like a bare order number right
+    after the bot asked for one has no way to be classified correctly."""
+    from app.channels.whatsapp_sender import SendResult
+
+    async def fake_send_text(http, cfg, to, body, timeout=20.0):
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+
+    async def fake_resolve_by_phone(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr("app.core.conversation.resolve_by_phone", fake_resolve_by_phone)
+
+    class _RecordingProvider:
+        def __init__(self) -> None:
+            self.calls: list[list[object]] = []
+
+        async def complete(self, model, messages, api_key, timeout, *, extra_params=None):
+            self.calls.append(messages)
+            if len(self.calls) == 1:
+                # The router call.
+                return CompletionResult(text=json.dumps({"intent": "order_tracking"}), model=model)
+            return CompletionResult(text=json.dumps({"reply": "ok", "handoff": False}), model=model)
+
+    provider = _RecordingProvider()
+    monkeypatch.setattr("app.core.conversation.active_llm", _fake_active_llm(provider))
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    # Seed prior history: the bot already asked for an order number.
+    conversation_id = await c.conversations.get_or_create("919999999999")
+    await c.conversations.append_message(conversation_id, "user", "can u tell me my order detail")
+    await c.conversations.append_message(
+        conversation_id, "assistant", "Could you please share your order number?"
+    )
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.routerhistory1",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "9652"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    router_messages = provider.calls[0]
+    contents = [m.content for m in router_messages]
+    assert any("order number" in c for c in contents)

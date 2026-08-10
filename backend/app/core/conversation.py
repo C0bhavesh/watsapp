@@ -306,7 +306,7 @@ async def _agent_reply(
     """Classify, dispatch to the specialist, and return its (reply text, handoff) pair."""
     provider, model, api_key, extra_params = llm
     intent = await classify_intent(
-        provider, model, api_key, event.text, extra_params=extra_params
+        provider, model, api_key, event.text, history=history, extra_params=extra_params
     )
     # Classify FIRST, then resolve: resolve_by_phone re-fetches every mapped order live from
     # Shopify, and order_tracking is the only agent that reads context.orders. Doing it

@@ -8,7 +8,11 @@ token reveals nothing, extraction is safe on huge/hostile input, and a number-sh
 the wrong digit count never reaches Shopify at all -- it produces a format hint instead.
 """
 
-from app.core.conversation import _recover_order_by_name
+import logging
+
+import pytest
+
+from app.core.conversation import _extract_order_number_candidate, _recover_order_by_name
 from app.shopify.models import ORDER_NUMBER_DIGIT_LENGTH, Order
 
 
@@ -150,3 +154,56 @@ async def test_recover_order_by_name_tavas_prefixed_wrong_digit_count_never_call
     assert orders == []
     assert hint is not None
     assert shopify.calls == []
+
+
+async def test_recover_order_by_name_logs_a_warning_for_a_one_digit_longer_candidate(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # 5 digits == ORDER_NUMBER_DIGIT_LENGTH + 1 -- the leading indicator the store's order
+    # numbers may have grown past the configured length.
+    shopify = _FakeShopify()
+
+    with caplog.at_level(logging.WARNING, logger="app.core.conversation"):
+        orders, hint = await _recover_order_by_name(shopify, "919999999999", "order 96522")
+
+    assert orders == []
+    assert hint is not None
+    assert "one more than ORDER_NUMBER_DIGIT_LENGTH" in caplog.text
+
+
+@pytest.mark.parametrize("text", ["order 965", "order 9652222"])
+async def test_recover_order_by_name_does_not_log_for_other_wrong_lengths(
+    text: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # 3 digits and 7 digits are both wrong, but neither is "exactly one more" -- only that
+    # specific case is the drift signal worth logging.
+    shopify = _FakeShopify()
+
+    with caplog.at_level(logging.WARNING, logger="app.core.conversation"):
+        orders, hint = await _recover_order_by_name(shopify, "919999999999", text)
+
+    assert orders == []
+    assert hint is not None
+    assert "one more than ORDER_NUMBER_DIGIT_LENGTH" not in caplog.text
+
+
+def test_extract_order_number_candidate_prefers_the_correct_length_over_a_pincode() -> None:
+    candidate = _extract_order_number_candidate("my pin is 400001 and my order is 9652")
+    assert candidate == "9652"
+
+
+def test_extract_order_number_candidate_prefers_the_correct_length_over_a_phone_number() -> None:
+    candidate = _extract_order_number_candidate("call me on 9876543210 about order 9652")
+    assert candidate == "9652"
+
+
+def test_extract_order_number_candidate_tavas_prefix_wins_regardless_of_position() -> None:
+    # A bare 4-digit run ("9876") appears BEFORE the tavas-prefixed token in the text, and both
+    # are the same digit count -- only the tavas/#/bare priority order (not the length filter)
+    # can explain the tavas-prefixed token winning here.
+    candidate = _extract_order_number_candidate("call 9876 about tavas5432 please")
+    assert candidate == "tavas5432"
+
+
+def test_extract_order_number_candidate_no_candidate_returns_none() -> None:
+    assert _extract_order_number_candidate("where is my order please") is None

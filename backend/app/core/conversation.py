@@ -61,18 +61,34 @@ HANDOFF_PAUSE_WINDOW = timedelta(hours=24)
 # catastrophic backtracking and no Unicode-digit surprises. `resolve_by_order_name` re-guards
 # whatever candidate is extracted here (injection guard + live ownership check), so this only
 # has to surface a plausible token.
-_TAVAS_PREFIXED_RE = re.compile(r"tavas[0-9]+", re.IGNORECASE)
+_TAVAS_PREFIXED_RE = re.compile(r"tavas[0-9]+", re.IGNORECASE | re.ASCII)
 _HASH_PREFIXED_RE = re.compile(r"#[0-9]+")
 _BARE_DIGITS_RE = re.compile(r"\b[0-9]{3,}\b")
 
 
 def _extract_order_number_candidate(text: str) -> str | None:
-    """Find the first plausible order-number token in free text, tried in priority order."""
-    for pattern in (_TAVAS_PREFIXED_RE, _HASH_PREFIXED_RE, _BARE_DIGITS_RE):
-        match = pattern.search(text)
-        if match:
-            return match.group(0)
-    return None
+    """Find the best plausible order-number token in free text.
+
+    Collects every candidate across all three forms (explicit "tavas<digits>", "#<digits>",
+    and a bare 3+ digit run) instead of stopping at the first match: a message that also
+    contains a pincode, phone number, or date fragment must not let one of those outrank the
+    real order number just because it happens to appear earlier in the text. Prefers whichever
+    candidate's digit count matches the store's actual order-number length; only when none does
+    it falls back to the first candidate found (tavas/#/bare priority order), so the caller can
+    still produce a "please recheck" hint instead of treating the message as having no number
+    at all.
+    """
+    candidates = (
+        [m.group(0) for m in _TAVAS_PREFIXED_RE.finditer(text)]
+        + [m.group(0) for m in _HASH_PREFIXED_RE.finditer(text)]
+        + [m.group(0) for m in _BARE_DIGITS_RE.finditer(text)]
+    )
+    if not candidates:
+        return None
+    for candidate in candidates:
+        if len(re.sub(r"[^0-9]", "", candidate)) == ORDER_NUMBER_DIGIT_LENGTH:
+            return candidate
+    return candidates[0]
 
 # Internal notification sent to AdminControls.owner_alert_number when a handoff triggers. Plain
 # text, no emojis (client-facing copy rule), and carries only what the owner needs to act: which
@@ -258,6 +274,16 @@ async def _recover_order_by_name(
         return [], None
     digits = re.sub(r"[^0-9]", "", candidate)
     if len(digits) != ORDER_NUMBER_DIGIT_LENGTH:
+        if len(digits) == ORDER_NUMBER_DIGIT_LENGTH + 1:
+            # A same-shaped-but-one-digit-longer candidate is the leading signal that the
+            # store's order numbers have grown past ORDER_NUMBER_DIGIT_LENGTH digits (Shopify
+            # order numbers are sequential) -- surfaced here so that day is observable in logs
+            # instead of silently telling every genuine customer their order ID is malformed.
+            logger.warning(
+                "order-number candidate is %d digits, one more than ORDER_NUMBER_DIGIT_LENGTH "
+                "(%d) -- the store's order numbers may have grown past the configured length",
+                len(digits), ORDER_NUMBER_DIGIT_LENGTH,
+            )
         return [], (
             f"The customer mentioned a number that doesn't match our order ID format (ours "
             f"are exactly {ORDER_NUMBER_DIGIT_LENGTH} digits, e.g. "

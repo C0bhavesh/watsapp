@@ -1908,8 +1908,9 @@ async def test_post_text_event_threads_history_into_router_classification(
 
     c = get_container()
     await save_controls(c.config, AdminControls(send_mode="live"))
-    # Seed prior history: the bot already asked for an order number.
-    conversation_id = await c.conversations.get_or_create("919999999999")
+    # Conversations are keyed on the normalized E.164 phone (what the real turn loads history
+    # by), not the raw wa_id "919999999999" -- seed the history under that same key.
+    conversation_id = await c.conversations.get_or_create("+919999999999")
     await c.conversations.append_message(conversation_id, "user", "can u tell me my order detail")
     await c.conversations.append_message(
         conversation_id, "assistant", "Could you please share your order number?"
@@ -1931,4 +1932,5 @@ async def test_post_text_event_threads_history_into_router_classification(
     assert resp.status_code == 200
     router_messages = provider.calls[0]
     contents = [m.content for m in router_messages]
-    assert any("order number" in c for c in contents)
+    assert "can u tell me my order detail" in contents
+    assert "Could you please share your order number?" in contents

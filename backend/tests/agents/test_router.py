@@ -81,7 +81,8 @@ async def test_classify_intent_uses_history_to_resolve_a_bare_number_reply() -> 
 
     assert result == "order_tracking"
     sent_contents = [m.content for m in seen["messages"]]
-    assert any("order number" in c for c in sent_contents)
+    assert history[0].content in sent_contents
+    assert history[1].content in sent_contents
 
 
 async def test_classify_intent_caps_history_to_the_configured_window() -> None:

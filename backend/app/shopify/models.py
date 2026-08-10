@@ -57,6 +57,12 @@ class CancelRequested:
     job_id: str | None
 
 
+# Tavas order numbers are exactly this many digits today (confirmed live: tavas3898,
+# tavas9652). Shopify order numbers are sequential, so this WILL need bumping once the store's
+# order count crosses 9999 -- a "true today" fact, not a permanent assumption.
+ORDER_NUMBER_DIGIT_LENGTH = 4
+
+
 def normalize_order_name(raw: str, prefix: str = "tavas") -> str:
     name = raw.strip().lstrip("#").lower()
     if name.isdigit():

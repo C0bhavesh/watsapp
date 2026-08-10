@@ -85,6 +85,10 @@ class AgentContext:
     # fallback copy so a non-English-speaking customer's failed turn is not answered in English.
     language: str = DEFAULT_LANGUAGE
     timeout: float = 20.0
+    # Set by conversation.py when the customer's message contained a number-shaped token that
+    # doesn't match the store's order-ID digit count -- lets order_tracking ask the customer to
+    # double-check it instead of silently treating the turn as "no order mentioned."
+    order_number_format_hint: str | None = None
 
 
 @dataclass(frozen=True)

@@ -212,3 +212,24 @@ async def test_system_prompt_requests_the_handoff_field() -> None:
     provider = _CapturingProvider(text='{"reply": "Sure.", "handoff": false}')
     await run(_context(provider, "where is my order", []))
     assert '"handoff"' in _system_prompt(provider)
+
+
+async def test_order_number_format_hint_is_rendered_into_the_prompt() -> None:
+    provider = _CapturingProvider(text='{"reply": "Could you double check your order ID?"}')
+    hint = "The customer mentioned a number that doesn't match our order ID format."
+    context = AgentContext(
+        wa_id="919999999999", phone_e164="+919999999999", user_text="my order id is 965",
+        history=[], orders=[], is_vip=False, knowledge={}, provider=provider, model="m",
+        api_key="k", extra_params=None, order_number_format_hint=hint,
+    )
+
+    await run(context)
+
+    assert hint in _system_prompt(provider)
+
+
+async def test_absent_order_number_format_hint_is_not_rendered() -> None:
+    provider = _CapturingProvider(text='{"reply": "Sure."}')
+    await run(_context(provider, "where is my order", []))
+
+    assert "doesn't match our order ID format" not in _system_prompt(provider)

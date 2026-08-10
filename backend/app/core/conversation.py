@@ -30,7 +30,7 @@ from app.core.sanitize import strip_markdown
 from app.deps import Container, active_llm
 from app.knowledge.loader import SEEDS_DIR, KnowledgeLoader
 from app.providers.base import LLMProvider, Message
-from app.shopify.models import AuthorizedOrder
+from app.shopify.models import ORDER_NUMBER_DIGIT_LENGTH, AuthorizedOrder
 
 logger = logging.getLogger("app.core.conversation")
 
@@ -53,12 +53,42 @@ TURN_TIMEOUT_SECONDS = 55.0
 HANDOFF_PAUSE_WINDOW = timedelta(hours=24)
 
 # Thetavas order names look like "tavas3733" -- the store prefix + the order number, with NO
-# "#" prefix (see find_order_by_name / phase0-verification-results). Conservative match anchored
-# to that prefix, case-insensitive; `resolve_by_order_name` re-guards the extracted value
-# (injection guard + live ownership check), so this only has to surface a candidate token. The
-# `[0-9]+` (not `\d+`) and single search keep it linear on arbitrarily long / non-ASCII input --
-# no catastrophic backtracking and no Unicode-digit surprises.
-_ORDER_NAME_RE = re.compile(r"tavas[0-9]+", re.IGNORECASE)
+# "#" prefix (see find_order_by_name / phase0-verification-results). Tried in priority order:
+# an explicit "tavas<digits>" or "#<digits>" token is an unambiguous order-number attempt at
+# any digit count; a bare run of digits only counts as a candidate at 3+ digits, since shorter
+# numbers (dates, quantities) are far more likely to be something else. `[0-9]` (not `\d`) and
+# a single search each keep this linear on arbitrarily long / non-ASCII input -- no
+# catastrophic backtracking and no Unicode-digit surprises. `resolve_by_order_name` re-guards
+# whatever candidate is extracted here (injection guard + live ownership check), so this only
+# has to surface a plausible token.
+_TAVAS_PREFIXED_RE = re.compile(r"tavas[0-9]+", re.IGNORECASE | re.ASCII)
+_HASH_PREFIXED_RE = re.compile(r"#[0-9]+")
+_BARE_DIGITS_RE = re.compile(r"\b[0-9]{3,}\b")
+
+
+def _extract_order_number_candidate(text: str) -> str | None:
+    """Find the best plausible order-number token in free text.
+
+    Collects every candidate across all three forms (explicit "tavas<digits>", "#<digits>",
+    and a bare 3+ digit run) instead of stopping at the first match: a message that also
+    contains a pincode, phone number, or date fragment must not let one of those outrank the
+    real order number just because it happens to appear earlier in the text. Prefers whichever
+    candidate's digit count matches the store's actual order-number length; only when none does
+    it falls back to the first candidate found (tavas/#/bare priority order), so the caller can
+    still produce a "please recheck" hint instead of treating the message as having no number
+    at all.
+    """
+    candidates = (
+        [m.group(0) for m in _TAVAS_PREFIXED_RE.finditer(text)]
+        + [m.group(0) for m in _HASH_PREFIXED_RE.finditer(text)]
+        + [m.group(0) for m in _BARE_DIGITS_RE.finditer(text)]
+    )
+    if not candidates:
+        return None
+    for candidate in candidates:
+        if len(re.sub(r"[^0-9]", "", candidate)) == ORDER_NUMBER_DIGIT_LENGTH:
+            return candidate
+    return candidates[0]
 
 # Internal notification sent to AdminControls.owner_alert_number when a handoff triggers. Plain
 # text, no emojis (client-facing copy rule), and carries only what the owner needs to act: which
@@ -221,24 +251,47 @@ async def _alert_owner(
 
 async def _recover_order_by_name(
     shopify: OrderSource, wa_id: str, text: str
-) -> list[AuthorizedOrder]:
-    """Recover an order the sender OWNS from an order-name token in their own message.
+) -> tuple[list[AuthorizedOrder], str | None]:
+    """Recover an order the sender OWNS from an order-name token in their own message, and flag
+    a number-shaped token that doesn't match the store's order-ID format.
 
-    Used only as a fallback when the phone lookup found nothing: a customer whose WhatsApp
-    number is not mapped to any order can still be helped if they type their order number.
-    ``resolve_by_order_name`` re-fetches the order live and enforces ownership, returning None
-    both for "no such order" AND for "belongs to a different number" -- so nothing is revealed
-    for an order the sender does not own, and a reply can never be used to enumerate order
-    numbers. No token found (or an unowned one) returns an empty list, leaving the turn
-    unchanged (the agent asks for the number / hands off as before). This makes the multi-turn
-    case work for free: "where is my order" (no number -> the agent asks) then "tavas1234" (that
-    reply is scanned on its own turn).
+    Runs on every order_tracking turn, not only when the phone lookup found nothing: a customer
+    can own more than one order, or one placed under different contact info, so a message
+    mentioning a different order number should still be checked even when the phone path already
+    found something. ``resolve_by_order_name`` re-fetches the order live and enforces ownership,
+    returning None both for "no such order" AND for "belongs to a different number" -- so
+    nothing is revealed for an order the sender does not own, and a reply can never be used to
+    enumerate order numbers.
+
+    Returns ``(orders, format_hint)``: ``format_hint`` is set (and ``orders`` is empty) when the
+    extracted candidate's digit count doesn't match ``ORDER_NUMBER_DIGIT_LENGTH`` -- Shopify is
+    never queried for a token already known to be the wrong shape; the caller threads the hint
+    to the agent so it can ask the customer to double-check their order ID instead of silently
+    finding nothing, which reads to the customer as "that order doesn't exist."
     """
-    match = _ORDER_NAME_RE.search(text)
-    if match is None:
-        return []
-    order = await resolve_by_order_name(shopify, wa_id, match.group(0))
-    return [order] if order is not None else []
+    candidate = _extract_order_number_candidate(text)
+    if candidate is None:
+        return [], None
+    digits = re.sub(r"[^0-9]", "", candidate)
+    if len(digits) != ORDER_NUMBER_DIGIT_LENGTH:
+        if len(digits) == ORDER_NUMBER_DIGIT_LENGTH + 1:
+            # A same-shaped-but-one-digit-longer candidate is the leading signal that the
+            # store's order numbers have grown past ORDER_NUMBER_DIGIT_LENGTH digits (Shopify
+            # order numbers are sequential) -- surfaced here so that day is observable in logs
+            # instead of silently telling every genuine customer their order ID is malformed.
+            logger.warning(
+                "order-number candidate is %d digits, one more than ORDER_NUMBER_DIGIT_LENGTH "
+                "(%d) -- the store's order numbers may have grown past the configured length",
+                len(digits), ORDER_NUMBER_DIGIT_LENGTH,
+            )
+        return [], (
+            f"The customer mentioned a number that doesn't match our order ID format (ours "
+            f"are exactly {ORDER_NUMBER_DIGIT_LENGTH} digits, e.g. "
+            f"tavas{'9' * ORDER_NUMBER_DIGIT_LENGTH}) -- ask them to double-check and resend "
+            f"their order ID."
+        )
+    order = await resolve_by_order_name(shopify, wa_id, candidate)
+    return ([order] if order is not None else []), None
 
 
 async def _agent_reply(
@@ -259,14 +312,18 @@ async def _agent_reply(
     # Shopify, and order_tracking is the only agent that reads context.orders. Doing it
     # unconditionally put that latency on every "hi".
     orders: list[AuthorizedOrder] = []
+    order_number_format_hint: str | None = None
     if intent == "order_tracking":
         orders = await resolve_by_phone(c.shopify, c.ingest, event.wa_id)
-        if not orders:
-            # The sender's WhatsApp number maps to no order -- fall back to recovering one they
-            # OWN from the order number in THIS message (ownership re-checked, live-refetched,
-            # non-enumerable inside resolve_by_order_name). Only reached when the phone path is
-            # empty, so a customer with mapped orders never pays the extra lookup.
-            orders = await _recover_order_by_name(c.shopify, event.wa_id, event.text)
+        # Always attempted, not only when the phone path found nothing: a customer can own
+        # more than one order, or ask about one placed under different contact info.
+        # Ownership re-checked, live-refetched, non-enumerable inside resolve_by_order_name.
+        extra_orders, order_number_format_hint = await _recover_order_by_name(
+            c.shopify, event.wa_id, event.text
+        )
+        for extra in extra_orders:
+            if not any(o.order.name == extra.order.name for o in orders):
+                orders.append(extra)
     loader = KnowledgeLoader(c.config_repo, SEEDS_DIR)
     knowledge = await loader.assemble_all()
     context = AgentContext(
@@ -285,6 +342,7 @@ async def _agent_reply(
         # renders only these fields into its prompt, so an unticked field never reaches the model.
         reveal_fields=tuple(controls.reveal_fields),
         language=controls.default_language,
+        order_number_format_hint=order_number_format_hint,
     )
     agent_reply = await _run_agent(context, intent, c)
     return strip_markdown(agent_reply.text), agent_reply.handoff

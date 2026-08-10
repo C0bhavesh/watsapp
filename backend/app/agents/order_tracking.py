@@ -20,7 +20,7 @@ order history for this WhatsApp number -- answer only from this data, never gues
 order details.
 
 {order_context}
-
+{format_hint}
 Store cancellation policy: orders can only be cancelled BEFORE they are dispatched. Once
 dispatched, cancellation is not possible -- if the customer asks to cancel a dispatched order,
 tell them clearly and do not offer a cancel option for it.
@@ -84,9 +84,13 @@ async def run(context: AgentContext) -> AgentReply:
     On provider error, returns a safe fallback message.
     """
     fallback = copy_for("error_fallback", context.language)
+    format_hint = (
+        f"\n{context.order_number_format_hint}\n" if context.order_number_format_hint else ""
+    )
     system_prompt = _SYSTEM_TEMPLATE.format(
         personality=personality_for(context),
         order_context=_order_context(context.orders, context.reveal_fields),
+        format_hint=format_hint,
         contract=HANDOFF_JSON_CONTRACT,
     )
     messages = [

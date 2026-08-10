@@ -1688,11 +1688,12 @@ async def test_post_text_event_recovers_owned_order_from_order_name_when_phone_h
     assert seen["orders"] == [owned]
 
 
-async def test_post_text_event_with_phone_orders_skips_order_name_recovery(
+async def test_post_text_event_with_phone_orders_also_recovers_a_different_mentioned_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression: a customer WITH phone-mapped orders keeps the phone path -- the order-name
-    scan must not run (or override) even when the message happens to contain a token."""
+    """A customer with a phone-mapped order can still ask about a DIFFERENT order they own (e.g.
+    placed under different contact info) -- the order-name scan runs regardless of whether the
+    phone path already found something, and the recovered order is added alongside it."""
     from app.agents.base import AgentReply
 
     seen: dict[str, object] = {}
@@ -1705,16 +1706,20 @@ async def test_post_text_event_with_phone_orders_skips_order_name_recovery(
     monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
 
     phone_order = _owned_order("gid://mapped", "tavas1000")
+    other_order = _owned_order("gid://99", "tavas4242")
 
     async def fake_resolve_by_phone(*args, **kwargs):
         return [phone_order]
 
     monkeypatch.setattr("app.core.conversation.resolve_by_phone", fake_resolve_by_phone)
 
-    async def must_not_be_called(*args, **kwargs):
-        raise AssertionError("order-name recovery ran despite the phone lookup finding orders")
+    async def fake_resolve_by_order_name(shopify, wa_id, raw_name):
+        seen["raw_name"] = raw_name
+        return other_order
 
-    monkeypatch.setattr("app.core.conversation.resolve_by_order_name", must_not_be_called)
+    monkeypatch.setattr(
+        "app.core.conversation.resolve_by_order_name", fake_resolve_by_order_name
+    )
 
     provider = FakeProvider(responses=[json.dumps({"intent": "order_tracking"})])
     monkeypatch.setattr("app.core.conversation.active_llm", _fake_active_llm(provider))
@@ -1736,7 +1741,68 @@ async def test_post_text_event_with_phone_orders_skips_order_name_recovery(
                 "from": "919999999999",
                 "id": "wamid.recover2",
                 "timestamp": "1",
-                # Contains a token, to prove it is ignored because the phone path found orders.
+                "type": "text",
+                "text": {"body": "what about tavas4242 too"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert seen["raw_name"] == "tavas4242"
+    assert seen["orders"] == [phone_order, other_order]
+
+
+async def test_post_text_event_does_not_duplicate_an_order_already_found_by_phone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the mentioned order number is the SAME one the phone path already found, it must not
+    be appended a second time."""
+    from app.agents.base import AgentReply
+
+    seen: dict[str, object] = {}
+
+    async def fake_send_text(http, cfg, to, body, timeout=20.0):
+        from app.channels.whatsapp_sender import SendResult
+
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+
+    phone_order = _owned_order("gid://mapped", "tavas4242")
+
+    async def fake_resolve_by_phone(*args, **kwargs):
+        return [phone_order]
+
+    monkeypatch.setattr("app.core.conversation.resolve_by_phone", fake_resolve_by_phone)
+
+    async def fake_resolve_by_order_name(shopify, wa_id, raw_name):
+        return _owned_order("gid://mapped", "tavas4242")
+
+    monkeypatch.setattr(
+        "app.core.conversation.resolve_by_order_name", fake_resolve_by_order_name
+    )
+
+    provider = FakeProvider(responses=[json.dumps({"intent": "order_tracking"})])
+    monkeypatch.setattr("app.core.conversation.active_llm", _fake_active_llm(provider))
+
+    async def fake_order_tracking_run(context, *args, **kwargs):
+        seen["orders"] = list(context.orders)
+        return AgentReply(text="ok")
+
+    monkeypatch.setattr("app.agents.order_tracking.run", fake_order_tracking_run)
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    await save_controls(get_container().config, AdminControls(send_mode="live"))
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.recover3",
+                "timestamp": "1",
                 "type": "text",
                 "text": {"body": "where is tavas4242"},
             }
@@ -1746,3 +1812,60 @@ async def test_post_text_event_with_phone_orders_skips_order_name_recovery(
 
     assert resp.status_code == 200
     assert seen["orders"] == [phone_order]
+
+
+async def test_post_text_event_wrong_digit_order_number_asks_customer_to_recheck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A number-shaped token of the wrong digit count never reaches Shopify -- the agent gets a
+    format hint instead, so it can ask the customer to double-check their order ID."""
+    seen: dict[str, object] = {}
+
+    async def fake_send_text(http, cfg, to, body, timeout=20.0):
+        from app.channels.whatsapp_sender import SendResult
+
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+
+    async def fake_resolve_by_phone(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr("app.core.conversation.resolve_by_phone", fake_resolve_by_phone)
+
+    async def must_not_be_called(*args, **kwargs):
+        raise AssertionError("Shopify was queried for a token already known to be malformed")
+
+    monkeypatch.setattr("app.core.conversation.resolve_by_order_name", must_not_be_called)
+
+    provider = FakeProvider(responses=[json.dumps({"intent": "order_tracking"})])
+    monkeypatch.setattr("app.core.conversation.active_llm", _fake_active_llm(provider))
+
+    async def fake_order_tracking_run(context, *args, **kwargs):
+        seen["hint"] = context.order_number_format_hint
+        from app.agents.base import AgentReply
+
+        return AgentReply(text="Could you double check your order ID?")
+
+    monkeypatch.setattr("app.agents.order_tracking.run", fake_order_tracking_run)
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    await save_controls(get_container().config, AdminControls(send_mode="live"))
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.recover4",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "my order id is 965"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert seen["hint"] is not None

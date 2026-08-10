@@ -8,6 +8,14 @@ class Money:
 
 
 @dataclass(frozen=True)
+class LineItem:
+    title: str
+    quantity: int
+    variant_title: str | None
+    price: Money | None
+
+
+@dataclass(frozen=True)
 class Order:
     gid: str
     name: str
@@ -22,6 +30,7 @@ class Order:
     payment_gateway_names: tuple[str, ...]
     total: Money | None
     customer_locale: str | None
+    line_items: tuple[LineItem, ...] = ()
 
     def best_phone(self) -> str | None:
         return self.phone or self.shipping_phone or self.billing_phone

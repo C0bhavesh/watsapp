@@ -1,17 +1,24 @@
 from app.agents.base import DEFAULT_REVEAL_FIELDS, AgentContext
-from app.agents.order_tracking import run
+from app.agents.order_tracking import _format_money, run
 from app.providers.base import CompletionResult, Message, ProviderError, ProviderErrorKind
-from app.shopify.models import AuthorizedOrder, Order
+from app.shopify.models import AuthorizedOrder, LineItem, Money, Order
 
 
 def _order(
-    name: str, phone: str, fulfillment_status: str | None = None, cancelled_at: str | None = None
+    name: str,
+    phone: str,
+    fulfillment_status: str | None = None,
+    cancelled_at: str | None = None,
+    line_items: tuple[LineItem, ...] = (),
+    payment_gateway_names: tuple[str, ...] = (),
+    tags: tuple[str, ...] = (),
 ) -> Order:
     return Order(
         gid=f"gid://{name}", name=name, email="c@example.com", phone=phone,
         shipping_phone=None, billing_phone=None, financial_status="paid",
-        fulfillment_status=fulfillment_status, cancelled_at=cancelled_at, tags=(),
-        payment_gateway_names=(), total=None, customer_locale=None,
+        fulfillment_status=fulfillment_status, cancelled_at=cancelled_at, tags=tags,
+        payment_gateway_names=payment_gateway_names, total=None, customer_locale=None,
+        line_items=line_items,
     )
 
 
@@ -233,3 +240,94 @@ async def test_absent_order_number_format_hint_is_not_rendered() -> None:
     await run(_context(provider, "where is my order", []))
 
     assert "doesn't match our order ID format" not in _system_prompt(provider)
+
+
+def test_format_money_inr_strips_trailing_zero_cents() -> None:
+    assert _format_money(Money(amount="999.00", currency="INR")) == "₹999"
+
+
+def test_format_money_inr_keeps_non_zero_cents() -> None:
+    assert _format_money(Money(amount="499.50", currency="INR")) == "₹499.50"
+
+
+def test_format_money_non_inr_shows_currency_code() -> None:
+    assert _format_money(Money(amount="10.00", currency="USD")) == "10 USD"
+
+
+async def test_items_revealed_renders_title_variant_and_price() -> None:
+    provider = _CapturingProvider(text='{"reply": "Here are your items."}')
+    order = AuthorizedOrder(
+        order=_order(
+            "tavas7",
+            "+919999999999",
+            fulfillment_status="UNFULFILLED",
+            line_items=(
+                LineItem(
+                    title="Green Chikankari Kurti",
+                    quantity=1,
+                    variant_title="Green / XL",
+                    price=Money(amount="749.00", currency="INR"),
+                ),
+            ),
+        ),
+        verified_phone="+919999999999",
+    )
+    await run(_context(provider, "what did i order", [order]))
+
+    prompt = _system_prompt(provider)
+    assert "Green Chikankari Kurti" in prompt
+    assert "Green / XL" in prompt
+    assert "₹749" in prompt
+
+
+async def test_items_withheld_from_reveal_fields_omits_item_details() -> None:
+    provider = _CapturingProvider(text='{"reply": "Here is your order status."}')
+    order = AuthorizedOrder(
+        order=_order(
+            "tavas7",
+            "+919999999999",
+            fulfillment_status="UNFULFILLED",
+            line_items=(
+                LineItem(
+                    title="Red Silk Saree",
+                    quantity=1,
+                    variant_title="Red / L",
+                    price=Money(amount="1499.00", currency="INR"),
+                ),
+            ),
+        ),
+        verified_phone="+919999999999",
+    )
+    reveal = tuple(f for f in DEFAULT_REVEAL_FIELDS if f != "items")
+    await run(_context(provider, "what did i order", [order], reveal_fields=reveal))
+
+    prompt = _system_prompt(provider)
+    assert "Red Silk Saree" not in prompt
+    assert "Red / L" not in prompt
+
+
+async def test_cod_pending_order_renders_cash_on_delivery_note() -> None:
+    provider = _CapturingProvider(text='{"reply": "That is normal for COD."}')
+    order = AuthorizedOrder(
+        order=_order(
+            "tavas8",
+            "+919999999999",
+            fulfillment_status="UNFULFILLED",
+            payment_gateway_names=("Cash on Delivery (COD)",),
+        ),
+        verified_phone="+919999999999",
+    )
+    await run(_context(provider, "why is my payment pending", [order]))
+
+    assert "(Cash on Delivery)" in _system_prompt(provider)
+
+
+async def test_non_cod_order_has_no_cash_on_delivery_note() -> None:
+    provider = _CapturingProvider(text='{"reply": "Your payment went through."}')
+    order = AuthorizedOrder(
+        order=_order("tavas9", "+919999999999", fulfillment_status="UNFULFILLED"),
+        verified_phone="+919999999999",
+    )
+    await run(_context(provider, "is my payment done", [order]))
+
+    assert "(Cash on Delivery)" not in _system_prompt(provider)

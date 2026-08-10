@@ -11,7 +11,7 @@ from app.agents.base import (
 )
 from app.channels.copy import copy_for
 from app.providers.base import Message, ProviderError
-from app.shopify.models import AuthorizedOrder
+from app.shopify.models import AuthorizedOrder, LineItem, Money
 
 _SYSTEM_TEMPLATE = """{personality}
 
@@ -28,8 +28,46 @@ tell them clearly and do not offer a cancel option for it.
 If the customer wants to cancel an order that IS still eligible, tell them you'll bring up a
 Confirm/Cancel button for them to tap -- you never cancel anything yourself.
 
+When a Cash on Delivery order is still marked Pending, explain that as normal -- the amount is
+simply collected on delivery, not something to worry about -- rather than sounding alarmed.
+
+Format order-detail replies warmly and clearly, for example:
+
+Hey there! 👋
+Here are your order details:
+
+*Order ID:* tavas9241
+*Status:* Pending (Cash on Delivery — collected on delivery) 💵
+*Fulfillment:* Not yet dispatched 📦
+
+*Items:*
+- *Product Name* (Blue / M) — ₹999
+
+Use bold (*like this*) for the order ID, status, and item names, a warm greeting, and light,
+natural emoji use -- not on every line, and never more than the message needs.
+
 {contract}
 """
+
+
+def _format_money(money: Money) -> str:
+    """Render a price for a customer-facing WhatsApp reply.
+
+    INR gets its symbol (this store's currency); anything else falls back to the raw currency
+    code rather than guessing a symbol. A trailing ".00" is stripped for a cleaner look
+    ("999.00" -> "₹999", not "₹999.00") -- non-".00" amounts are left exactly as Shopify sent
+    them (no rounding).
+    """
+    amount = money.amount[:-3] if money.amount.endswith(".00") else money.amount
+    if money.currency == "INR":
+        return f"₹{amount}"
+    return f"{amount} {money.currency}"
+
+
+def _line_item_line(item: LineItem) -> str:
+    variant = f" ({item.variant_title})" if item.variant_title else ""
+    price = f" — {_format_money(item.price)}" if item.price else ""
+    return f"- *{item.title}*{variant}{price}"
 
 
 def _is_cancel_eligible(order: AuthorizedOrder) -> bool:
@@ -51,23 +89,27 @@ def _is_cancel_eligible(order: AuthorizedOrder) -> bool:
 def _order_line(order: AuthorizedOrder, reveal_fields: Sequence[str]) -> str:
     """Render one order using ONLY the fields the admin approved for disclosure.
 
-    ``AdminControls.reveal_fields`` allows ``order_number`` / ``email`` / ``status``.
+    ``AdminControls.reveal_fields`` allows ``order_number`` / ``email`` / ``status`` / ``items``.
     ``order_number`` is the order name; ``status`` covers the whole payment/fulfillment/
     cancellation picture, cancel-eligibility included (it is derived from fulfillment and
-    cancellation state, so it discloses nothing beyond them). ``email`` has never been rendered
-    into this prompt, so there is nothing to gate for it. Withheld fields are omitted from the
-    prompt entirely rather than merely "not to be mentioned" -- what the model never sees, it
-    can never leak.
+    cancellation state, so it discloses nothing beyond them); ``items`` adds each line item's
+    product name, variant, and price. ``email`` has never been rendered into this prompt, so
+    there is nothing to gate for it. Withheld fields are omitted from the prompt entirely rather
+    than merely "not to be mentioned" -- what the model never sees, it can never leak.
     """
     label = f"order {order.order.name}" if "order_number" in reveal_fields else "an order"
     if "status" not in reveal_fields:
         return f"- {label} (the store has not approved sharing its status over WhatsApp)"
-    return (
-        f"- {label}: payment status {order.order.financial_status or 'unknown'}, "
+    cod_note = " (Cash on Delivery)" if order.order.is_cod() else ""
+    lines = [
+        f"- {label}: payment status {order.order.financial_status or 'unknown'}{cod_note}, "
         f"fulfillment {order.order.fulfillment_status or 'not dispatched'}, "
         f"cancelled: {order.order.is_cancelled()}, "
         f"cancel eligible: {_is_cancel_eligible(order)}"
-    )
+    ]
+    if "items" in reveal_fields and order.order.line_items:
+        lines.extend(_line_item_line(item) for item in order.order.line_items)
+    return "\n".join(lines)
 
 
 def _order_context(orders: list[AuthorizedOrder], reveal_fields: Sequence[str]) -> str:

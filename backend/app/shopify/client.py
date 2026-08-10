@@ -15,6 +15,7 @@ from app.shopify.errors import (
 from app.shopify.models import (
     AuthorizedOrder,
     CancelRequested,
+    LineItem,
     Money,
     Order,
     Product,
@@ -26,8 +27,35 @@ ORDER_FIELDS = (
     "id name email phone tags paymentGatewayNames displayFinancialStatus "
     "displayFulfillmentStatus cancelledAt customerLocale "
     "totalPriceSet { shopMoney { amount currencyCode } } "
-    "shippingAddress { phone } billingAddress { phone }"
+    "shippingAddress { phone } billingAddress { phone } "
+    # first: 50 is a query-time ceiling far above any realistic order size -- the display side
+    # (order_tracking) shows every item with no further cap, by design (owner's explicit
+    # choice: show all, don't summarize/truncate a customer's own order).
+    "lineItems(first: 50) { edges { node { title quantity variant { title } "
+    "originalUnitPriceSet { shopMoney { amount currencyCode } } } } }"
 )
+
+
+def _line_items_from_node(node: dict[str, Any]) -> tuple[LineItem, ...]:
+    edges = (node.get("lineItems") or {}).get("edges") or []
+    items: list[LineItem] = []
+    for edge in edges:
+        item_node = edge.get("node") or {}
+        price_node = (item_node.get("originalUnitPriceSet") or {}).get("shopMoney")
+        variant = item_node.get("variant") or {}
+        items.append(
+            LineItem(
+                title=str(item_node.get("title", "")),
+                quantity=int(item_node.get("quantity") or 0),
+                variant_title=variant.get("title"),
+                price=(
+                    Money(amount=price_node["amount"], currency=price_node["currencyCode"])
+                    if price_node
+                    else None
+                ),
+            )
+        )
+    return tuple(items)
 
 
 def _order_from_node(node: dict[str, Any]) -> Order:
@@ -48,6 +76,7 @@ def _order_from_node(node: dict[str, Any]) -> Order:
         if total_node
         else None,
         customer_locale=node.get("customerLocale"),
+        line_items=_line_items_from_node(node),
     )
 
 

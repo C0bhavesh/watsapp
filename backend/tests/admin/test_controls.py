@@ -18,7 +18,7 @@ def test_defaults(client: TestClient) -> None:
     body = r.json()
     assert body["send_mode"] == "off"
     assert body["push_policy"] == "cod_only"
-    assert body["reveal_fields"] == ["order_number", "email", "status"]
+    assert body["reveal_fields"] == ["order_number", "email", "status", "items"]
     assert body["default_language"] == "en"
     assert body["push_staleness_hours"] == 6
     # DPDP retention defaults to 0 = disabled (no policy invented until the client confirms Q15).
@@ -70,7 +70,7 @@ def test_put_rejects_bad_values(client: TestClient) -> None:
         == 422
     )
     assert (
-        client.put("/admin/controls", json={**base, "reveal_fields": ["items"]}).status_code
+        client.put("/admin/controls", json={**base, "reveal_fields": ["phone"]}).status_code
         == 422
     )
     assert (
@@ -129,7 +129,7 @@ def test_schema_invalid_stored_value_returns_defaults_not_500(client: TestClient
     asyncio.run(_seed_bad())
     r = client.get("/admin/controls")
     assert r.status_code == 200
-    assert r.json()["reveal_fields"] == ["order_number", "email", "status"]
+    assert r.json()["reveal_fields"] == ["order_number", "email", "status", "items"]
 
 
 def test_unicode_digit_int_value_falls_back_to_safe_default(client: TestClient) -> None:
@@ -193,6 +193,20 @@ def test_defaults_include_vip_threshold() -> None:
     from app.admin.controls import AdminControls
 
     assert AdminControls().vip_order_count_threshold == 3
+
+
+def test_items_is_a_valid_reveal_field() -> None:
+    from app.admin.controls import AdminControls
+
+    # "items" reverses the earlier "items/amounts stay hidden" decision -- must no longer be
+    # rejected as an unknown reveal field.
+    assert AdminControls(reveal_fields=["items"]).reveal_fields == ["items"]
+
+
+def test_default_reveal_fields_includes_items() -> None:
+    from app.admin.controls import AdminControls
+
+    assert "items" in AdminControls().reveal_fields
 
 
 async def test_vip_threshold_roundtrip(master_key: str) -> None:

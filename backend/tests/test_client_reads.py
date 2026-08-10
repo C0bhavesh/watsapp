@@ -18,6 +18,30 @@ ORDER_NODE = {
     "totalPriceSet": {"shopMoney": {"amount": "949.0", "currencyCode": "INR"}},
     "shippingAddress": {"phone": "+918888888888"},
     "billingAddress": {"phone": None},
+    "lineItems": {
+        "edges": [
+            {
+                "node": {
+                    "title": "Blue Chikankari Kurti",
+                    "quantity": 1,
+                    "variant": {"title": "Blue / M"},
+                    "originalUnitPriceSet": {
+                        "shopMoney": {"amount": "999.00", "currencyCode": "INR"}
+                    },
+                }
+            },
+            {
+                "node": {
+                    "title": "Cotton Dupatta",
+                    "quantity": 2,
+                    "variant": {"title": "Red"},
+                    "originalUnitPriceSet": {
+                        "shopMoney": {"amount": "150.00", "currencyCode": "INR"}
+                    },
+                }
+            },
+        ]
+    },
 }
 
 
@@ -34,6 +58,86 @@ async def test_get_order_parses_full_node(settings, master_key) -> None:
     assert order.best_phone() == "+919999999999"
     assert order.customer_locale == "en-IN"
     assert order.total is not None and order.total.currency == "INR"
+
+
+async def test_get_order_parses_line_items(settings, master_key) -> None:
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"node": ORDER_NODE}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    order = await client.get_order("gid://shopify/Order/12187547894128")
+    assert order is not None
+    assert len(order.line_items) == 2
+    first, second = order.line_items
+    assert first.title == "Blue Chikankari Kurti"
+    assert first.quantity == 1
+    assert first.variant_title == "Blue / M"
+    assert first.price is not None
+    assert first.price.amount == "999.00"
+    assert first.price.currency == "INR"
+    assert second.title == "Cotton Dupatta"
+    assert second.quantity == 2
+    assert second.variant_title == "Red"
+    assert second.price is not None and second.price.amount == "150.00"
+
+
+async def test_get_order_line_item_without_variant_parses_variant_title_none(
+    settings, master_key
+) -> None:
+    node = {
+        **ORDER_NODE,
+        "lineItems": {
+            "edges": [
+                {
+                    "node": {
+                        "title": "Gift Card",
+                        "quantity": 1,
+                        "variant": None,
+                        "originalUnitPriceSet": {
+                            "shopMoney": {"amount": "500.00", "currencyCode": "INR"}
+                        },
+                    }
+                }
+            ]
+        },
+    }
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"node": node}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    order = await client.get_order("gid://shopify/Order/12187547894128")
+    assert order is not None
+    assert len(order.line_items) == 1
+    assert order.line_items[0].variant_title is None
+
+
+async def test_get_order_zero_line_items_parses_to_empty_tuple(settings, master_key) -> None:
+    node = {**ORDER_NODE, "lineItems": {"edges": []}}
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"node": node}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    order = await client.get_order("gid://shopify/Order/12187547894128")
+    assert order is not None
+    assert order.line_items == ()
+
+
+async def test_get_order_missing_line_items_key_parses_to_empty_tuple(settings, master_key) -> None:
+    node = {k: v for k, v in ORDER_NODE.items() if k != "lineItems"}
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"node": node}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    order = await client.get_order("gid://shopify/Order/12187547894128")
+    assert order is not None
+    assert order.line_items == ()
 
 
 async def test_get_order_missing_returns_none(settings, master_key) -> None:

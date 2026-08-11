@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
+from app.shopify.models import Customer, Order
+
 
 class ConfigRepo(Protocol):
     async def get(self, key: str) -> str | None: ...
@@ -148,6 +150,12 @@ class IngestStore(Protocol):
     ) -> None: ...
 
     async def orders_awaiting_cancel_reconcile(self, limit: int = 50) -> list[str]: ...
+
+    # --- Order mirror sync (Shopify webhook -> Postgres, no live read-path change yet) ---
+
+    async def upsert_customer(self, customer: Customer) -> None: ...
+
+    async def upsert_order_mirror(self, order: Order) -> None: ...
 
 
 class MessageStore(Protocol):

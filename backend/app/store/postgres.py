@@ -1,5 +1,6 @@
 from datetime import datetime
 
+from app.shopify.models import Customer, Order
 from app.store.base import (
     DeletionResult,
     IngestResult,
@@ -125,6 +126,81 @@ class PostgresIngestStore:
                     )
                     queued = _rows_affected(result) > 0
                 return IngestResult(duplicate=False, queued=queued)
+
+    async def upsert_customer(self, customer: Customer) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO customers (gid, first_name, last_name, email, phone, "
+                "address_line1, address_line2, city, state, postal_code, country, synced_at) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now()) "
+                "ON CONFLICT (gid) DO UPDATE SET first_name = $2, last_name = $3, email = $4, "
+                "phone = $5, address_line1 = $6, address_line2 = $7, city = $8, state = $9, "
+                "postal_code = $10, country = $11, synced_at = now()",
+                customer.gid, customer.first_name, customer.last_name, customer.email,
+                customer.phone, customer.address_line1, customer.address_line2, customer.city,
+                customer.state, customer.postal_code, customer.country,
+            )
+
+    async def upsert_order_mirror(self, order: Order) -> None:
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                if order.customer is not None:
+                    await conn.execute(
+                        "INSERT INTO customers (gid, first_name, last_name, email, phone, "
+                        "address_line1, address_line2, city, state, postal_code, country, "
+                        "synced_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, "
+                        "now()) ON CONFLICT (gid) DO UPDATE SET first_name = $2, "
+                        "last_name = $3, email = $4, phone = $5, address_line1 = $6, "
+                        "address_line2 = $7, city = $8, state = $9, postal_code = $10, "
+                        "country = $11, synced_at = now()",
+                        order.customer.gid, order.customer.first_name,
+                        order.customer.last_name, order.customer.email, order.customer.phone,
+                        order.customer.address_line1, order.customer.address_line2,
+                        order.customer.city, order.customer.state, order.customer.postal_code,
+                        order.customer.country,
+                    )
+                customer_gid = order.customer.gid if order.customer is not None else None
+                total_amount = order.total.amount if order.total is not None else None
+                total_currency = order.total.currency if order.total is not None else None
+                await conn.execute(
+                    "INSERT INTO orders (gid, name, order_number, customer_gid, email, "
+                    "phone, shipping_phone, billing_phone, financial_status, "
+                    "fulfillment_status, cancelled_at, tags, payment_gateway_names, "
+                    "total_amount, total_currency, customer_locale, synced_at) VALUES "
+                    "($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, "
+                    "now()) ON CONFLICT (gid) DO UPDATE SET name = $2, order_number = $3, "
+                    "customer_gid = $4, email = $5, phone = $6, shipping_phone = $7, "
+                    "billing_phone = $8, financial_status = $9, fulfillment_status = $10, "
+                    "cancelled_at = $11, tags = $12, payment_gateway_names = $13, "
+                    "total_amount = $14, total_currency = $15, customer_locale = $16, "
+                    "synced_at = now()",
+                    order.gid, order.name,
+                    # order_number/sku not on Order/LineItem yet -- Task 3 adds them and
+                    # wires real values here
+                    None,
+                    customer_gid, order.email, order.phone,
+                    order.shipping_phone, order.billing_phone, order.financial_status,
+                    order.fulfillment_status, order.cancelled_at, list(order.tags),
+                    list(order.payment_gateway_names), total_amount, total_currency,
+                    order.customer_locale,
+                )
+                await conn.execute(
+                    "DELETE FROM order_items WHERE order_gid = $1", order.gid
+                )
+                for item in order.line_items:
+                    price_amount = item.price.amount if item.price is not None else None
+                    price_currency = item.price.currency if item.price is not None else None
+                    await conn.execute(
+                        "INSERT INTO order_items (order_gid, title, sku, quantity, "
+                        "variant_title, price_amount, price_currency) VALUES "
+                        "($1, $2, $3, $4, $5, $6, $7)",
+                        order.gid, item.title,
+                        # order_number/sku not on Order/LineItem yet -- Task 3 adds them and
+                        # wires real values here
+                        None,
+                        item.quantity, item.variant_title,
+                        price_amount, price_currency,
+                    )
 
     async def recent_mappings(self, limit: int) -> list[MappingView]:
         async with self._pool.acquire() as conn:

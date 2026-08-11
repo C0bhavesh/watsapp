@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 
+from app.shopify.models import Customer, LineItem, Order
 from app.store.base import (
     DeletionResult,
     IngestResult,
@@ -61,6 +62,9 @@ class InMemoryIngestStore:
         self._outbound_next_id = 1
         self._mapping_status: dict[str, str] = {}
         self.order_actions: list[dict[str, str | None]] = []
+        self.customers: dict[str, Customer] = {}
+        self.orders: dict[str, Order] = {}
+        self.order_items: dict[str, tuple[LineItem, ...]] = {}
 
     async def ingest_order_created(
         self,
@@ -89,6 +93,15 @@ class InMemoryIngestStore:
             self._outbound_next_id += 1
             queued = True
         return IngestResult(duplicate=False, queued=queued)
+
+    async def upsert_customer(self, customer: Customer) -> None:
+        self.customers[customer.gid] = customer
+
+    async def upsert_order_mirror(self, order: Order) -> None:
+        if order.customer is not None:
+            await self.upsert_customer(order.customer)
+        self.orders[order.gid] = order
+        self.order_items[order.gid] = order.line_items
 
     async def recent_mappings(self, limit: int) -> list[MappingView]:
         views = [

@@ -29,6 +29,9 @@ class Customer:
     state: str | None
     postal_code: str | None
     country: str | None
+    # Shopify's own last-modified stamp (raw ISO-8601). Defaulted because only the webhook
+    # parsers carry it; the mirror uses it to reject an out-of-order (late retry) write.
+    updated_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,8 @@ class Order:
     customer_locale: str | None
     line_items: tuple[LineItem, ...] = ()
     customer: Customer | None = None
+    # See Customer.updated_at — the mirror's out-of-order-delivery guard.
+    updated_at: str | None = None
 
     def best_phone(self) -> str | None:
         return self.phone or self.shipping_phone or self.billing_phone

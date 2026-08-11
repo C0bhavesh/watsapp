@@ -1,4 +1,5 @@
 import json
+import logging
 import math
 from datetime import UTC, datetime
 
@@ -7,6 +8,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from app.channels.shopify_orders import (
     choose_language,
+    clip,
     customer_from_webhook_payload,
     is_eligible_for_push,
     order_from_webhook_payload,
@@ -14,14 +16,22 @@ from app.channels.shopify_orders import (
 )
 from app.channels.shopify_signature import verify_shopify_hmac
 from app.config.crypto import VaultError
-from app.deps import get_container
+from app.deps import Container, get_container
+from app.shopify.models import Customer, Order
+from app.shopify.subscriptions import REQUIRED_TOPICS
 from app.store.base import MappingUpsert, OutboundDraft
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 TEMPLATE_NAME = "order_confirmation_cod"
 MAX_WEBHOOK_BODY_BYTES = 1_048_576
-MAX_FIELD_LEN = 256
+
+# Derived from the subscribed topics so the two can never drift: a topic we subscribe to but
+# do not handle is a delivery silently dropped, and the reverse is code that can never run.
+# Shopify's header format is the lowercase, slash-separated form of the GraphQL enum.
+HANDLED_TOPICS = frozenset(t.lower().replace("_", "/") for t in REQUIRED_TOPICS)
 
 
 DEFAULT_STALENESS_HOURS = 6.0
@@ -31,8 +41,37 @@ _MIN_STALENESS_HOURS = 1.0
 _MAX_STALENESS_HOURS = 168.0
 
 
-def _clip(v: str | None) -> str | None:
-    return v if v is None else v[:MAX_FIELD_LEN]
+async def _mirror_order(c: Container, order: Order) -> bool:
+    """Sync one order into the mirror. Never fatal to the ack.
+
+    The mirror has no live reader yet, while a 500 on a signed delivery makes Shopify retry
+    (against a mirror that is still broken) and burns its 19-failure budget before it deletes
+    the subscription. A failed sync degrades to "stale mirror, logged".
+    """
+    try:
+        await c.ingest.upsert_order_mirror(order)
+    except Exception:
+        logger.exception("order mirror sync failed: gid=%s", order.gid)
+        return False
+    return True
+
+
+async def _mirror_customer(c: Container, customer: Customer) -> bool:
+    """Refresh a KNOWN customer's mirror row (see ``_mirror_order`` on why failures are soft).
+
+    Owner decision 2026-08-11: customers/update only refreshes customers the bot already knows
+    (a row exists because we mirrored one of their orders). Shopify sends this topic for every
+    customer in the store, and importing people who have never ordered or messaged the bot
+    would hold personal data we have no reason to keep.
+    """
+    try:
+        if not await c.ingest.customer_exists(customer.gid):
+            return False
+        await c.ingest.upsert_customer(customer)
+    except Exception:
+        logger.exception("customer mirror sync failed: gid=%s", customer.gid)
+        return False
+    return True
 
 
 def _staleness_hours(raw: str | None) -> float:
@@ -88,8 +127,7 @@ async def shopify_webhook(request: Request) -> Response:
 
     topic = request.headers.get("X-Shopify-Topic", "")
     webhook_id = request.headers.get("X-Shopify-Webhook-Id", "")
-    handled_topics = {"orders/create", "orders/updated", "customers/update"}
-    if topic not in handled_topics or not webhook_id:
+    if topic not in HANDLED_TOPICS or not webhook_id:
         return JSONResponse({"ok": True, "ignored": True})
 
     try:
@@ -108,28 +146,23 @@ async def shopify_webhook(request: Request) -> Response:
         customer = customer_from_webhook_payload(payload)
         if customer is None:
             return JSONResponse({"ok": True, "ignored": True})
-        await c.ingest.upsert_customer(customer)
-        return JSONResponse({"ok": True, "ignored": False})
+        return JSONResponse({"ok": True, "ignored": not await _mirror_customer(c, customer)})
 
     if topic == "orders/updated":
         order = order_from_webhook_payload(payload)
         if order is None:
             return JSONResponse({"ok": True, "ignored": True})
-        await c.ingest.upsert_order_mirror(order)
-        return JSONResponse({"ok": True, "ignored": False})
+        return JSONResponse({"ok": True, "ignored": not await _mirror_order(c, order)})
 
     incoming = parse_order_created(payload)
     if incoming is None:
         return JSONResponse({"ok": True, "ignored": True})
-    mirror_order = order_from_webhook_payload(payload)
-    if mirror_order is not None:
-        await c.ingest.upsert_order_mirror(mirror_order)
 
     language = choose_language(incoming.locale)
-    order_name = _clip(incoming.name) or ""
-    customer_name = _clip(incoming.customer_name)
-    email = _clip(incoming.email)
-    amount = _clip(str(payload.get("total_price") or "")) or ""
+    order_name = clip(incoming.name) or ""
+    customer_name = clip(incoming.customer_name)
+    email = clip(incoming.email)
+    amount = clip(str(payload.get("total_price") or "")) or ""
     mapping = MappingUpsert(
         order_gid=incoming.gid,
         order_name=order_name,
@@ -163,5 +196,11 @@ async def shopify_webhook(request: Request) -> Response:
             ),
         )
 
+    # The mapping + outbox write goes FIRST: that row IS the customer's confirmation message,
+    # while the mirror has no live reader yet. Mirroring afterwards (and non-fatally, inside
+    # _mirror_order) means a mirror hiccup costs a stale row, never the customer's message.
     result = await c.ingest.ingest_order_created(webhook_id, topic, mapping, outbound)
+    mirror_order = order_from_webhook_payload(payload)
+    if mirror_order is not None:
+        await _mirror_order(c, mirror_order)
     return JSONResponse({"ok": True, "duplicate": result.duplicate, "queued": result.queued})

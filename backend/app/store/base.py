@@ -92,6 +92,12 @@ class DeletionResult:
     ``processed_messages`` is intentionally absent: it is a dedupe table with no
     ``phone_e164`` column, aged out blindly by ``purge_older_than`` (received_at cutoff) and
     not attributable to a single phone, so its blanket age-purge count is not reported here.
+
+    ``customers``/``orders`` are the order-mirror tables (name/email/phone/postal address), added
+    to ``delete_by_phone``'s coverage with the mirror sync; like the two fields above they are
+    always 0 for ``purge_older_than`` (order/customer data is kept indefinitely). ``order_items``
+    has no count of its own — those rows follow their order via ``ON DELETE CASCADE``. Both are
+    defaulted so the existing five-field construction sites stay valid.
     """
 
     order_mappings: int
@@ -100,6 +106,8 @@ class DeletionResult:
     messages: int
     pending_actions: int
     order_actions: int
+    customers: int = 0
+    orders: int = 0
 
 
 class IngestStore(Protocol):
@@ -156,6 +164,8 @@ class IngestStore(Protocol):
     async def upsert_customer(self, customer: Customer) -> None: ...
 
     async def upsert_order_mirror(self, order: Order) -> None: ...
+
+    async def customer_exists(self, gid: str) -> bool: ...
 
 
 class MessageStore(Protocol):

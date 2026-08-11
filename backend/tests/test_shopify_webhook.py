@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from app.deps import get_container, reset_container
+from app.shopify.models import Customer
 
 SECRET = "csec-webhook"
 
@@ -103,6 +104,19 @@ async def test_other_topic_ignored() -> None:
     assert resp.json() == {"ok": True, "ignored": True}
 
 
+def test_handled_topics_stay_in_sync_with_the_subscribed_topics() -> None:
+    """One declaration of the three topic names, not two that can drift apart.
+
+    A topic subscribed in `REQUIRED_TOPICS` but missing from the handler's set is a delivery
+    Shopify sends and we silently drop; the reverse is code that can never run.
+    """
+    from app.channels.shopify_webhook import HANDLED_TOPICS
+    from app.shopify.subscriptions import REQUIRED_TOPICS
+
+    assert HANDLED_TOPICS == {t.lower().replace("_", "/") for t in REQUIRED_TOPICS}
+    assert HANDLED_TOPICS == {"orders/create", "orders/updated", "customers/update"}
+
+
 async def test_orders_updated_populates_the_mirror() -> None:
     p = payload("gid://shopify/Order/mirror1")
     p["fulfillment_status"] = "fulfilled"
@@ -111,6 +125,34 @@ async def test_orders_updated_populates_the_mirror() -> None:
     assert resp.status_code == 200
     store = get_container().ingest
     assert store.orders["gid://shopify/Order/mirror1"].fulfillment_status == "fulfilled"  # type: ignore[attr-defined]
+    # orders/updated must NOT run any of the orders/create-only work: a mapping or a queued
+    # outbound here would re-send the order-confirmation template to a real customer.
+    assert not store.mappings  # type: ignore[attr-defined]
+    assert not store.outbound  # type: ignore[attr-defined]
+
+
+async def test_orders_updated_malformed_payload_ignored() -> None:
+    body = json.dumps({"admin_graphql_api_id": "gid://shopify/Order/nameless"}).encode()
+    resp = await post(body, headers(body, topic="orders/updated", webhook_id="wh-upd-bad"))
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "ignored": True}
+    assert get_container().ingest.orders == {}  # type: ignore[attr-defined]
+
+
+async def test_orders_updated_still_acks_200_when_the_mirror_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = get_container().ingest
+
+    async def boom(order: object) -> None:
+        raise RuntimeError("mirror unavailable")
+
+    monkeypatch.setattr(store, "upsert_order_mirror", boom)
+    body = json.dumps(payload("gid://shopify/Order/mirror-down")).encode()
+    resp = await post(body, headers(body, topic="orders/updated", webhook_id="wh-upd-down"))
+    # A 500 here would make Shopify retry against a still-broken mirror and burn its
+    # 19-failure budget before deleting the subscription; degrade to "logged and acked".
+    assert resp.status_code == 200
 
 
 async def test_orders_create_also_populates_the_mirror() -> None:
@@ -123,24 +165,110 @@ async def test_orders_create_also_populates_the_mirror() -> None:
     assert resp.json() == {"ok": True, "duplicate": False, "queued": True}
 
 
-async def test_customers_update_populates_customers_table_only() -> None:
-    p = {
-        "id": 555, "admin_graphql_api_id": "gid://shopify/Customer/555",
+async def test_orders_create_writes_the_mapping_before_the_mirror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The customer-visible write (mapping + outbox) must not be blocked by the mirror.
+
+    The mirror has no live reader yet; the outbox row IS the confirmation message, so it goes
+    first and the mirror is best-effort afterwards.
+    """
+    store = get_container().ingest
+    calls: list[str] = []
+    real_ingest = store.ingest_order_created
+    real_mirror = store.upsert_order_mirror
+
+    async def spy_ingest(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        calls.append("ingest")
+        return await real_ingest(*args, **kwargs)  # type: ignore[arg-type]
+
+    async def spy_mirror(order: object) -> None:
+        calls.append("mirror")
+        await real_mirror(order)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(store, "ingest_order_created", spy_ingest)
+    monkeypatch.setattr(store, "upsert_order_mirror", spy_mirror)
+    body = json.dumps(payload("gid://shopify/Order/mirror-order")).encode()
+    resp = await post(body, headers(body, webhook_id="wh-mirror-order"))
+    assert resp.status_code == 200
+    assert calls == ["ingest", "mirror"]
+
+
+async def test_orders_create_still_maps_and_queues_when_the_mirror_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = get_container().ingest
+
+    async def boom(order: object) -> None:
+        raise RuntimeError("mirror unavailable")
+
+    monkeypatch.setattr(store, "upsert_order_mirror", boom)
+    body = json.dumps(payload("gid://shopify/Order/mirror3")).encode()
+    resp = await post(body, headers(body, webhook_id="wh-mirror3"))
+    # A mirror failure must never cost the customer their confirmation message.
+    assert resp.json() == {"ok": True, "duplicate": False, "queued": True}
+    assert "gid://shopify/Order/mirror3" in store.mappings  # type: ignore[attr-defined]
+    assert "order_created:gid://shopify/Order/mirror3" in store.outbound  # type: ignore[attr-defined]
+
+
+def customer_payload(gid: str = "gid://shopify/Customer/555", city: str = "Pune") -> dict:
+    return {
+        "id": 555, "admin_graphql_api_id": gid,
         "first_name": "Anita", "last_name": "Rao", "email": "a@example.com",
-        "phone": "+919888888888", "default_address": {"city": "Pune"},
+        "phone": "+919888888888", "default_address": {"city": city},
     }
-    body = json.dumps(p).encode()
+
+
+async def test_customers_update_refreshes_a_known_customer_only() -> None:
+    store = get_container().ingest
+    await store.upsert_customer(  # the bot only knows customers whose order it mirrored
+        Customer(
+            gid="gid://shopify/Customer/555", first_name="Anita", last_name="Rao",
+            email="a@example.com", phone="+919888888888", address_line1=None,
+            address_line2=None, city="Mumbai", state=None, postal_code=None, country=None,
+        )
+    )
+    body = json.dumps(customer_payload()).encode()
     resp = await post(body, headers(body, topic="customers/update", webhook_id="wh-cust1"))
     assert resp.status_code == 200
-    store = get_container().ingest
     assert store.customers["gid://shopify/Customer/555"].city == "Pune"  # type: ignore[attr-defined]
     assert store.orders == {}  # type: ignore[attr-defined]
     assert not store.mappings  # type: ignore[attr-defined]  # no order-mapping side effect
 
 
+async def test_customers_update_does_not_create_an_unknown_customer() -> None:
+    """Owner decision 2026-08-11: mirror only customers the bot already knows.
+
+    Shopify sends customers/update for every customer in the store, including people who have
+    never ordered or messaged the bot -- mirroring those would import personal data we have no
+    reason to hold.
+    """
+    body = json.dumps(customer_payload("gid://shopify/Customer/stranger")).encode()
+    resp = await post(body, headers(body, topic="customers/update", webhook_id="wh-cust-new"))
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "ignored": True}
+    assert get_container().ingest.customers == {}  # type: ignore[attr-defined]
+
+
 async def test_customers_update_malformed_payload_ignored() -> None:
     body = json.dumps({"first_name": "no id"}).encode()
     resp = await post(body, headers(body, topic="customers/update", webhook_id="wh-cust2"))
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "ignored": True}
+    assert get_container().ingest.customers == {}  # type: ignore[attr-defined]
+
+
+async def test_customers_update_still_acks_200_when_the_mirror_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = get_container().ingest
+
+    async def boom(gid: str) -> bool:
+        raise RuntimeError("mirror unavailable")
+
+    monkeypatch.setattr(store, "customer_exists", boom)
+    body = json.dumps(customer_payload()).encode()
+    resp = await post(body, headers(body, topic="customers/update", webhook_id="wh-cust-down"))
     assert resp.status_code == 200
 
 

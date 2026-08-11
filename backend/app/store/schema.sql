@@ -168,3 +168,12 @@ CREATE TABLE IF NOT EXISTS order_items (
 );
 CREATE INDEX IF NOT EXISTS idx_order_items_order_gid ON order_items (order_gid);
 CREATE INDEX IF NOT EXISTS idx_order_items_sku ON order_items (sku);
+
+-- Shopify's own last-modified stamp for the mirrored resource (distinct from synced_at, which
+-- is when WE wrote the row). Shopify does not guarantee webhook delivery order, so the mirror
+-- upserts compare this value and refuse a write that is older than the stored one — otherwise a
+-- late-arriving retry of an older orders/updated silently reverts fulfillment_status/cancelled_at
+-- (permanently, for a terminal order with no further update coming). NULL = unknown, which is
+-- always writable (backfill path / payloads without the field).
+ALTER TABLE orders    ADD COLUMN IF NOT EXISTS updated_at timestamptz;
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS updated_at timestamptz;

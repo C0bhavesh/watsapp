@@ -82,6 +82,9 @@ def _customer_from_node(node: dict[str, Any]) -> Customer | None:
         state=shipping.get("province"),
         postal_code=shipping.get("zip"),
         country=shipping.get("country"),
+        # Not in the GraphQL selection set today -> None, which the mirror's ordering guard
+        # treats as "always writable" (a read-path/backfill write is never a stale replay).
+        updated_at=customer.get("updatedAt"),
     )
 
 
@@ -105,6 +108,7 @@ def _order_from_node(node: dict[str, Any]) -> Order:
         customer_locale=node.get("customerLocale"),
         line_items=_line_items_from_node(node),
         customer=_customer_from_node(node),
+        updated_at=node.get("updatedAt"),  # see _customer_from_node
     )
 
 

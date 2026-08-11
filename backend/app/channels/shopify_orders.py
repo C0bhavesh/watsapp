@@ -6,9 +6,23 @@ from app.shopify.models import Customer, LineItem, Money, Order
 
 SUPPORTED_LANGUAGES = frozenset({"en", "hi", "gu"})
 
+# Every string on a signed-but-attacker-typed webhook payload is untrusted, so nothing
+# unbounded reaches a text column. Declared here (next to the parsers that produce those
+# strings) and imported by shopify_webhook.py so the cap has one definition.
+MAX_FIELD_LEN = 256
+
+
+def clip(v: str | None) -> str | None:
+    return v if v is None else v[:MAX_FIELD_LEN]
+
 
 def _s(v: object) -> str | None:
     return v if isinstance(v, str) else None
+
+
+def _c(v: object) -> str | None:
+    """A payload string, coerced and length-capped — the mirror parsers' default accessor."""
+    return clip(_s(v))
 
 
 def _d(v: object) -> dict[str, object]:
@@ -111,18 +125,18 @@ def _line_items_from_webhook(raw: object) -> tuple[LineItem, ...]:
     items: list[LineItem] = []
     for node in _seq(raw):
         item = _d(node)
-        title = _s(item.get("title"))
+        title = _c(item.get("title"))
         if title is None:
             continue
         quantity = item.get("quantity")
-        price_raw = _s(item.get("price"))
+        price_raw = _c(item.get("price"))
         items.append(
             LineItem(
                 title=title,
                 quantity=int(quantity) if isinstance(quantity, int) else 0,
-                variant_title=_s(item.get("variant_title")),
+                variant_title=_c(item.get("variant_title")),
                 price=Money(amount=price_raw, currency="INR") if price_raw else None,
-                sku=_s(item.get("sku")),
+                sku=_c(item.get("sku")),
             )
         )
     return tuple(items)
@@ -136,16 +150,17 @@ def _customer_from_order_payload(payload: dict) -> Customer | None:  # type: ign
     shipping = _d(payload.get("shipping_address"))
     return Customer(
         gid=gid,
-        first_name=_s(customer.get("first_name")),
-        last_name=_s(customer.get("last_name")),
-        email=_s(customer.get("email")),
-        phone=normalize_phone(_s(customer.get("phone"))) or _s(customer.get("phone")),
-        address_line1=_s(shipping.get("address1")),
-        address_line2=_s(shipping.get("address2")),
-        city=_s(shipping.get("city")),
-        state=_s(shipping.get("province")),
-        postal_code=_s(shipping.get("zip")),
-        country=_s(shipping.get("country")),
+        first_name=_c(customer.get("first_name")),
+        last_name=_c(customer.get("last_name")),
+        email=_c(customer.get("email")),
+        phone=normalize_phone(_s(customer.get("phone"))) or _c(customer.get("phone")),
+        address_line1=_c(shipping.get("address1")),
+        address_line2=_c(shipping.get("address2")),
+        city=_c(shipping.get("city")),
+        state=_c(shipping.get("province")),
+        postal_code=_c(shipping.get("zip")),
+        country=_c(shipping.get("country")),
+        updated_at=_c(customer.get("updated_at")),
     )
 
 
@@ -162,26 +177,29 @@ def order_from_webhook_payload(payload: dict) -> Order | None:  # type: ignore[t
     raw_tags = payload.get("tags")
     tags: tuple[str, ...] = ()
     if isinstance(raw_tags, str):
-        tags = tuple(t.strip() for t in raw_tags.split(",") if t.strip())
-    gateways = tuple(str(g) for g in _seq(payload.get("payment_gateway_names")))
-    total_price = _s(payload.get("total_price"))
-    currency = _s(payload.get("currency")) or "INR"
+        tags = tuple(t.strip()[:MAX_FIELD_LEN] for t in raw_tags.split(",") if t.strip())
+    gateways = tuple(str(g)[:MAX_FIELD_LEN] for g in _seq(payload.get("payment_gateway_names")))
+    total_price = _c(payload.get("total_price"))
+    currency = _c(payload.get("currency")) or "INR"
+    # gid is the mirror's primary key and is deliberately NOT clipped: truncating it could
+    # collapse two distinct orders onto one row. The 1 MiB body cap bounds its length.
     return Order(
         gid=gid,
-        name=name,
-        email=_s(payload.get("email")),
+        name=name[:MAX_FIELD_LEN],
+        email=_c(payload.get("email")),
         phone=normalize_phone(_s(payload.get("phone"))),
         shipping_phone=normalize_phone(_s(shipping.get("phone"))),
         billing_phone=normalize_phone(_s(billing.get("phone"))),
-        financial_status=_s(payload.get("financial_status")),
-        fulfillment_status=_s(payload.get("fulfillment_status")),
-        cancelled_at=_s(payload.get("cancelled_at")),
+        financial_status=_c(payload.get("financial_status")),
+        fulfillment_status=_c(payload.get("fulfillment_status")),
+        cancelled_at=_c(payload.get("cancelled_at")),
         tags=tags,
         payment_gateway_names=gateways,
         total=Money(amount=total_price, currency=currency) if total_price else None,
-        customer_locale=_s(payload.get("customer_locale")),
+        customer_locale=_c(payload.get("customer_locale")),
         line_items=_line_items_from_webhook(payload.get("line_items")),
         customer=_customer_from_order_payload(payload),
+        updated_at=_c(payload.get("updated_at")),
     )
 
 
@@ -194,14 +212,15 @@ def customer_from_webhook_payload(payload: dict) -> Customer | None:  # type: ig
     address = _d(payload.get("default_address"))
     return Customer(
         gid=gid,
-        first_name=_s(payload.get("first_name")),
-        last_name=_s(payload.get("last_name")),
-        email=_s(payload.get("email")),
-        phone=normalize_phone(_s(payload.get("phone"))) or _s(payload.get("phone")),
-        address_line1=_s(address.get("address1")),
-        address_line2=_s(address.get("address2")),
-        city=_s(address.get("city")),
-        state=_s(address.get("province")),
-        postal_code=_s(address.get("zip")),
-        country=_s(address.get("country")),
+        first_name=_c(payload.get("first_name")),
+        last_name=_c(payload.get("last_name")),
+        email=_c(payload.get("email")),
+        phone=normalize_phone(_s(payload.get("phone"))) or _c(payload.get("phone")),
+        address_line1=_c(address.get("address1")),
+        address_line2=_c(address.get("address2")),
+        city=_c(address.get("city")),
+        state=_c(address.get("province")),
+        postal_code=_c(address.get("zip")),
+        country=_c(address.get("country")),
+        updated_at=_c(payload.get("updated_at")),
     )

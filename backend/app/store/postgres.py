@@ -22,17 +22,41 @@ def _rows_affected(tag: str) -> int:
     return int(last) if last.isdigit() else 0
 
 
+# orders.order_number is an int4; nine digits is far beyond any real Tavas order number
+# (four today) while staying inside the column's range.
+_MAX_ORDER_NUMBER_DIGITS = 9
+
+# One INSERT per line item, unbounded, runs inside a transaction holding a row lock on a
+# 5-connection pool shared with the WhatsApp reply path — a bulk-operation webhook burst or a
+# pathological order could stall live replies. Matches the `first: 50` cap the GraphQL
+# line-items selection already uses.
+MAX_MIRROR_LINE_ITEMS = 50
+
+
 def _order_number_from_name(name: str) -> int | None:
     """``Order`` has no ``order_number`` field (only ``IncomingOrder`` does, for the separate
     ``order_mappings`` flow) -- derive it from ``Order.name`` at write time instead of widening
     ``Order``'s shape for one column only the mirror needs (Shopify order names are the store
-    prefix + this same number, e.g. ``"tavas3733"`` -> ``3733``)."""
-    digits = "".join(c for c in name if c.isdigit())
-    return int(digits) if digits else None
+    prefix + this same number, e.g. ``"tavas3733"`` -> ``3733``).
+
+    Two ways the naive version raised on a signed delivery (a 500 burns Shopify's 19-failure
+    retry budget): ``str.isdigit()`` is Unicode-aware but ``int()`` is not (``"²"`` passes the
+    filter and then raises), and a date-prefixed name (``"TV20260811-3733"``) yields a value
+    too large for the int4 column, raising at the DB layer. Require ASCII digits, cap the run
+    length, and keep the ``ValueError`` guard as a backstop.
+    """
+    digits = "".join(c for c in name if c.isascii() and c.isdigit())
+    if not digits or len(digits) > _MAX_ORDER_NUMBER_DIGITS:
+        return None
+    try:
+        return int(digits)
+    except ValueError:
+        return None
 
 
-def _parse_cancelled_at(raw: str | None) -> datetime | None:
-    """Shopify's ``cancelled_at`` is a raw ISO-8601 str; ``orders.cancelled_at`` is timestamptz.
+def _parse_timestamp(raw: str | None) -> datetime | None:
+    """Shopify sends ``cancelled_at``/``updated_at`` as raw ISO-8601 strs; the columns are
+    timestamptz.
 
     asyncpg's timestamptz codec requires an actual ``datetime`` (or ``None``) — binding the raw
     string raises ``asyncpg.exceptions.DataError``. Mirrors
@@ -56,14 +80,20 @@ async def _upsert_customer_on_conn(conn: asyncpg.Connection, customer: Customer)
     """
     await conn.execute(
         "INSERT INTO customers (gid, first_name, last_name, email, phone, "
-        "address_line1, address_line2, city, state, postal_code, country, synced_at) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now()) "
+        "address_line1, address_line2, city, state, postal_code, country, updated_at, "
+        "synced_at) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now()) "
         "ON CONFLICT (gid) DO UPDATE SET first_name = $2, last_name = $3, email = $4, "
         "phone = $5, address_line1 = $6, address_line2 = $7, city = $8, state = $9, "
-        "postal_code = $10, country = $11, synced_at = now()",
+        "postal_code = $10, country = $11, updated_at = $12, synced_at = now() "
+        # Out-of-order-delivery guard: a late RETRY of an older update must not overwrite a
+        # newer row. A NULL on either side still writes (backfill/payload without the field).
+        "WHERE customers.updated_at IS NULL OR EXCLUDED.updated_at IS NULL "
+        "OR EXCLUDED.updated_at >= customers.updated_at",
         customer.gid, customer.first_name, customer.last_name, customer.email,
         customer.phone, customer.address_line1, customer.address_line2, customer.city,
         customer.state, customer.postal_code, customer.country,
+        _parse_timestamp(customer.updated_at),
     )
 
 
@@ -178,6 +208,11 @@ class PostgresIngestStore:
         async with self._pool.acquire() as conn:
             await _upsert_customer_on_conn(conn, customer)
 
+    async def customer_exists(self, gid: str) -> bool:
+        async with self._pool.acquire() as conn:
+            found = await conn.fetchval("SELECT 1 FROM customers WHERE gid = $1", gid)
+        return found is not None
+
     async def upsert_order_mirror(self, order: Order) -> None:
         async with self._pool.acquire() as conn:
             async with conn.transaction():
@@ -186,38 +221,59 @@ class PostgresIngestStore:
                 customer_gid = order.customer.gid if order.customer is not None else None
                 total_amount = order.total.amount if order.total is not None else None
                 total_currency = order.total.currency if order.total is not None else None
-                await conn.execute(
+                applied = await conn.fetchval(
                     "INSERT INTO orders (gid, name, order_number, customer_gid, email, "
                     "phone, shipping_phone, billing_phone, financial_status, "
                     "fulfillment_status, cancelled_at, tags, payment_gateway_names, "
-                    "total_amount, total_currency, customer_locale, synced_at) VALUES "
-                    "($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, "
-                    "now()) ON CONFLICT (gid) DO UPDATE SET name = $2, order_number = $3, "
+                    "total_amount, total_currency, customer_locale, updated_at, synced_at) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, "
+                    "$16, $17, now()) ON CONFLICT (gid) DO UPDATE SET name = $2, "
+                    "order_number = $3, "
                     "customer_gid = $4, email = $5, phone = $6, shipping_phone = $7, "
                     "billing_phone = $8, financial_status = $9, fulfillment_status = $10, "
                     "cancelled_at = $11, tags = $12, payment_gateway_names = $13, "
                     "total_amount = $14, total_currency = $15, customer_locale = $16, "
-                    "synced_at = now()",
+                    "updated_at = $17, synced_at = now() "
+                    # Out-of-order-delivery guard (see _upsert_customer_on_conn): a late RETRY
+                    # of an older orders/updated must not revert newer state -- on a terminal
+                    # order (cancelled/fulfilled) nothing would ever correct it again.
+                    "WHERE orders.updated_at IS NULL OR EXCLUDED.updated_at IS NULL "
+                    "OR EXCLUDED.updated_at >= orders.updated_at "
+                    "RETURNING gid",
                     order.gid, order.name, _order_number_from_name(order.name),
                     customer_gid, order.email, order.phone,
                     order.shipping_phone, order.billing_phone, order.financial_status,
-                    order.fulfillment_status, _parse_cancelled_at(order.cancelled_at),
+                    order.fulfillment_status, _parse_timestamp(order.cancelled_at),
                     list(order.tags),
                     list(order.payment_gateway_names), total_amount, total_currency,
-                    order.customer_locale,
+                    order.customer_locale, _parse_timestamp(order.updated_at),
                 )
+                if applied is None:
+                    # The guard rejected this write as stale; leave the stored items alone
+                    # rather than replacing them with older ones.
+                    return
+                # ORDERING IS LOAD-BEARING: the orders upsert above takes the row-exclusive
+                # lock that serializes concurrent same-gid syncs. Only because it runs FIRST is
+                # this delete + re-insert safe from interleaving into duplicated line items
+                # (there is no unique constraint on order_items enforcing that independently).
+                # Do not reorder these statements or move them out of this transaction.
                 await conn.execute(
                     "DELETE FROM order_items WHERE order_gid = $1", order.gid
                 )
-                for item in order.line_items:
-                    price_amount = item.price.amount if item.price is not None else None
-                    price_currency = item.price.currency if item.price is not None else None
-                    await conn.execute(
+                rows = [
+                    (
+                        order.gid, item.title, item.sku, item.quantity, item.variant_title,
+                        item.price.amount if item.price is not None else None,
+                        item.price.currency if item.price is not None else None,
+                    )
+                    for item in order.line_items[:MAX_MIRROR_LINE_ITEMS]
+                ]
+                if rows:
+                    await conn.executemany(
                         "INSERT INTO order_items (order_gid, title, sku, quantity, "
                         "variant_title, price_amount, price_currency) VALUES "
                         "($1, $2, $3, $4, $5, $6, $7)",
-                        order.gid, item.title, item.sku, item.quantity, item.variant_title,
-                        price_amount, price_currency,
+                        rows,
                     )
 
     async def recent_mappings(self, limit: int) -> list[MappingView]:
@@ -284,6 +340,13 @@ class PostgresIngestStore:
     async def delete_by_phone(self, phone_e164: str) -> DeletionResult:
         """DPDP right-to-erasure: purge every row keyed to one phone number, atomically.
 
+        Covers order_mappings, outbound_messages, conversations, messages, pending_actions,
+        order_actions and the order-mirror tables (customers on its own phone; orders on any of
+        phone/shipping_phone/billing_phone — order_items follow their order via the FK's
+        ON DELETE CASCADE, so they need no separate statement). Orders are deleted before
+        customers so the parent row goes away without first being nulled by
+        ``customer_gid``'s ON DELETE SET NULL.
+
         Children (messages) are deleted before parents (conversations) for FK integrity.
         conversations/messages have no repo writer yet (Phase 4) but are cleaned defensively
         so erasure is complete the moment that layer starts persisting. pending_actions is
@@ -316,6 +379,14 @@ class PostgresIngestStore:
                 actions = await conn.execute(
                     "DELETE FROM order_actions WHERE actor_wa_id = $1", phone_e164
                 )
+                orders = await conn.execute(
+                    "DELETE FROM orders WHERE phone = $1 OR shipping_phone = $1 "
+                    "OR billing_phone = $1",
+                    phone_e164,
+                )
+                customers = await conn.execute(
+                    "DELETE FROM customers WHERE phone = $1", phone_e164
+                )
         return DeletionResult(
             order_mappings=_rows_affected(mappings),
             outbound_messages=_rows_affected(outbound),
@@ -323,6 +394,8 @@ class PostgresIngestStore:
             messages=_rows_affected(msgs),
             pending_actions=_rows_affected(pending),
             order_actions=_rows_affected(actions),
+            customers=_rows_affected(customers),
+            orders=_rows_affected(orders),
         )
 
     async def purge_older_than(self, cutoff: datetime) -> DeletionResult:

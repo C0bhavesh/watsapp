@@ -8,6 +8,7 @@ plus the age-only processed_messages purge) without needing a live database.
 
 from datetime import UTC, datetime
 
+from app.shopify.models import Customer, LineItem, Order
 from app.store.base import DeletionResult, MappingUpsert, OutboundDraft
 from app.store.memory import InMemoryIngestStore
 from app.store.postgres import PostgresIngestStore
@@ -78,6 +79,39 @@ async def test_delete_by_phone_no_match_returns_zeros() -> None:
         order_actions=0,
     )
     assert set(store.mappings) == {"gid://shopify/Order/1"}
+
+
+def _mirror_order(gid: str, phone: str) -> Order:
+    return Order(
+        gid=gid, name="tavas1", email="a@b.c", phone=None, shipping_phone=phone,
+        billing_phone=None, financial_status="PENDING", fulfillment_status="UNFULFILLED",
+        cancelled_at=None, tags=(), payment_gateway_names=(), total=None,
+        customer_locale="en",
+        line_items=(
+            LineItem(title="Blue Kurti", quantity=1, variant_title=None, price=None),
+        ),
+        customer=Customer(
+            gid=f"{gid}/customer", first_name="A", last_name="B", email="a@b.c", phone=phone,
+            address_line1="12 MG Road", address_line2=None, city="Pune", state=None,
+            postal_code=None, country="India",
+        ),
+    )
+
+
+async def test_delete_by_phone_removes_the_mirrored_order_customer_and_items() -> None:
+    """The mirror tables hold name/email/phone/postal address — DPDP erasure must reach them."""
+    store = InMemoryIngestStore()
+    await store.upsert_order_mirror(_mirror_order("gid://shopify/Order/1", "+919111111111"))
+    await store.upsert_order_mirror(_mirror_order("gid://shopify/Order/2", "+919222222222"))
+
+    result = await store.delete_by_phone("+919111111111")
+
+    assert result.orders == 1
+    assert result.customers == 1
+    assert set(store.orders) == {"gid://shopify/Order/2"}
+    assert set(store.customers) == {"gid://shopify/Order/2/customer"}
+    # order_items follow their order (FK ON DELETE CASCADE in Postgres).
+    assert set(store.order_items) == {"gid://shopify/Order/2"}
 
 
 async def test_purge_older_than_inmemory_is_noop_without_timestamps() -> None:
@@ -164,6 +198,24 @@ async def test_pg_delete_by_phone_targets_every_phone_bearing_table() -> None:
     joined = " ".join(conn.executed)
     assert "DELETE FROM pending_actions WHERE wa_id = $1" in joined
     assert "DELETE FROM order_actions WHERE actor_wa_id = $1" in joined
+
+
+async def test_pg_delete_by_phone_covers_the_order_mirror_tables() -> None:
+    """The mirror's customers/orders rows hold personal data keyed to a phone number."""
+    conn = _FakeConn()
+    store = PostgresIngestStore(_FakePool(conn))  # type: ignore[arg-type]
+
+    await store.delete_by_phone("+919111111111")
+
+    tables = _targets(conn)
+    assert "customers" in tables
+    assert "orders" in tables
+    joined = " ".join(conn.executed)
+    # An order can carry the number in any of three columns; order_items cascade off orders.
+    assert (
+        "DELETE FROM orders WHERE phone = $1 OR shipping_phone = $1 OR billing_phone = $1"
+    ) in joined
+    assert "DELETE FROM customers WHERE phone = $1" in joined
 
 
 async def test_pg_delete_by_phone_binds_the_e164_phone_to_conversations_user_id() -> None:

@@ -103,6 +103,9 @@ class InMemoryIngestStore:
         self.orders[order.gid] = order
         self.order_items[order.gid] = order.line_items
 
+    async def customer_exists(self, gid: str) -> bool:
+        return gid in self.customers
+
     async def recent_mappings(self, limit: int) -> list[MappingView]:
         views = [
             MappingView(
@@ -161,6 +164,21 @@ class InMemoryIngestStore:
             if meta is not None:
                 self._outbound_by_id.pop(meta.id, None)
             del self.outbound[key]
+        # Mirror tables: an order carries the number in any of three columns; its items follow
+        # it (the Postgres FK cascades), and a customer row is matched on its own phone.
+        removed_orders = [
+            gid
+            for gid, o in self.orders.items()
+            if phone_e164 in (o.phone, o.shipping_phone, o.billing_phone)
+        ]
+        for gid in removed_orders:
+            del self.orders[gid]
+            self.order_items.pop(gid, None)
+        removed_customers = [
+            gid for gid, cust in self.customers.items() if cust.phone == phone_e164
+        ]
+        for gid in removed_customers:
+            del self.customers[gid]
         # No in-memory conversation/message/action store yet (Phase 4) -> those counts stay 0.
         return DeletionResult(
             order_mappings=len(removed_mappings),
@@ -169,6 +187,8 @@ class InMemoryIngestStore:
             messages=0,
             pending_actions=0,
             order_actions=0,
+            customers=len(removed_customers),
+            orders=len(removed_orders),
         )
 
     async def purge_older_than(self, cutoff: datetime) -> DeletionResult:

@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 from app.channels.shopify_orders import (
+    MAX_FIELD_LEN,
     IncomingOrder,
     choose_language,
     customer_from_webhook_payload,
@@ -234,3 +235,67 @@ def test_customer_from_webhook_payload_no_default_address() -> None:
     assert cust is not None
     assert cust.address_line1 is None
     assert cust.city is None
+
+
+def test_webhook_payloads_carry_updated_at_for_the_ordering_guard() -> None:
+    # Shopify sends updated_at on both resources; the mirror needs it to reject a late-arriving
+    # RETRY of an older update that would otherwise revert newer state.
+    order = order_from_webhook_payload(
+        {**ORDER_WEBHOOK_PAYLOAD, "updated_at": "2026-08-11T12:00:00Z"}
+    )
+    assert order is not None
+    assert order.updated_at == "2026-08-11T12:00:00Z"
+    cust = customer_from_webhook_payload(
+        {**CUSTOMER_UPDATE_PAYLOAD, "updated_at": "2026-08-11T12:00:00Z"}
+    )
+    assert cust is not None
+    assert cust.updated_at == "2026-08-11T12:00:00Z"
+
+
+def test_missing_updated_at_is_none_not_a_failure() -> None:
+    order = order_from_webhook_payload(ORDER_WEBHOOK_PAYLOAD)
+    assert order is not None and order.updated_at is None
+
+
+def test_order_from_webhook_payload_clips_oversized_fields() -> None:
+    # Same posture as the orders/create mapping write: every field on a signed payload is
+    # attacker-typed, so nothing unbounded reaches a text column in the mirror.
+    long = "x" * 5000
+    p = {
+        **ORDER_WEBHOOK_PAYLOAD,
+        "name": long,
+        "email": long,
+        "tags": long,
+        "total_price": long,
+        "line_items": [{"title": long, "sku": long, "quantity": 1, "variant_title": long,
+                        "price": long}],
+        "customer": {**ORDER_WEBHOOK_PAYLOAD["customer"], "first_name": long},  # type: ignore[dict-item]
+        "shipping_address": {**ORDER_WEBHOOK_PAYLOAD["shipping_address"], "city": long},  # type: ignore[dict-item]
+    }
+    order = order_from_webhook_payload(p)
+    assert order is not None
+    assert len(order.name) == MAX_FIELD_LEN
+    assert order.email is not None and len(order.email) == MAX_FIELD_LEN
+    assert len(order.tags[0]) == MAX_FIELD_LEN
+    assert order.total is not None and len(order.total.amount) == MAX_FIELD_LEN
+    item = order.line_items[0]
+    assert len(item.title) == MAX_FIELD_LEN
+    assert item.sku is not None and len(item.sku) == MAX_FIELD_LEN
+    assert item.variant_title is not None and len(item.variant_title) == MAX_FIELD_LEN
+    assert order.customer is not None
+    assert order.customer.first_name is not None
+    assert len(order.customer.first_name) == MAX_FIELD_LEN
+    assert order.customer.city is not None and len(order.customer.city) == MAX_FIELD_LEN
+
+
+def test_customer_from_webhook_payload_clips_oversized_fields() -> None:
+    long = "y" * 5000
+    cust = customer_from_webhook_payload(
+        {**CUSTOMER_UPDATE_PAYLOAD, "first_name": long, "email": long,
+         "default_address": {"address1": long, "city": long}}
+    )
+    assert cust is not None
+    assert cust.first_name is not None and len(cust.first_name) == MAX_FIELD_LEN
+    assert cust.email is not None and len(cust.email) == MAX_FIELD_LEN
+    assert cust.address_line1 is not None and len(cust.address_line1) == MAX_FIELD_LEN
+    assert cust.city is not None and len(cust.city) == MAX_FIELD_LEN

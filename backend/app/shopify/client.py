@@ -1,6 +1,6 @@
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import httpx
@@ -239,6 +239,27 @@ class ShopifyClient:
         data = await self._graphql(query, {"q": f"name:{name}"})
         edges = (data.get("orders") or {}).get("edges") or []
         return _order_from_node(edges[0]["node"]) if edges else None
+
+    async def list_orders_created_since(self, since_iso: str) -> AsyncIterator[Order]:
+        """Page through every order created on or after ``since_iso`` (a date string like
+        "2025-08-10"), yielding each as an ``Order``. Used only by the one-time backfill
+        script -- not part of any live customer-facing read path."""
+        query = (
+            "query($q: String!, $cursor: String) { orders(first: 50, after: $cursor, "
+            f"query: $q) {{ edges {{ cursor node {{ {ORDER_FIELDS} }} }} "
+            "pageInfo { hasNextPage } } }"
+        )
+        cursor: str | None = None
+        search = f"created_at:>={since_iso}"
+        while True:
+            data = await self._graphql(query, {"q": search, "cursor": cursor})
+            connection = data.get("orders") or {}
+            edges = connection.get("edges") or []
+            for edge in edges:
+                yield _order_from_node(edge["node"])
+            if not edges or not (connection.get("pageInfo") or {}).get("hasNextPage"):
+                return
+            cursor = edges[-1]["cursor"]
 
     async def find_customer_orders_by_phone(self, phone_e164: str) -> list[Order]:
         if re.fullmatch(r"\+[1-9]\d{7,14}", phone_e164) is None:

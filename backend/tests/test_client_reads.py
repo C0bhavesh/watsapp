@@ -469,3 +469,47 @@ async def test_search_products_legitimate_free_text_works(settings, master_key) 
     results = await client.search_products("blue kurti for wedding")
     assert results is not None and len(results) == 1
     assert results[0].title == "Blue Chikankari Kurti"
+
+
+async def test_list_orders_created_since_pages_through_results(settings, master_key) -> None:
+    page1 = {
+        "orders": {
+            "edges": [{"cursor": "c1", "node": ORDER_NODE}],
+            "pageInfo": {"hasNextPage": True},
+        }
+    }
+    page2_node = {**ORDER_NODE, "id": "gid://shopify/Order/second", "name": "tavas9999"}
+    page2 = {
+        "orders": {
+            "edges": [{"cursor": "c2", "node": page2_node}],
+            "pageInfo": {"hasNextPage": False},
+        }
+    }
+    calls: list[dict] = []
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body)
+        if body["variables"].get("cursor") is None:
+            return httpx.Response(200, json={"data": page1})
+        return httpx.Response(200, json={"data": page2})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    orders = [o async for o in client.list_orders_created_since("2025-08-10")]
+    assert len(orders) == 2
+    assert orders[0].gid == "gid://shopify/Order/12187547894128"
+    assert orders[1].gid == "gid://shopify/Order/second"
+    assert len(calls) == 2
+    assert calls[1]["variables"]["cursor"] == "c1"
+
+
+async def test_list_orders_created_since_empty_result(settings, master_key) -> None:
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"orders": {
+            "edges": [], "pageInfo": {"hasNextPage": False}}}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    orders = [o async for o in client.list_orders_created_since("2025-08-10")]
+    assert orders == []

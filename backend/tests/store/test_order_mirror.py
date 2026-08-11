@@ -1,5 +1,6 @@
 import os
 import uuid
+from datetime import datetime
 
 import pytest
 
@@ -116,3 +117,17 @@ async def test_upsert_order_mirror_pg_dedupes_customer_and_order_and_items(
     assert customer_count == 1
     assert order_count == 1
     assert [str(r["title"]) for r in items] == ["New Item"]
+
+
+@pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")
+async def test_upsert_order_mirror_pg_cancelled_at_round_trips(pool: LazyPool) -> None:
+    # Order.cancelled_at is a raw ISO-8601 str from Shopify; the orders.cancelled_at column
+    # is timestamptz, so asyncpg requires an actual datetime — this must not raise DataError.
+    store = PostgresIngestStore(pool)
+    gid = f"gid://shopify/Order/{uuid.uuid4()}"
+    cancelled_at = "2026-07-28T00:00:00+00:00"
+    await store.upsert_order_mirror(_order(gid=gid, customer=None, cancelled_at=cancelled_at))
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT cancelled_at FROM orders WHERE gid = $1", gid)
+    assert row is not None
+    assert row["cancelled_at"] == datetime.fromisoformat(cancelled_at)

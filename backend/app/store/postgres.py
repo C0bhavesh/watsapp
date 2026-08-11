@@ -1,5 +1,7 @@
 from datetime import datetime
 
+import asyncpg
+
 from app.shopify.models import Customer, Order
 from app.store.base import (
     DeletionResult,
@@ -18,6 +20,42 @@ def _rows_affected(tag: str) -> int:
     """Rows from an asyncpg command tag, e.g. 'INSERT 0 10' -> 10 (parse suffix, not endswith)."""
     last = tag.rsplit(" ", 1)[-1]
     return int(last) if last.isdigit() else 0
+
+
+def _parse_cancelled_at(raw: str | None) -> datetime | None:
+    """Shopify's ``cancelled_at`` is a raw ISO-8601 str; ``orders.cancelled_at`` is timestamptz.
+
+    asyncpg's timestamptz codec requires an actual ``datetime`` (or ``None``) — binding the raw
+    string raises ``asyncpg.exceptions.DataError``. Mirrors
+    ``channels/shopify_orders._parse_created_at``: malformed input degrades to ``None`` rather
+    than raising, since every field on a signed-but-attacker-typed payload is untrusted.
+    """
+    if raw is None:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+async def _upsert_customer_on_conn(conn: asyncpg.Connection, customer: Customer) -> None:
+    """Shared by the standalone ``upsert_customer`` and ``upsert_order_mirror``'s transaction.
+
+    Not called from both via the standalone method itself — ``upsert_order_mirror`` must run the
+    customer upsert on the SAME connection/transaction as the order + line-item writes, so this
+    takes an already-acquired ``conn`` rather than acquiring its own.
+    """
+    await conn.execute(
+        "INSERT INTO customers (gid, first_name, last_name, email, phone, "
+        "address_line1, address_line2, city, state, postal_code, country, synced_at) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now()) "
+        "ON CONFLICT (gid) DO UPDATE SET first_name = $2, last_name = $3, email = $4, "
+        "phone = $5, address_line1 = $6, address_line2 = $7, city = $8, state = $9, "
+        "postal_code = $10, country = $11, synced_at = now()",
+        customer.gid, customer.first_name, customer.last_name, customer.email,
+        customer.phone, customer.address_line1, customer.address_line2, customer.city,
+        customer.state, customer.postal_code, customer.country,
+    )
 
 
 class PostgresConfigRepo:
@@ -129,36 +167,13 @@ class PostgresIngestStore:
 
     async def upsert_customer(self, customer: Customer) -> None:
         async with self._pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO customers (gid, first_name, last_name, email, phone, "
-                "address_line1, address_line2, city, state, postal_code, country, synced_at) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now()) "
-                "ON CONFLICT (gid) DO UPDATE SET first_name = $2, last_name = $3, email = $4, "
-                "phone = $5, address_line1 = $6, address_line2 = $7, city = $8, state = $9, "
-                "postal_code = $10, country = $11, synced_at = now()",
-                customer.gid, customer.first_name, customer.last_name, customer.email,
-                customer.phone, customer.address_line1, customer.address_line2, customer.city,
-                customer.state, customer.postal_code, customer.country,
-            )
+            await _upsert_customer_on_conn(conn, customer)
 
     async def upsert_order_mirror(self, order: Order) -> None:
         async with self._pool.acquire() as conn:
             async with conn.transaction():
                 if order.customer is not None:
-                    await conn.execute(
-                        "INSERT INTO customers (gid, first_name, last_name, email, phone, "
-                        "address_line1, address_line2, city, state, postal_code, country, "
-                        "synced_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, "
-                        "now()) ON CONFLICT (gid) DO UPDATE SET first_name = $2, "
-                        "last_name = $3, email = $4, phone = $5, address_line1 = $6, "
-                        "address_line2 = $7, city = $8, state = $9, postal_code = $10, "
-                        "country = $11, synced_at = now()",
-                        order.customer.gid, order.customer.first_name,
-                        order.customer.last_name, order.customer.email, order.customer.phone,
-                        order.customer.address_line1, order.customer.address_line2,
-                        order.customer.city, order.customer.state, order.customer.postal_code,
-                        order.customer.country,
-                    )
+                    await _upsert_customer_on_conn(conn, order.customer)
                 customer_gid = order.customer.gid if order.customer is not None else None
                 total_amount = order.total.amount if order.total is not None else None
                 total_currency = order.total.currency if order.total is not None else None
@@ -180,7 +195,8 @@ class PostgresIngestStore:
                     None,
                     customer_gid, order.email, order.phone,
                     order.shipping_phone, order.billing_phone, order.financial_status,
-                    order.fulfillment_status, order.cancelled_at, list(order.tags),
+                    order.fulfillment_status, _parse_cancelled_at(order.cancelled_at),
+                    list(order.tags),
                     list(order.payment_gateway_names), total_amount, total_currency,
                     order.customer_locale,
                 )

@@ -22,6 +22,15 @@ def _rows_affected(tag: str) -> int:
     return int(last) if last.isdigit() else 0
 
 
+def _order_number_from_name(name: str) -> int | None:
+    """``Order`` has no ``order_number`` field (only ``IncomingOrder`` does, for the separate
+    ``order_mappings`` flow) -- derive it from ``Order.name`` at write time instead of widening
+    ``Order``'s shape for one column only the mirror needs (Shopify order names are the store
+    prefix + this same number, e.g. ``"tavas3733"`` -> ``3733``)."""
+    digits = "".join(c for c in name if c.isdigit())
+    return int(digits) if digits else None
+
+
 def _parse_cancelled_at(raw: str | None) -> datetime | None:
     """Shopify's ``cancelled_at`` is a raw ISO-8601 str; ``orders.cancelled_at`` is timestamptz.
 
@@ -189,10 +198,7 @@ class PostgresIngestStore:
                     "cancelled_at = $11, tags = $12, payment_gateway_names = $13, "
                     "total_amount = $14, total_currency = $15, customer_locale = $16, "
                     "synced_at = now()",
-                    order.gid, order.name,
-                    # order_number/sku not on Order/LineItem yet -- Task 3 adds them and
-                    # wires real values here
-                    None,
+                    order.gid, order.name, _order_number_from_name(order.name),
                     customer_gid, order.email, order.phone,
                     order.shipping_phone, order.billing_phone, order.financial_status,
                     order.fulfillment_status, _parse_cancelled_at(order.cancelled_at),
@@ -210,11 +216,7 @@ class PostgresIngestStore:
                         "INSERT INTO order_items (order_gid, title, sku, quantity, "
                         "variant_title, price_amount, price_currency) VALUES "
                         "($1, $2, $3, $4, $5, $6, $7)",
-                        order.gid, item.title,
-                        # order_number/sku not on Order/LineItem yet -- Task 3 adds them and
-                        # wires real values here
-                        None,
-                        item.quantity, item.variant_title,
+                        order.gid, item.title, item.sku, item.quantity, item.variant_title,
                         price_amount, price_currency,
                     )
 

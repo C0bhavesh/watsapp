@@ -13,6 +13,7 @@ class LineItem:
     quantity: int
     variant_title: str | None
     price: Money | None
+    sku: str | None = None
 
 
 @dataclass(frozen=True)

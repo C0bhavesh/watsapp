@@ -3,7 +3,9 @@ from datetime import UTC, datetime, timedelta
 from app.channels.shopify_orders import (
     IncomingOrder,
     choose_language,
+    customer_from_webhook_payload,
     is_eligible_for_push,
+    order_from_webhook_payload,
     parse_order_created,
 )
 
@@ -118,3 +120,117 @@ def test_eligibility_unparseable_created_at_is_ineligible() -> None:
     parsed = parse_order_created({"admin_graphql_api_id": "g", "name": "n"})
     assert parsed is not None
     assert not is_eligible_for_push(parsed, datetime.now(UTC), "all", 6.0)
+
+
+ORDER_WEBHOOK_PAYLOAD = {
+    **PAYLOAD,
+    "fulfillment_status": "fulfilled",
+    "cancelled_at": None,
+    "total_price": "949.00",
+    "currency": "INR",
+    "shipping_address": {
+        "phone": "+919664290413", "address1": "12 MG Road", "address2": None,
+        "city": "Bengaluru", "province": "Karnataka", "zip": "560001", "country": "India",
+    },
+    "billing_address": {"phone": None},
+    "customer": {
+        "id": 987654321, "admin_graphql_api_id": "gid://shopify/Customer/987654321",
+        "first_name": "Suman", "last_name": "Bayala", "email": "c@example.com", "phone": None,
+    },
+    "line_items": [
+        {"title": "Blue Chikankari Kurti", "sku": "KUR-BLU-M", "quantity": 1,
+         "variant_title": "Blue / M", "price": "999.00"},
+        {"title": "Cotton Dupatta", "sku": None, "quantity": 2,
+         "variant_title": None, "price": "150.00"},
+    ],
+}
+
+
+def test_order_from_webhook_payload_parses_full_order() -> None:
+    order = order_from_webhook_payload(ORDER_WEBHOOK_PAYLOAD)
+    assert order is not None
+    assert order.gid == "gid://shopify/Order/12187547894128"
+    assert order.name == "tavas3733"
+    assert order.fulfillment_status == "fulfilled"
+    assert order.cancelled_at is None
+    assert order.total is not None
+    assert order.total.amount == "949.00" and order.total.currency == "INR"
+    assert order.shipping_phone == "+919664290413"
+    assert order.billing_phone is None
+
+
+def test_order_from_webhook_payload_parses_line_items() -> None:
+    order = order_from_webhook_payload(ORDER_WEBHOOK_PAYLOAD)
+    assert order is not None
+    assert len(order.line_items) == 2
+    first, second = order.line_items
+    assert first.title == "Blue Chikankari Kurti"
+    assert first.sku == "KUR-BLU-M"
+    assert first.variant_title == "Blue / M"
+    assert first.price is not None and first.price.amount == "999.00"
+    assert second.sku is None
+    assert second.variant_title is None
+
+
+def test_order_from_webhook_payload_zero_line_items() -> None:
+    p = {**ORDER_WEBHOOK_PAYLOAD, "line_items": []}
+    order = order_from_webhook_payload(p)
+    assert order is not None
+    assert order.line_items == ()
+
+
+def test_order_from_webhook_payload_missing_gid_returns_none() -> None:
+    assert order_from_webhook_payload({"name": "x"}) is None
+
+
+def test_order_from_webhook_payload_parses_customer() -> None:
+    order = order_from_webhook_payload(ORDER_WEBHOOK_PAYLOAD)
+    assert order is not None
+    assert order.customer is not None
+    assert order.customer.gid == "gid://shopify/Customer/987654321"
+    assert order.customer.first_name == "Suman"
+    assert order.customer.city == "Bengaluru"
+    assert order.customer.postal_code == "560001"
+
+
+def test_order_from_webhook_payload_no_customer_object() -> None:
+    p = {k: v for k, v in ORDER_WEBHOOK_PAYLOAD.items() if k != "customer"}
+    order = order_from_webhook_payload(p)
+    assert order is not None
+    assert order.customer is None
+
+
+CUSTOMER_UPDATE_PAYLOAD = {
+    "id": 987654321,
+    "admin_graphql_api_id": "gid://shopify/Customer/987654321",
+    "first_name": "Suman",
+    "last_name": "Bayala",
+    "email": "c@example.com",
+    "phone": "+919999999999",
+    "default_address": {
+        "address1": "12 MG Road", "address2": "Flat 4B", "city": "Bengaluru",
+        "province": "Karnataka", "zip": "560001", "country": "India",
+    },
+}
+
+
+def test_customer_from_webhook_payload_parses_full_customer() -> None:
+    cust = customer_from_webhook_payload(CUSTOMER_UPDATE_PAYLOAD)
+    assert cust is not None
+    assert cust.gid == "gid://shopify/Customer/987654321"
+    assert cust.first_name == "Suman"
+    assert cust.phone == "+919999999999"
+    assert cust.address_line2 == "Flat 4B"
+    assert cust.postal_code == "560001"
+
+
+def test_customer_from_webhook_payload_missing_id_returns_none() -> None:
+    assert customer_from_webhook_payload({"first_name": "x"}) is None
+
+
+def test_customer_from_webhook_payload_no_default_address() -> None:
+    p = {k: v for k, v in CUSTOMER_UPDATE_PAYLOAD.items() if k != "default_address"}
+    cust = customer_from_webhook_payload(p)
+    assert cust is not None
+    assert cust.address_line1 is None
+    assert cust.city is None

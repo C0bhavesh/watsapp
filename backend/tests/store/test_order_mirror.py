@@ -7,9 +7,17 @@ import pytest
 from app.shopify.models import Customer, LineItem, Money, Order
 from app.store.memory import InMemoryIngestStore
 from app.store.pg_factory import LazyPool
-from app.store.postgres import PostgresIngestStore
+from app.store.postgres import PostgresIngestStore, _order_number_from_name
 
 DSN = os.environ.get("TEST_DATABASE_URL", "")
+
+
+def test_order_number_from_name_extracts_digits() -> None:
+    assert _order_number_from_name("tavas3733") == 3733
+
+
+def test_order_number_from_name_no_digits_is_none() -> None:
+    assert _order_number_from_name("tavas") is None
 
 
 def _customer(gid: str = "gid://shopify/Customer/1", **overrides: object) -> Customer:

@@ -78,6 +78,39 @@ async def test_wrong_url_subscription_is_updated_for_that_topic_only(settings, m
     assert result["CUSTOMERS_UPDATE"] == "ok"
 
 
+async def test_stale_api_version_is_updated_even_with_correct_url(settings, master_key) -> None:
+    # F20: a subscription whose callbackUrl already matches must STILL be updated if its bound
+    # API version has drifted -- isolates the `current_version == version` half of the
+    # correctness check from the callbackUrl half (test_wrong_url_... above only falsifies
+    # the URL half).
+    captured: list[dict] = []
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        captured.append(body)
+        if "webhookSubscriptionUpdate" in body["query"]:
+            return httpx.Response(200, json={"data": {"webhookSubscriptionUpdate": {
+                "webhookSubscription": {"id": "gid://shopify/WebhookSubscription/updated"},
+                "userErrors": []}}})
+        topic = body["variables"].get("topics", ["ORDERS_CREATE"])[0]
+        if topic == "ORDERS_CREATE":
+            return httpx.Response(200, json={"data": {"webhookSubscriptions": {"edges": [
+                sub_edge("https://x.example/webhooks/shopify", topic="ORDERS_CREATE",
+                          version="2025-10")]}}})
+        return httpx.Response(200, json={"data": {"webhookSubscriptions": {"edges": [
+            sub_edge("https://x.example/webhooks/shopify", topic=topic)]}}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    result = await ensure_subscription(client, "https://x.example/webhooks/shopify")
+    assert result["ORDERS_CREATE"] == "updated"
+    assert result["ORDERS_UPDATED"] == "ok"
+    assert result["CUSTOMERS_UPDATE"] == "ok"
+    update_calls = [c for c in captured if "webhookSubscriptionUpdate" in c["query"]]
+    assert len(update_calls) == 1
+    assert update_calls[0]["variables"]["apiVersion"] == "2026-07"
+
+
 async def test_create_sends_current_api_version(settings, master_key) -> None:
     captured: list[dict] = []
 

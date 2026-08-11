@@ -112,3 +112,59 @@ CREATE TABLE IF NOT EXISTS knowledge_overrides (
     content     text NOT NULL,
     updated_at  timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS customers (
+    gid             text PRIMARY KEY,
+    first_name      text,
+    last_name       text,
+    email           text,
+    phone           text,
+    address_line1   text,
+    address_line2   text,
+    city            text,
+    state           text,
+    postal_code     text,
+    country         text,
+    synced_at       timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers (phone);
+CREATE INDEX IF NOT EXISTS idx_customers_email ON customers (email);
+
+CREATE TABLE IF NOT EXISTS orders (
+    gid                    text PRIMARY KEY,
+    name                   text NOT NULL,
+    order_number           integer,
+    customer_gid           text REFERENCES customers(gid) ON DELETE SET NULL,
+    email                  text,
+    phone                  text,
+    shipping_phone         text,
+    billing_phone          text,
+    financial_status       text,
+    fulfillment_status     text,
+    cancelled_at           timestamptz,
+    tags                   text[] NOT NULL DEFAULT '{}',
+    payment_gateway_names  text[] NOT NULL DEFAULT '{}',
+    total_amount           text,
+    total_currency         text,
+    customer_locale        text,
+    order_created_at       timestamptz,
+    synced_at              timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_orders_phone ON orders (phone);
+CREATE INDEX IF NOT EXISTS idx_orders_shipping_phone ON orders (shipping_phone);
+CREATE INDEX IF NOT EXISTS idx_orders_billing_phone ON orders (billing_phone);
+CREATE INDEX IF NOT EXISTS idx_orders_name ON orders (name);
+CREATE INDEX IF NOT EXISTS idx_orders_customer_gid ON orders (customer_gid);
+
+CREATE TABLE IF NOT EXISTS order_items (
+    id              bigserial PRIMARY KEY,
+    order_gid       text NOT NULL REFERENCES orders(gid) ON DELETE CASCADE,
+    title           text NOT NULL,
+    sku             text,
+    quantity        integer NOT NULL,
+    variant_title   text,
+    price_amount    text,
+    price_currency  text
+);
+CREATE INDEX IF NOT EXISTS idx_order_items_order_gid ON order_items (order_gid);
+CREATE INDEX IF NOT EXISTS idx_order_items_sku ON order_items (sku);

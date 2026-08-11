@@ -1,6 +1,6 @@
 import pytest
 
-from app.shopify.models import AuthorizedOrder, Money, Order, normalize_order_name
+from app.shopify.models import AuthorizedOrder, Customer, Money, Order, normalize_order_name
 
 
 def make_order(**overrides) -> Order:
@@ -79,3 +79,26 @@ def test_normalize_order_name_variants() -> None:
     assert normalize_order_name("3733") == "tavas3733"
     assert normalize_order_name("#3733") == "tavas3733"
     assert normalize_order_name("  TAVAS3733 ") == "tavas3733"
+
+
+def test_order_customer_defaults_to_none() -> None:
+    assert make_order().customer is None
+
+
+def test_order_accepts_a_customer() -> None:
+    cust = Customer(
+        gid="gid://shopify/Customer/1",
+        first_name="Suman",
+        last_name="Bayala",
+        email="c@example.com",
+        phone="+919999999999",
+        address_line1="12 MG Road",
+        address_line2=None,
+        city="Bengaluru",
+        state="Karnataka",
+        postal_code="560001",
+        country="India",
+    )
+    order = make_order(customer=cust)
+    assert order.customer is cust
+    assert order.customer.city == "Bengaluru"

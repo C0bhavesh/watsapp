@@ -26,7 +26,9 @@ data flowing into two new tables in the background.
   `resolve_by_gid`). **Not implemented by this sub-project** — recorded here as the reason this
   data layer is being built, actioned (rule-text update + read-path change) in the follow-up
   sub-project once it exists to design.
-- Sync scope for this sub-project: **orders only** (not products/customers yet).
+- Sync scope for this sub-project: **orders, plus the customer/address data already embedded
+  in each order's payload** — not products, and not a dedicated customer webhook subscription
+  (see the schema section's scope note for why).
 - **Backfill included**: last 12 months of existing orders get pulled once, so the mirror isn't
   empty on day one.
 - **No follow-up Shopify API call for real-time sync** — Shopify's webhook payload already
@@ -38,10 +40,28 @@ data flowing into two new tables in the background.
 ### Schema (new tables in `app/store/schema.sql`)
 
 ```sql
+CREATE TABLE IF NOT EXISTS customers (
+    gid             text PRIMARY KEY,
+    first_name      text,
+    last_name       text,
+    email           text,
+    phone           text,
+    address_line1   text,
+    address_line2   text,
+    city            text,
+    state           text,
+    postal_code     text,
+    country         text,
+    synced_at       timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers (phone);
+CREATE INDEX IF NOT EXISTS idx_customers_email ON customers (email);
+
 CREATE TABLE IF NOT EXISTS orders (
     gid                    text PRIMARY KEY,
     name                   text NOT NULL,
     order_number           integer,
+    customer_gid           text REFERENCES customers(gid) ON DELETE SET NULL,
     email                  text,
     phone                  text,
     shipping_phone         text,
@@ -61,30 +81,61 @@ CREATE INDEX IF NOT EXISTS idx_orders_phone ON orders (phone);
 CREATE INDEX IF NOT EXISTS idx_orders_shipping_phone ON orders (shipping_phone);
 CREATE INDEX IF NOT EXISTS idx_orders_billing_phone ON orders (billing_phone);
 CREATE INDEX IF NOT EXISTS idx_orders_name ON orders (name);
+CREATE INDEX IF NOT EXISTS idx_orders_customer_gid ON orders (customer_gid);
 
 CREATE TABLE IF NOT EXISTS order_items (
     id              bigserial PRIMARY KEY,
     order_gid       text NOT NULL REFERENCES orders(gid) ON DELETE CASCADE,
     title           text NOT NULL,
+    sku             text,
     quantity        integer NOT NULL,
     variant_title   text,
     price_amount    text,
     price_currency  text
 );
 CREATE INDEX IF NOT EXISTS idx_order_items_order_gid ON order_items (order_gid);
+CREATE INDEX IF NOT EXISTS idx_order_items_sku ON order_items (sku);
 ```
 
-Deliberately separate from the existing `order_mappings` table (which stays exactly as-is,
-still the fast phone→order-gid index the CURRENT live-read path uses) — this sub-project is
-purely additive, no existing table's shape or behavior changes.
+`orders.customer_gid` is the relationship the owner asked for — one customer can have many
+orders, each order links back to exactly one customer record (nullable, since a guest-checkout
+order may carry no linkable customer id). Deliberately separate from the existing
+`order_mappings` table (which stays exactly as-is, still the fast phone→order-gid index the
+CURRENT live-read path uses) — this sub-project is purely additive, no existing table's shape
+or behavior changes.
 
-### Shared upsert shape: reuse `app.shopify.models.Order`/`LineItem`
+**Scope note on `customers`:** populated only from the customer/address data already embedded
+in each order's webhook payload — this sub-project does not add Shopify's separate
+`customers/create`/`customers/update` webhook subscriptions (matches the earlier "orders only
+first" scope decision). A customer only appears in this table once they've placed an order the
+bot has seen; that's sufficient for a WhatsApp order-support bot and avoids widening this
+sub-project's webhook surface.
+
+### Shared upsert shape: reuse `app.shopify.models.Order`/`LineItem`, add `Customer`
 
 Both new data sources below (real-time webhook sync and the one-time backfill) end up needing
-to write "one order plus its line items" into the mirror. Rather than inventing a second data
-shape, both paths produce the **existing** `Order`/`LineItem` dataclasses (`app/shopify/models.py`
-— already used by the live-read path and by this session's earlier order-item-details feature)
-and hand them to one new store method:
+to write "one order, its line items, and its customer" into the mirror. Rather than inventing a
+parallel data shape, both paths produce the **existing** `Order`/`LineItem` dataclasses
+(`app/shopify/models.py` — already used by the live-read path and by this session's earlier
+order-item-details feature), extended with one new dataclass and one new field:
+
+```python
+@dataclass(frozen=True)
+class Customer:
+    gid: str
+    first_name: str | None
+    last_name: str | None
+    email: str | None
+    phone: str | None
+    address_line1: str | None
+    address_line2: str | None
+    city: str | None
+    state: str | None
+    postal_code: str | None
+    country: str | None
+```
+
+`Order` gains `customer: Customer | None = None`. Both are handed to one new store method:
 
 ```python
 # app/store/base.py (IngestStore protocol)
@@ -92,11 +143,14 @@ async def upsert_order_mirror(self, order: Order) -> None: ...
 ```
 
 Implemented in both `InMemoryIngestStore` and `PostgresIngestStore`. The Postgres
-implementation: `INSERT ... ON CONFLICT (gid) DO UPDATE SET <every column> = EXCLUDED.<column>,
-synced_at = now()` for the `orders` row, and for `order_items`, `DELETE FROM order_items WHERE
-order_gid = $1` followed by a fresh bulk insert of the current item list — simpler and safer
-than diffing individual items (handles an edited order's changed/removed items correctly, at
-the cost of item `id` values not being stable across updates, which nothing depends on).
+implementation runs one transaction: `INSERT ... ON CONFLICT (gid) DO UPDATE SET <every column>
+= EXCLUDED.<column>, synced_at = now()` for the `customers` row (skipped entirely if
+`order.customer is None`), then the same upsert pattern for the `orders` row (with
+`customer_gid` set from `order.customer.gid` when present), then for `order_items`, `DELETE
+FROM order_items WHERE order_gid = $1` followed by a fresh bulk insert of the current item list
+— simpler and safer than diffing individual items (handles an edited order's changed/removed
+items correctly, at the cost of item `id` values not being stable across updates, which nothing
+depends on).
 
 ### Real-time sync: extend the existing webhook handler
 
@@ -118,13 +172,22 @@ New parser, `order_from_webhook_payload(payload: dict) -> Order | None` (new fun
 `app/channels/shopify_orders.py`, next to the existing `parse_order_created`), extracting the
 additional fields the existing `parse_order_created`/`IncomingOrder` doesn't capture — REST
 payload fields already present in every Shopify order webhook: `fulfillment_status`,
-`cancelled_at`, `total_price` + `currency`, `line_items` (each with `title`, `quantity`,
-`price`, and `variant_title` — Shopify's REST line-item shape carries `variant_title` as a
-direct field, unlike the GraphQL shape's nested `variant.title`), and `shipping_address.phone`
+`cancelled_at`, `total_price` + `currency`, `line_items` (each with `title`, `sku`, `quantity`,
+`price`, and `variant_title` — Shopify's REST line-item shape carries `variant_title`/`sku` as
+direct fields, unlike the GraphQL shape's nested `variant.title`), and `shipping_address.phone`
 / `billing_address.phone` kept separate (not pre-merged into one cascaded phone, unlike the
 existing `IncomingOrder.phone_e164`) so the mirror can store all three independently, matching
 `Order`'s existing three-phone shape. Returns `None` on the same malformed-payload conditions
 `parse_order_created` already guards against (missing gid/name).
+
+Also builds the `Customer` from the payload's `customer` sub-object (`id` → gid via the same
+`admin_graphql_api_id`-style construction as the order itself, `first_name`, `last_name`,
+`email`, `phone`) plus the order's `shipping_address` for the structured address fields
+(`address1`, `address2`, `city`, `province`→`state`, `zip`→`postal_code`, `country`) — Shopify
+always includes the shipping address directly on the order payload, so no extra fetch is
+needed. `customer` is `None` when the payload has no `customer` object at all (e.g. some
+guest-checkout shapes) — `upsert_order_mirror` treats that as "no customer to link," not an
+error.
 
 ### Backfill: one-time script
 
@@ -132,11 +195,15 @@ New `backend/scripts/backfill_orders.py`, following the exact shape of the exist
 `scripts/apply_schema.py` (reads `DATABASE_URL` from env, connects directly with
 `statement_cache_size=0` for the Supabase pooler). Uses the **existing, already-built**
 `ShopifyClient` + `TokenManager` (no new Shopify-side code) to page through
-`orders(first: 50, after: $cursor, query: "created_at:>=<12-months-ago>")` via GraphQL — the
-same `ORDER_FIELDS` query (already includes `lineItems`, extended earlier this session) —
-calling `upsert_order_mirror` for each page of results until exhausted. Idempotent by
-construction (same `ON CONFLICT` upsert the webhook path uses), so it's safe to re-run if
-interrupted partway through.
+`orders(first: 50, after: $cursor, query: "created_at:>=<12-months-ago>")` via GraphQL —
+`ORDER_FIELDS` (`app/shopify/client.py`) needs one more extension here, alongside the
+`lineItems` addition from earlier this session: a `customer { id firstName lastName email }`
+sub-selection and the full `shippingAddress { address1 address2 city province zip country
+phone }` (currently only `phone` is selected from it) and a `sku` field on each `lineItems`
+node — the same fields the webhook-path parser reads, so backfilled orders and
+webhook-synced orders populate identical rows. Calls `upsert_order_mirror` for each order
+across all pages until exhausted. Idempotent by construction (same `ON CONFLICT` upsert the
+webhook path uses), so it's safe to re-run if interrupted partway through.
 
 ### Explicitly out of scope (belongs to later sub-projects)
 
@@ -144,21 +211,29 @@ interrupted partway through.
   completely unaffected by this sub-project.
 - No `CLAUDE.md` Critical Rule 3 text change yet — that happens when the read-path switch
   sub-project is designed, since that's when the rule's actual guarantee changes.
-- No products/customers/inventory mirroring.
+- No products/inventory mirroring, and no dedicated `customers/create`/`customers/update`
+  webhook subscription — the new `customers` table is populated only from data already present
+  on each order webhook (see the schema section's scope note above).
 - No retention/cleanup automation for these new tables (follows the existing `retention_days`
   pattern in a later sub-project, once there's read traffic against this data to reason about).
 
 ## Testing
 
 - `order_from_webhook_payload`: a realistic full order payload (with line items, both address
-  phones, fulfillment/cancellation fields) parses into a correct `Order`; missing/malformed gid
-  or name still returns `None` (matching `parse_order_created`'s existing contract); an order
-  with zero line items parses to `line_items=()`; a line item missing `variant_title`/`price`
-  parses those as `None` without raising.
-- `upsert_order_mirror` (both store impls): inserting a new order creates one `orders` row and
-  N `order_items` rows; upserting the same `gid` again with different data updates the
-  `orders` row in place and replaces (not duplicates/appends) the `order_items` rows; deleting
-  the parent `orders` row cascades to `order_items` (Postgres only, via the FK).
+  phones, fulfillment/cancellation fields, and a `customer` object) parses into a correct
+  `Order` with a populated `Customer`; missing/malformed gid or name still returns `None`
+  (matching `parse_order_created`'s existing contract); an order with zero line items parses to
+  `line_items=()`; a line item missing `variant_title`/`price`/`sku` parses those as `None`
+  without raising; a payload with no `customer` object at all parses to `customer=None` without
+  raising.
+- `upsert_order_mirror` (both store impls): inserting a new order with a customer creates one
+  `customers` row, one `orders` row (with `customer_gid` set), and N `order_items` rows;
+  inserting an order with `customer=None` creates the order with a `NULL` `customer_gid` and no
+  new customer row; upserting the same order `gid` again with different data updates the
+  `orders` row in place and replaces (not duplicates/appends) the `order_items` rows;
+  re-upserting with the same customer `gid` updates that customer's row in place (not a
+  duplicate); deleting the parent `orders` row cascades to `order_items` but leaves the
+  `customers` row intact (Postgres only, via the FKs).
 - Webhook handler: an `orders/updated` delivery (previously silently ignored) now reaches
   `upsert_order_mirror`; an `orders/create` delivery still does everything it does today
   (mapping/push-eligibility unchanged) **and** now also populates the mirror; an unrecognized

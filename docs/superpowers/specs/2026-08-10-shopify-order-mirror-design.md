@@ -26,9 +26,10 @@ data flowing into two new tables in the background.
   `resolve_by_gid`). **Not implemented by this sub-project** — recorded here as the reason this
   data layer is being built, actioned (rule-text update + read-path change) in the follow-up
   sub-project once it exists to design.
-- Sync scope for this sub-project: **orders, plus the customer/address data already embedded
-  in each order's payload** — not products, and not a dedicated customer webhook subscription
-  (see the schema section's scope note for why).
+- Sync scope for this sub-project: **orders (via `orders/create` + `orders/updated`), plus
+  customer/address data — both embedded in each order's payload AND kept independently fresh
+  via a `customers/update` subscription** (see the schema section's scope note for why not
+  `customers/create` too).
 - **Backfill included**: last 12 months of existing orders get pulled once, so the mirror isn't
   empty on day one.
 - **No follow-up Shopify API call for real-time sync** — Shopify's webhook payload already
@@ -104,12 +105,14 @@ order may carry no linkable customer id). Deliberately separate from the existin
 CURRENT live-read path uses) — this sub-project is purely additive, no existing table's shape
 or behavior changes.
 
-**Scope note on `customers`:** populated only from the customer/address data already embedded
-in each order's webhook payload — this sub-project does not add Shopify's separate
-`customers/create`/`customers/update` webhook subscriptions (matches the earlier "orders only
-first" scope decision). A customer only appears in this table once they've placed an order the
-bot has seen; that's sufficient for a WhatsApp order-support bot and avoids widening this
-sub-project's webhook surface.
+**Scope note on `customers`:** primarily populated from the customer/address data embedded in
+each order's webhook payload — a customer only appears in this table once they've placed an
+order the bot has seen, which is what matters for a WhatsApp order-support bot. On top of that,
+this sub-project also subscribes to `customers/update` so a customer's profile (phone, address)
+stays fresh even when it changes outside of an order — without it, a customer's row would only
+ever refresh via order activity and could go stale if they update their contact info directly.
+`customers/create` is deliberately still not subscribed: a brand-new customer with no order yet
+has nothing for the bot to help with, so syncing them early has no payoff.
 
 ### Shared upsert shape: reuse `app.shopify.models.Order`/`LineItem`, add `Customer`
 
@@ -135,22 +138,36 @@ class Customer:
     country: str | None
 ```
 
-`Order` gains `customer: Customer | None = None`. Both are handed to one new store method:
+`Order` gains `customer: Customer | None = None`. Both are handed to two new store methods
+(the second reused by the first, so there is exactly one place that writes a `customers` row):
 
 ```python
 # app/store/base.py (IngestStore protocol)
+async def upsert_customer(self, customer: Customer) -> None: ...
 async def upsert_order_mirror(self, order: Order) -> None: ...
 ```
 
-Implemented in both `InMemoryIngestStore` and `PostgresIngestStore`. The Postgres
-implementation runs one transaction: `INSERT ... ON CONFLICT (gid) DO UPDATE SET <every column>
-= EXCLUDED.<column>, synced_at = now()` for the `customers` row (skipped entirely if
-`order.customer is None`), then the same upsert pattern for the `orders` row (with
-`customer_gid` set from `order.customer.gid` when present), then for `order_items`, `DELETE
-FROM order_items WHERE order_gid = $1` followed by a fresh bulk insert of the current item list
-— simpler and safer than diffing individual items (handles an edited order's changed/removed
-items correctly, at the cost of item `id` values not being stable across updates, which nothing
-depends on).
+Implemented in both `InMemoryIngestStore` and `PostgresIngestStore`. `upsert_customer`:
+`INSERT ... ON CONFLICT (gid) DO UPDATE SET <every column> = EXCLUDED.<column>, synced_at =
+now()` against the `customers` table. `upsert_order_mirror` runs one transaction: calls
+`upsert_customer(order.customer)` first when `order.customer is not None` (skipped entirely
+otherwise), then the same upsert pattern for the `orders` row (with `customer_gid` set from
+`order.customer.gid` when present), then for `order_items`, `DELETE FROM order_items WHERE
+order_gid = $1` followed by a fresh bulk insert of the current item list — simpler and safer
+than diffing individual items (handles an edited order's changed/removed items correctly, at
+the cost of item `id` values not being stable across updates, which nothing depends on).
+
+### Subscription management: generalize from one hardcoded topic to a list
+
+`app/shopify/subscriptions.py`'s `ensure_subscription` is currently hardcoded to a single topic
+(`ORDERS_CREATE` is baked directly into `_LIST_QUERY`/`_CREATE_MUTATION`) — Shopify webhook
+subscriptions are one-subscription-per-topic, so adding `ORDERS_UPDATED` and
+`CUSTOMERS_UPDATE` means this needs to loop over a list of required topics, ensuring each has
+its own correctly-configured subscription (same callback URL + API version check as today, per
+topic), rather than special-casing a single one. This is a real, necessary change surfaced by
+reading the actual code — not something the original proposal anticipated. The self-healing
+behavior (create if missing, update if the callback URL or API version drifted) stays the same,
+just applied per-topic in a loop instead of once.
 
 ### Real-time sync: extend the existing webhook handler
 
@@ -161,12 +178,17 @@ depends on).
         return JSONResponse({"ok": True, "ignored": True})
 ```
 
-This becomes an allow-list of both topics (`{"orders/create", "orders/updated"}`), with the
-existing dedupe/mapping/push-eligibility logic for `orders/create` unchanged, and a new step
-added for **both** topics: parse the payload into an `Order` (see below) and call
-`c.ingest.upsert_order_mirror(order)` — inline, in the same request, before the response is
-sent (matches the file's existing "ack fast" discipline: this is pure JSON parsing + a Postgres
-write, no external API call, so it stays well inside Shopify's 5-second ack window).
+This becomes an allow-list of three topics (`{"orders/create", "orders/updated",
+"customers/update"}`). For the two order topics: existing dedupe/mapping/push-eligibility logic
+for `orders/create` unchanged, and a new step added for **both** order topics: parse the
+payload into an `Order` (see below) and call `c.ingest.upsert_order_mirror(order)` — inline, in
+the same request, before the response is sent (matches the file's existing "ack fast"
+discipline: this is pure JSON parsing + a Postgres write, no external API call, so it stays
+well inside Shopify's 5-second ack window). For `customers/update`: a new, simpler path — parse
+the payload (a plain Shopify Customer resource, not nested in an order) into a `Customer` via a
+new `customer_from_webhook_payload(payload: dict) -> Customer | None` parser, and call
+`c.ingest.upsert_customer(customer)` directly — no order involved, no mapping/push-eligibility
+logic applies to this topic at all.
 
 New parser, `order_from_webhook_payload(payload: dict) -> Order | None` (new function in
 `app/channels/shopify_orders.py`, next to the existing `parse_order_created`), extracting the
@@ -211,9 +233,8 @@ webhook path uses), so it's safe to re-run if interrupted partway through.
   completely unaffected by this sub-project.
 - No `CLAUDE.md` Critical Rule 3 text change yet — that happens when the read-path switch
   sub-project is designed, since that's when the rule's actual guarantee changes.
-- No products/inventory mirroring, and no dedicated `customers/create`/`customers/update`
-  webhook subscription — the new `customers` table is populated only from data already present
-  on each order webhook (see the schema section's scope note above).
+- No products/inventory mirroring, and no `customers/create` webhook subscription (see the
+  schema section's scope note for why `customers/update` alone is enough).
 - No retention/cleanup automation for these new tables (follows the existing `retention_days`
   pattern in a later sub-project, once there's read traffic against this data to reason about).
 
@@ -234,10 +255,19 @@ webhook path uses), so it's safe to re-run if interrupted partway through.
   re-upserting with the same customer `gid` updates that customer's row in place (not a
   duplicate); deleting the parent `orders` row cascades to `order_items` but leaves the
   `customers` row intact (Postgres only, via the FKs).
+- `customer_from_webhook_payload`: a realistic Shopify Customer payload parses into a correct
+  `Customer`; missing/malformed `id` returns `None`; a payload with no `default_address` parses
+  the address fields as `None` without raising.
+- `upsert_customer` (both store impls): inserting a new customer creates one row; re-upserting
+  the same `gid` with different data updates it in place, not a duplicate.
 - Webhook handler: an `orders/updated` delivery (previously silently ignored) now reaches
   `upsert_order_mirror`; an `orders/create` delivery still does everything it does today
-  (mapping/push-eligibility unchanged) **and** now also populates the mirror; an unrecognized
-  topic is still ignored exactly as before.
+  (mapping/push-eligibility unchanged) **and** now also populates the mirror; a
+  `customers/update` delivery reaches `upsert_customer` directly, with no mapping/push logic
+  invoked; an unrecognized topic is still ignored exactly as before.
+- `ensure_subscription`: with the topic list generalization, a fake Shopify client proving each
+  of the three topics (`ORDERS_CREATE`, `ORDERS_UPDATED`, `CUSTOMERS_UPDATE`) gets its own
+  independent create-if-missing/update-if-drifted check — not just the first one in the list.
 - Backfill script: not unit-testable against real Shopify — cover the pagination/cursor-loop
   logic with a fake `ShopifyClient` proving it pages until exhaustion and calls
   `upsert_order_mirror` once per order.

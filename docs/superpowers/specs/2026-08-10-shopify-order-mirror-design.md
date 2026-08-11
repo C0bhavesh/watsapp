@@ -4,17 +4,17 @@
 
 **Sub-project 1 of N** in the larger "Tavas Bot — New Final Architecture" proposal (full
 proposal recorded in this brainstorming session's transcript; decomposed into separate
-sub-projects per its own scale). This sub-project covers schema + sync only. Later sub-projects
-(not designed yet): the bot's read-path switch to the mirror, product/customer mirroring,
-knowledge/embeddings/storage split, retention automation.
+sub-projects per its own scale). This sub-project covers order + customer schema and sync only.
+Later sub-projects (not designed yet): the bot's read-path switch to the mirror, product
+mirroring, knowledge/embeddings/storage split, retention automation.
 
 ## Problem
 
-The bot currently has no local copy of Shopify order data — every order question re-queries
-Shopify live. This sub-project starts building a Postgres mirror of order data (populated from
+The bot currently has no local copy of Shopify order or customer data — every order question
+re-queries Shopify live. This sub-project starts building a Postgres mirror (populated from
 data the app already receives, not extra Shopify calls) so a later sub-project can make the bot
 read from it instead. This sub-project alone makes **no change to bot behavior** — it only gets
-data flowing into two new tables in the background.
+data flowing into three new tables in the background.
 
 ## Owner decisions recorded here
 

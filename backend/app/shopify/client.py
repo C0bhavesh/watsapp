@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from collections.abc import AsyncIterator, Sequence
@@ -24,13 +25,19 @@ from app.shopify.models import (
 )
 from app.shopify.token_manager import TokenManager
 
+BACKFILL_THROTTLE_SLEEP_SECONDS = 2
+
 ORDER_FIELDS = (
     "id name email phone tags paymentGatewayNames displayFinancialStatus "
-    "displayFulfillmentStatus cancelledAt customerLocale "
+    # updatedAt (order AND customer) is not display data -- it is the mirror's out-of-order
+    # write guard. Without selecting it, every row this path writes lands with
+    # `updated_at = NULL`, which the guard treats as "always overwritable", so a later stale
+    # webhook replay could revert it.
+    "displayFulfillmentStatus cancelledAt customerLocale updatedAt "
     "totalPriceSet { shopMoney { amount currencyCode } } "
     "shippingAddress { phone address1 address2 city province zip country } "
     "billingAddress { phone } "
-    "customer { id firstName lastName email } "
+    "customer { id firstName lastName email updatedAt } "
     # first: 50 is a query-time ceiling far above any realistic order size -- the display side
     # (order_tracking) shows every item with no further cap, by design (owner's explicit
     # choice: show all, don't summarize/truncate a customer's own order).
@@ -82,8 +89,6 @@ def _customer_from_node(node: dict[str, Any]) -> Customer | None:
         state=shipping.get("province"),
         postal_code=shipping.get("zip"),
         country=shipping.get("country"),
-        # Not in the GraphQL selection set today -> None, which the mirror's ordering guard
-        # treats as "always writable" (a read-path/backfill write is never a stale replay).
         updated_at=customer.get("updatedAt"),
     )
 
@@ -108,7 +113,7 @@ def _order_from_node(node: dict[str, Any]) -> Order:
         customer_locale=node.get("customerLocale"),
         line_items=_line_items_from_node(node),
         customer=_customer_from_node(node),
-        updated_at=node.get("updatedAt"),  # see _customer_from_node
+        updated_at=node.get("updatedAt"),  # selected by ORDER_FIELDS; see the note there
     )
 
 
@@ -240,19 +245,40 @@ class ShopifyClient:
         edges = (data.get("orders") or {}).get("edges") or []
         return _order_from_node(edges[0]["node"]) if edges else None
 
+    async def _page_with_backoff(
+        self, query: str, variables: dict[str, Any]
+    ) -> dict[str, Any]:
+        """One backfill page, retried once after a throttle.
+
+        Paging a year of orders spends a lot of the leaky bucket; the backfill is a one-time
+        manual script, so a fixed short sleep and a single retry is enough (no jitter/backoff
+        curve needed). A second throttle propagates -- the operator re-runs the script.
+        """
+        try:
+            return await self._graphql(query, variables)
+        except ShopifyThrottled:
+            await asyncio.sleep(BACKFILL_THROTTLE_SLEEP_SECONDS)
+            return await self._graphql(query, variables)
+
     async def list_orders_created_since(self, since_iso: str) -> AsyncIterator[Order]:
         """Page through every order created on or after ``since_iso`` (a date string like
         "2025-08-10"), yielding each as an ``Order``. Used only by the one-time backfill
-        script -- not part of any live customer-facing read path."""
+        script -- not part of any live customer-facing read path.
+
+        ``first: 10`` (not 50) because ORDER_FIELDS selects ``lineItems(first: 50)``: the two
+        multiply, and Shopify rejects any single query over 1000 cost points with
+        MAX_COST_EXCEEDED (50 x 51 = ~2550 could never run; 10 x 51 = ~510 is safe). Every
+        other ORDER_FIELDS caller uses first: 1/10, so this pager is the only one at risk.
+        """
         query = (
-            "query($q: String!, $cursor: String) { orders(first: 50, after: $cursor, "
+            "query($q: String!, $cursor: String) { orders(first: 10, after: $cursor, "
             f"query: $q) {{ edges {{ cursor node {{ {ORDER_FIELDS} }} }} "
             "pageInfo { hasNextPage } } }"
         )
         cursor: str | None = None
         search = f"created_at:>={since_iso}"
         while True:
-            data = await self._graphql(query, {"q": search, "cursor": cursor})
+            data = await self._page_with_backoff(query, {"q": search, "cursor": cursor})
             connection = data.get("orders") or {}
             edges = connection.get("edges") or []
             for edge in edges:

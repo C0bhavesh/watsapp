@@ -163,6 +163,13 @@ async def shopify_webhook(request: Request) -> Response:
             return JSONResponse({"ok": True, "ignored": True})
         return JSONResponse({"ok": True, "ignored": not await _mirror_order(c, order)})
 
+    # Explicit, not an implicit else: HANDLED_TOPICS is DERIVED from REQUIRED_TOPICS, so a
+    # future subscription topic passes the gate above automatically. Falling through would run
+    # it against the orders/create mapping + outbox logic and could queue a duplicate
+    # order-confirmation template to a real customer for an unrelated event.
+    if topic != "orders/create":
+        return JSONResponse({"ok": True, "ignored": True})
+
     incoming = parse_order_created(payload)
     if incoming is None:
         return JSONResponse({"ok": True, "ignored": True})

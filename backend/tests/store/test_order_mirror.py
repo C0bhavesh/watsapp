@@ -228,6 +228,40 @@ async def test_pg_standalone_customer_upsert_keeps_the_customers_own_updated_at(
     assert args[11] == datetime.fromisoformat("2026-01-01T00:00:00+00:00")
 
 
+async def test_pg_mirror_normalizes_phones_at_the_write_choke_point() -> None:
+    """delete_by_phone matches E.164 exactly, so an unnormalized row survives erasure.
+
+    The webhook parser normalizes; the GraphQL/backfill path stores Shopify's raw string. The
+    upsert is the one place both writers pass through, so it normalizes there.
+    """
+    conn = _RecordingConn()
+    await _pg(conn).upsert_order_mirror(
+        _order(
+            phone="+91 96642 90413", shipping_phone="09664290413", billing_phone=None,
+            customer=_customer(phone="9664290413"),
+        )
+    )
+
+    orders_sql = [args for sql, args in conn.executed if sql.startswith("INSERT INTO orders")]
+    assert orders_sql[0][5] == "+919664290413"       # $6  phone
+    assert orders_sql[0][6] == "+919664290413"       # $7  shipping_phone
+    assert orders_sql[0][7] is None                  # $8  billing_phone stays None
+    customers_sql = [
+        args for sql, args in conn.executed if sql.startswith("INSERT INTO customers")
+    ]
+    assert customers_sql[0][4] == "+919664290413"    # $5  customer phone
+
+
+async def test_pg_mirror_keeps_an_unparseable_phone_verbatim() -> None:
+    # Degrade, don't crash / don't discard: an unparseable value is stored as-is rather than
+    # becoming NULL, matching this codebase's phone-handling convention.
+    conn = _RecordingConn()
+    await _pg(conn).upsert_order_mirror(_order(phone="not-a-phone", customer=None))
+
+    orders_sql = [args for sql, args in conn.executed if sql.startswith("INSERT INTO orders")]
+    assert orders_sql[0][5] == "not-a-phone"
+
+
 async def test_pg_stale_order_upsert_leaves_the_existing_line_items_alone() -> None:
     # The guarded upsert returned no row => this delivery is older than what is stored, so the
     # DELETE+re-INSERT of order_items must not run either (it would install stale items).

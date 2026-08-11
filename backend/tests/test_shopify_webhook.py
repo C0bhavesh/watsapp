@@ -143,6 +143,31 @@ async def test_orders_updated_populates_the_mirror() -> None:
     assert not store.outbound  # type: ignore[attr-defined]
 
 
+async def test_a_newly_subscribed_topic_does_not_fall_through_to_orders_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Adding a topic to REQUIRED_TOPICS must never silently reuse the orders/create path.
+
+    HANDLED_TOPICS is derived from the subscribed topics, so a future addition passes the gate
+    automatically; without an explicit orders/create check it would then run the mapping/outbox
+    logic and could queue a duplicate order-confirmation template for an unrelated event.
+    """
+    import app.channels.shopify_webhook as webhook_module
+
+    monkeypatch.setattr(
+        webhook_module,
+        "HANDLED_TOPICS",
+        frozenset({*webhook_module.HANDLED_TOPICS, "orders/fulfilled"}),
+    )
+    body = json.dumps(payload("gid://shopify/Order/future")).encode()
+    resp = await post(body, headers(body, topic="orders/fulfilled", webhook_id="wh-future"))
+    assert resp.json() == {"ok": True, "ignored": True}
+    store = get_container().ingest
+    assert not store.mappings  # type: ignore[attr-defined]
+    assert not store.outbound  # type: ignore[attr-defined]
+    assert store.orders == {}  # type: ignore[attr-defined]
+
+
 async def test_orders_updated_malformed_payload_ignored() -> None:
     body = json.dumps({"admin_graphql_api_id": "gid://shopify/Order/nameless"}).encode()
     resp = await post(body, headers(body, topic="orders/updated", webhook_id="wh-upd-bad"))

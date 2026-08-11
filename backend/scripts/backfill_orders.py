@@ -9,12 +9,18 @@ DATABASE_URL connection.
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+from app.config.settings import Settings
 from app.deps import get_container
 
 BACKFILL_WINDOW_DAYS = 365
 
 
 async def main() -> None:
+    # get_container() silently falls back to the in-memory store when database_url is empty,
+    # so an unguarded run would page a year of orders out of Shopify into a dict that dies with
+    # the process and still print "backfill complete". Fail fast, as apply_schema.py does.
+    if not Settings().database_url:  # type: ignore[call-arg]  # app_master_key comes from env
+        raise SystemExit("DATABASE_URL is not set — refusing to backfill into an in-memory store")
     c = get_container()
     since = (datetime.now(UTC) - timedelta(days=BACKFILL_WINDOW_DAYS)).strftime("%Y-%m-%d")
     count = 0

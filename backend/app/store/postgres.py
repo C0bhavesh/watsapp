@@ -4,6 +4,7 @@ from datetime import datetime
 
 import asyncpg
 
+from app.core.phone import normalize_phone
 from app.shopify.models import Customer, Order
 from app.store.base import (
     DeletionResult,
@@ -58,6 +59,18 @@ def _order_number_from_name(name: str) -> int | None:
         return None
 
 
+def _e164(raw: str | None) -> str | None:
+    """Best-effort E.164 for a mirror phone column, keeping the original when unparseable.
+
+    Two writers reach the mirror: the webhook parsers (already normalized) and the GraphQL
+    backfill (Shopify's raw string). ``delete_by_phone`` matches these columns by exact string
+    equality, so an unnormalized row would survive a DPDP erasure that catches its webhook-
+    synced twin. Normalizing at the single write choke point covers both writers; an
+    unparseable value is stored verbatim rather than dropped (degrade, don't discard).
+    """
+    return None if raw is None else (normalize_phone(raw) or raw)
+
+
 def _parse_timestamp(raw: str | None) -> datetime | None:
     """Shopify sends ``cancelled_at``/``updated_at`` as raw ISO-8601 strs; the columns are
     timestamptz.
@@ -100,7 +113,7 @@ async def _upsert_customer_on_conn(conn: asyncpg.Connection, customer: Customer)
         "OR EXCLUDED.updated_at >= customers.updated_at "
         "RETURNING gid",
         customer.gid, customer.first_name, customer.last_name, customer.email,
-        customer.phone, customer.address_line1, customer.address_line2, customer.city,
+        _e164(customer.phone), customer.address_line1, customer.address_line2, customer.city,
         customer.state, customer.postal_code, customer.country,
         _parse_timestamp(customer.updated_at),
     )
@@ -227,6 +240,11 @@ class PostgresIngestStore:
         return found is not None
 
     async def upsert_order_mirror(self, order: Order) -> None:
+        # LOCK ORDER: customers, then orders. `delete_by_phone` takes them the other way round
+        # (it needs RETURNING customer_gid from the orders delete first), so a sync racing an
+        # erasure for the same customer can deadlock; Postgres aborts one side, which is a
+        # failed statement, never corruption. Erasure is a rare manual admin action, so the
+        # inversion is accepted rather than designed around -- but do not deepen it.
         async with self._pool.acquire() as conn:
             async with conn.transaction():
                 if order.customer is not None:
@@ -261,8 +279,9 @@ class PostgresIngestStore:
                     "OR EXCLUDED.updated_at >= orders.updated_at "
                     "RETURNING gid",
                     order.gid, order.name, _order_number_from_name(order.name),
-                    customer_gid, order.email, order.phone,
-                    order.shipping_phone, order.billing_phone, order.financial_status,
+                    customer_gid, order.email, _e164(order.phone),
+                    _e164(order.shipping_phone), _e164(order.billing_phone),
+                    order.financial_status,
                     order.fulfillment_status, _parse_timestamp(order.cancelled_at),
                     list(order.tags),
                     list(order.payment_gateway_names), total_amount, total_currency,
@@ -377,10 +396,20 @@ class PostgresIngestStore:
         so erasure is complete the moment that layer starts persisting. pending_actions is
         scoped by ``wa_id`` and order_actions by ``actor_wa_id`` (both the requester's number).
 
-        Known residual: processed_messages retains dedupe rows whose message_id embeds the
-        requester's phone in Meta's wamid encoding; these age out via purge_older_than's
-        received_at cutoff but are not covered by an on-demand phone-scoped delete (decoding
-        wamids to recover the sender number is deliberately out of scope).
+        Known residuals:
+        - processed_messages retains dedupe rows whose message_id embeds the requester's phone
+          in Meta's wamid encoding; these age out via purge_older_than's received_at cutoff but
+          are not covered by an on-demand phone-scoped delete (decoding wamids to recover the
+          sender number is deliberately out of scope).
+        - an order whose ONLY phone lives on the linked customer resource (none of its own
+          phone/shipping_phone/billing_phone columns set) is not matched by the orders delete;
+          its customer row still goes (matched on that phone), and the FK's ON DELETE SET NULL
+          leaves the order behind minus the link. Rare for a COD store, whose orders reliably
+          carry a shipping phone, but not impossible.
+
+        LOCK ORDER: orders, then customers -- the reverse of ``upsert_order_mirror`` (see the
+        note there); a concurrent erasure and mirror sync on the same customer can deadlock,
+        which Postgres resolves by aborting one side.
         """
         async with self._pool.acquire() as conn:
             async with conn.transaction():

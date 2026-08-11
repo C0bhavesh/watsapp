@@ -1,7 +1,9 @@
 import json
 
 import httpx
+import pytest
 
+from app.shopify.errors import ShopifyThrottled
 from tests.test_client_graphql import grant_or, make_client, seed
 
 ORDER_NODE = {
@@ -15,6 +17,7 @@ ORDER_NODE = {
     "displayFulfillmentStatus": "UNFULFILLED",
     "cancelledAt": None,
     "customerLocale": "en-IN",
+    "updatedAt": "2026-08-11T12:00:00Z",
     "totalPriceSet": {"shopMoney": {"amount": "949.0", "currencyCode": "INR"}},
     "shippingAddress": {
         "phone": "+918888888888", "address1": "12 MG Road", "address2": None,
@@ -23,7 +26,7 @@ ORDER_NODE = {
     "billingAddress": {"phone": None},
     "customer": {
         "id": "gid://shopify/Customer/987654321", "firstName": "Suman", "lastName": "Bayala",
-        "email": "c@example.com",
+        "email": "c@example.com", "updatedAt": "2026-08-10T08:00:00Z",
     },
     "lineItems": {
         "edges": [
@@ -162,6 +165,34 @@ async def test_get_order_parses_customer(settings, master_key) -> None:
     assert order.customer.first_name == "Suman"
     assert order.customer.city == "Bengaluru"
     assert order.customer.postal_code == "560001"
+
+
+async def test_get_order_populates_updated_at_for_the_mirrors_staleness_guard(
+    settings, master_key
+) -> None:
+    """The read path must SELECT updatedAt, not just parse it.
+
+    A None here writes `updated_at = NULL` into the mirror, and the guard's
+    `orders.updated_at IS NULL` branch then lets any later delivery -- including a stale
+    replay -- overwrite that row, silently disarming the protection for every backfilled order.
+    """
+    captured: list[str] = []
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content)["query"])
+        return httpx.Response(200, json={"data": {"node": ORDER_NODE}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    order = await client.get_order("gid://shopify/Order/12187547894128")
+    assert order is not None
+    assert order.updated_at == "2026-08-11T12:00:00Z"
+    assert order.customer is not None
+    assert order.customer.updated_at == "2026-08-10T08:00:00Z"
+    # ...and the field is actually requested, so a real Shopify response would carry it.
+    query = captured[-1]
+    assert "updatedAt" in query
+    assert "customer { id firstName lastName email updatedAt }" in query
 
 
 async def test_get_order_missing_customer_parses_none(settings, master_key) -> None:
@@ -502,6 +533,70 @@ async def test_list_orders_created_since_pages_through_results(settings, master_
     assert orders[1].gid == "gid://shopify/Order/second"
     assert len(calls) == 2
     assert calls[1]["variables"]["cursor"] == "c1"
+
+
+async def test_list_orders_created_since_uses_a_cost_safe_page_size(
+    settings, master_key
+) -> None:
+    """Shopify rejects any single query costing over 1000 points with MAX_COST_EXCEEDED.
+
+    ORDER_FIELDS carries lineItems(first: 50), so the outer page size multiplies it:
+    50 x (1 + 50) is about 2550 points and could never run. 10 x 51 is about 510.
+    """
+    captured: list[str] = []
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content)["query"])
+        return httpx.Response(200, json={"data": {"orders": {
+            "edges": [], "pageInfo": {"hasNextPage": False}}}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    [o async for o in client.list_orders_created_since("2025-08-10")]
+    assert "orders(first: 10, after: $cursor" in captured[-1]
+
+
+async def test_list_orders_created_since_retries_once_after_a_throttle(
+    settings, master_key, monkeypatch
+) -> None:
+    slept: list[float] = []
+
+    async def no_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr("app.shopify.client.asyncio.sleep", no_sleep)
+    attempts: list[int] = []
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        if len(attempts) == 1:
+            return httpx.Response(429, json={})
+        return httpx.Response(200, json={"data": {"orders": {
+            "edges": [{"cursor": "c1", "node": ORDER_NODE}],
+            "pageInfo": {"hasNextPage": False}}}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    orders = [o async for o in client.list_orders_created_since("2025-08-10")]
+    assert len(orders) == 1
+    assert slept == [2]
+
+
+async def test_list_orders_created_since_gives_up_after_the_retry(
+    settings, master_key, monkeypatch
+) -> None:
+    async def no_sleep(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("app.shopify.client.asyncio.sleep", no_sleep)
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, json={})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    with pytest.raises(ShopifyThrottled):
+        [o async for o in client.list_orders_created_since("2025-08-10")]
 
 
 async def test_list_orders_created_since_empty_result(settings, master_key) -> None:

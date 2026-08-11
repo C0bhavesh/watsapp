@@ -111,6 +111,56 @@ async def test_stale_api_version_is_updated_even_with_correct_url(settings, mast
     assert update_calls[0]["variables"]["apiVersion"] == "2026-07"
 
 
+async def test_one_topics_user_error_does_not_block_the_other_topics(
+    settings, master_key
+) -> None:
+    """Per-topic independence must hold for the ERROR case too, not just URL/version drift.
+
+    CUSTOMERS_UPDATE is both the likeliest to fail (protected-customer-data approval) and the
+    LAST topic in REQUIRED_TOPICS -- a raise out of the comprehension would abort the whole job
+    and report nothing for the two topics that were fine.
+    """
+    def gql(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if "webhookSubscriptionCreate" in body["query"]:
+            if body["variables"]["topic"] == "ORDERS_UPDATED":
+                return httpx.Response(200, json={"data": {"webhookSubscriptionCreate": {
+                    "webhookSubscription": None,
+                    "userErrors": [{"message": "Access denied for webhookSubscriptionCreate"}]}}})
+            return httpx.Response(200, json={"data": {"webhookSubscriptionCreate": {
+                "webhookSubscription": {"id": "gid://shopify/WebhookSubscription/new"},
+                "userErrors": []}}})
+        topic = body["variables"].get("topics", ["ORDERS_CREATE"])[0]
+        if topic == "ORDERS_CREATE":
+            return httpx.Response(200, json={"data": {"webhookSubscriptions": {"edges": [
+                sub_edge("https://x.example/webhooks/shopify", topic="ORDERS_CREATE")]}}})
+        return httpx.Response(200, json={"data": {"webhookSubscriptions": {"edges": []}}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    result = await ensure_subscription(client, "https://x.example/webhooks/shopify")
+    assert set(result) == set(REQUIRED_TOPICS)  # every topic reported, none skipped
+    assert result["ORDERS_CREATE"] == "ok"
+    assert result["ORDERS_UPDATED"] == "error"
+    assert result["CUSTOMERS_UPDATE"] == "created"  # attempted despite the earlier failure
+
+
+async def test_topic_error_result_does_not_echo_shopifys_message(settings, master_key) -> None:
+    def gql(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if "webhookSubscriptionCreate" in body["query"]:
+            return httpx.Response(200, json={"data": {"webhookSubscriptionCreate": {
+                "webhookSubscription": None,
+                "userErrors": [{"message": "secret-ish internal detail"}]}}})
+        return httpx.Response(200, json={"data": {"webhookSubscriptions": {"edges": []}}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    result = await ensure_subscription(client, "https://x.example/webhooks/shopify")
+    assert set(result.values()) == {"error"}
+    assert "secret-ish" not in json.dumps(result)
+
+
 async def test_create_sends_current_api_version(settings, master_key) -> None:
     captured: list[dict] = []
 

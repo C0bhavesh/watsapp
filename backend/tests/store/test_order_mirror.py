@@ -193,6 +193,41 @@ async def test_pg_mirror_upserts_carry_an_out_of_order_delivery_guard() -> None:
     ) in conn.sql
 
 
+async def test_pg_order_embedded_customer_is_guarded_by_the_orders_updated_at() -> None:
+    """The customer row's address is a SNAPSHOT of the ORDER's shipping address.
+
+    Two orders/updated deliveries for the same order can carry an identical customer
+    `updated_at` (the customer resource itself did not change) but different addresses, so
+    guarding that write on the customer's own stamp lets an older delivery revert the address.
+    The order's freshness is the right comparison for order-derived data.
+    """
+    conn = _RecordingConn()
+    await _pg(conn).upsert_order_mirror(
+        _order(
+            updated_at="2026-08-11T12:00:00+00:00",
+            customer=_customer(updated_at="2026-01-01T00:00:00+00:00"),
+        )
+    )
+
+    customer_sql = [
+        (sql, args) for sql, args in conn.executed if sql.startswith("INSERT INTO customers")
+    ]
+    assert len(customer_sql) == 1
+    # $12 is the bound updated_at: the ORDER's stamp, not the customer's own.
+    assert customer_sql[0][1][11] == datetime.fromisoformat("2026-08-11T12:00:00+00:00")
+
+
+async def test_pg_standalone_customer_upsert_keeps_the_customers_own_updated_at() -> None:
+    # customers/update IS a genuine customer-resource change, so that path must keep comparing
+    # against the customer's own stamp.
+    conn = _RecordingConn()
+    await _pg(conn).upsert_customer(_customer(updated_at="2026-01-01T00:00:00+00:00"))
+
+    sql, args = conn.executed[0]
+    assert sql.startswith("INSERT INTO customers")
+    assert args[11] == datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+
+
 async def test_pg_stale_order_upsert_leaves_the_existing_line_items_alone() -> None:
     # The guarded upsert returned no row => this delivery is older than what is stored, so the
     # DELETE+re-INSERT of order_items must not run either (it would install stale items).
@@ -281,9 +316,43 @@ async def test_upsert_order_mirror_pg_older_update_does_not_revert_the_row(
         row = await conn.fetchrow(
             "SELECT fulfillment_status, updated_at FROM orders WHERE gid = $1", gid
         )
+        items = await conn.fetch("SELECT title FROM order_items WHERE order_gid = $1", gid)
     assert row is not None
     assert str(row["fulfillment_status"]) == "FULFILLED"
     assert row["updated_at"] == datetime.fromisoformat(newer)
+    # The stale delivery must not have replaced the items either (the DELETE + re-INSERT is
+    # skipped when the guarded upsert returns no row).
+    assert [str(r["title"]) for r in items] == ["Blue Kurti"]
+
+
+@pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")
+async def test_upsert_order_mirror_pg_older_delivery_does_not_revert_the_address(
+    pool: LazyPool,
+) -> None:
+    """Same order, same UNCHANGED customer stamp, different shipping address.
+
+    Guarding the order-embedded customer write on the customer's own updated_at would let the
+    older delivery win here; guarding it on the ORDER's updated_at keeps the newer address.
+    """
+    store = PostgresIngestStore(pool)
+    gid = f"gid://shopify/Order/{uuid.uuid4()}"
+    customer_gid = f"gid://shopify/Customer/{uuid.uuid4()}"
+    unchanged = "2026-01-01T00:00:00+00:00"
+    await store.upsert_order_mirror(
+        _order(
+            gid=gid, updated_at="2026-08-11T12:00:00+00:00",
+            customer=_customer(gid=customer_gid, city="Pune", updated_at=unchanged),
+        )
+    )
+    await store.upsert_order_mirror(
+        _order(
+            gid=gid, updated_at="2026-08-11T09:00:00+00:00",
+            customer=_customer(gid=customer_gid, city="Mumbai", updated_at=unchanged),
+        )
+    )
+    async with pool.acquire() as conn:
+        city = await conn.fetchval("SELECT city FROM customers WHERE gid = $1", customer_gid)
+    assert str(city) == "Pune"
 
 
 @pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")

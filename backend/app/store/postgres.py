@@ -1,3 +1,5 @@
+import logging
+from dataclasses import replace
 from datetime import datetime
 
 import asyncpg
@@ -14,6 +16,8 @@ from app.store.base import (
     StoredMessage,
 )
 from app.store.pg_factory import LazyPool
+
+logger = logging.getLogger(__name__)
 
 
 def _rows_affected(tag: str) -> int:
@@ -77,8 +81,12 @@ async def _upsert_customer_on_conn(conn: asyncpg.Connection, customer: Customer)
     Not called from both via the standalone method itself — ``upsert_order_mirror`` must run the
     customer upsert on the SAME connection/transaction as the order + line-item writes, so this
     takes an already-acquired ``conn`` rather than acquiring its own.
+
+    ``customer.updated_at`` is whatever freshness stamp the CALLER decided governs this write:
+    the customer's own for a genuine customers/update, the ORDER's for an order-embedded
+    customer (see ``upsert_order_mirror``).
     """
-    await conn.execute(
+    applied = await conn.fetchval(
         "INSERT INTO customers (gid, first_name, last_name, email, phone, "
         "address_line1, address_line2, city, state, postal_code, country, updated_at, "
         "synced_at) "
@@ -89,12 +97,17 @@ async def _upsert_customer_on_conn(conn: asyncpg.Connection, customer: Customer)
         # Out-of-order-delivery guard: a late RETRY of an older update must not overwrite a
         # newer row. A NULL on either side still writes (backfill/payload without the field).
         "WHERE customers.updated_at IS NULL OR EXCLUDED.updated_at IS NULL "
-        "OR EXCLUDED.updated_at >= customers.updated_at",
+        "OR EXCLUDED.updated_at >= customers.updated_at "
+        "RETURNING gid",
         customer.gid, customer.first_name, customer.last_name, customer.email,
         customer.phone, customer.address_line1, customer.address_line2, customer.city,
         customer.state, customer.postal_code, customer.country,
         _parse_timestamp(customer.updated_at),
     )
+    if applied is None:
+        # Expected for a replayed/out-of-order delivery, but logged so a guard malfunction
+        # (e.g. a timestamp-parsing regression) shows up instead of silently freezing the row.
+        logger.info("customer mirror upsert skipped as stale: gid=%s", customer.gid)
 
 
 class PostgresConfigRepo:
@@ -217,7 +230,14 @@ class PostgresIngestStore:
         async with self._pool.acquire() as conn:
             async with conn.transaction():
                 if order.customer is not None:
-                    await _upsert_customer_on_conn(conn, order.customer)
+                    # The embedded customer's address fields are a SNAPSHOT of THIS order's
+                    # shipping address, so the order's freshness governs them -- the customer
+                    # resource's own updated_at does not change when an order does, and two
+                    # deliveries for the same order can carry an identical customer stamp with
+                    # different addresses (an older one would otherwise revert the address).
+                    await _upsert_customer_on_conn(
+                        conn, replace(order.customer, updated_at=order.updated_at)
+                    )
                 customer_gid = order.customer.gid if order.customer is not None else None
                 total_amount = order.total.amount if order.total is not None else None
                 total_currency = order.total.currency if order.total is not None else None
@@ -250,7 +270,9 @@ class PostgresIngestStore:
                 )
                 if applied is None:
                     # The guard rejected this write as stale; leave the stored items alone
-                    # rather than replacing them with older ones.
+                    # rather than replacing them with older ones. Logged (see
+                    # _upsert_customer_on_conn) so a guard malfunction is visible.
+                    logger.info("mirror upsert skipped as stale: gid=%s", order.gid)
                     return
                 # ORDERING IS LOAD-BEARING: the orders upsert above takes the row-exclusive
                 # lock that serializes concurrent same-gid syncs. Only because it runs FIRST is
@@ -341,11 +363,14 @@ class PostgresIngestStore:
         """DPDP right-to-erasure: purge every row keyed to one phone number, atomically.
 
         Covers order_mappings, outbound_messages, conversations, messages, pending_actions,
-        order_actions and the order-mirror tables (customers on its own phone; orders on any of
-        phone/shipping_phone/billing_phone — order_items follow their order via the FK's
-        ON DELETE CASCADE, so they need no separate statement). Orders are deleted before
-        customers so the parent row goes away without first being nulled by
-        ``customer_gid``'s ON DELETE SET NULL.
+        order_actions and the order-mirror tables. The mirror needs two passes: orders are
+        deleted first (matching any of phone/shipping_phone/billing_phone) with
+        ``RETURNING customer_gid``, then customers are deleted by their own ``phone`` OR by one
+        of those returned gids. Matching customers on ``phone`` alone was not enough — a
+        Shopify customer resource usually carries NO phone (the number lives on the shipping
+        address), so the customer's name/email/postal address survived erasure on the ordinary
+        COD order while the endpoint still reported success. ``order_items`` follow their order
+        via the FK's ON DELETE CASCADE, so they need no statement of their own.
 
         Children (messages) are deleted before parents (conversations) for FK integrity.
         conversations/messages have no repo writer yet (Phase 4) but are cleaned defensively
@@ -379,13 +404,18 @@ class PostgresIngestStore:
                 actions = await conn.execute(
                     "DELETE FROM order_actions WHERE actor_wa_id = $1", phone_e164
                 )
-                orders = await conn.execute(
+                order_rows = await conn.fetch(
                     "DELETE FROM orders WHERE phone = $1 OR shipping_phone = $1 "
-                    "OR billing_phone = $1",
+                    "OR billing_phone = $1 RETURNING customer_gid",
                     phone_e164,
                 )
+                linked_customer_gids = [
+                    str(r["customer_gid"]) for r in order_rows if r["customer_gid"] is not None
+                ]
                 customers = await conn.execute(
-                    "DELETE FROM customers WHERE phone = $1", phone_e164
+                    "DELETE FROM customers WHERE phone = $1 OR gid = ANY($2::text[])",
+                    phone_e164,
+                    linked_customer_gids,
                 )
         return DeletionResult(
             order_mappings=_rows_affected(mappings),
@@ -395,7 +425,7 @@ class PostgresIngestStore:
             pending_actions=_rows_affected(pending),
             order_actions=_rows_affected(actions),
             customers=_rows_affected(customers),
-            orders=_rows_affected(orders),
+            orders=len(order_rows),
         )
 
     async def purge_older_than(self, cutoff: datetime) -> DeletionResult:

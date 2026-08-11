@@ -28,10 +28,19 @@ router = APIRouter()
 TEMPLATE_NAME = "order_confirmation_cod"
 MAX_WEBHOOK_BODY_BYTES = 1_048_576
 
+def _topic_header_name(topic: str) -> str:
+    """GraphQL subscription enum -> the X-Shopify-Topic header form.
+
+    Only the FIRST underscore becomes a slash: it separates the resource from the event, and a
+    multi-word event keeps its own (``ORDERS_PARTIALLY_FULFILLED`` ->
+    ``orders/partially_fulfilled``).
+    """
+    return topic.lower().replace("_", "/", 1)
+
+
 # Derived from the subscribed topics so the two can never drift: a topic we subscribe to but
 # do not handle is a delivery silently dropped, and the reverse is code that can never run.
-# Shopify's header format is the lowercase, slash-separated form of the GraphQL enum.
-HANDLED_TOPICS = frozenset(t.lower().replace("_", "/") for t in REQUIRED_TOPICS)
+HANDLED_TOPICS = frozenset(_topic_header_name(t) for t in REQUIRED_TOPICS)
 
 
 DEFAULT_STALENESS_HOURS = 6.0

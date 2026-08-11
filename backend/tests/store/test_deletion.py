@@ -6,6 +6,7 @@ statements — proving delete_by_phone / purge_older_than reach every phone-bear
 plus the age-only processed_messages purge) without needing a live database.
 """
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from app.shopify.models import Customer, LineItem, Order
@@ -114,6 +115,28 @@ async def test_delete_by_phone_removes_the_mirrored_order_customer_and_items() -
     assert set(store.order_items) == {"gid://shopify/Order/2"}
 
 
+async def test_delete_by_phone_removes_a_customer_linked_only_through_the_order() -> None:
+    """The NORMAL COD shape: the customer resource carries no phone, the shipping address does.
+
+    Matching customers on their own `phone` alone left name/email/full postal address behind
+    while POST /admin/erasure still reported ok -- a false completeness signal on a legal
+    obligation. The link is followed through the order's customer_gid instead.
+    """
+    store = InMemoryIngestStore()
+    order = _mirror_order("gid://shopify/Order/1", "+919111111111")
+    assert order.customer is not None
+    await store.upsert_order_mirror(
+        replace(order, customer=replace(order.customer, phone=None))
+    )
+
+    result = await store.delete_by_phone("+919111111111")
+
+    assert result.orders == 1
+    assert result.customers == 1
+    assert store.orders == {}
+    assert store.customers == {}
+
+
 async def test_purge_older_than_inmemory_is_noop_without_timestamps() -> None:
     # In-memory rows carry no created_at, so age-based purge deletes nothing; the real
     # age filter is exercised against Postgres. It must still honour the Protocol cleanly.
@@ -156,6 +179,13 @@ class _FakeConn:
         self.executed.append(normalized)
         self.calls.append((normalized, args))
         return "DELETE 0"
+
+    async def fetch(self, sql: str, *args: object) -> list[dict[str, object]]:
+        # The orders delete uses RETURNING customer_gid, so it goes through fetch, not execute.
+        normalized = " ".join(sql.split())
+        self.executed.append(normalized)
+        self.calls.append((normalized, args))
+        return []
 
 
 class _FakeAcquire:
@@ -213,9 +243,12 @@ async def test_pg_delete_by_phone_covers_the_order_mirror_tables() -> None:
     joined = " ".join(conn.executed)
     # An order can carry the number in any of three columns; order_items cascade off orders.
     assert (
-        "DELETE FROM orders WHERE phone = $1 OR shipping_phone = $1 OR billing_phone = $1"
+        "DELETE FROM orders WHERE phone = $1 OR shipping_phone = $1 OR billing_phone = $1 "
+        "RETURNING customer_gid"
     ) in joined
-    assert "DELETE FROM customers WHERE phone = $1" in joined
+    # ...and the customers it pointed at go too, even when the customer resource itself
+    # carries no phone (the usual COD shape: the phone lives on the shipping address).
+    assert "DELETE FROM customers WHERE phone = $1 OR gid = ANY($2::text[])" in joined
 
 
 async def test_pg_delete_by_phone_binds_the_e164_phone_to_conversations_user_id() -> None:

@@ -164,18 +164,26 @@ class InMemoryIngestStore:
             if meta is not None:
                 self._outbound_by_id.pop(meta.id, None)
             del self.outbound[key]
-        # Mirror tables: an order carries the number in any of three columns; its items follow
-        # it (the Postgres FK cascades), and a customer row is matched on its own phone.
+        # Mirror tables: an order carries the number in any of three columns and its items
+        # follow it (the Postgres FK cascades). A customer is matched on its own phone OR by
+        # being linked from one of those orders — a Shopify customer resource usually has no
+        # phone of its own (it lives on the shipping address), so the link is the only way to
+        # reach the name/email/address of the ordinary COD customer.
         removed_orders = [
             gid
             for gid, o in self.orders.items()
             if phone_e164 in (o.phone, o.shipping_phone, o.billing_phone)
         ]
+        linked_customer_gids = {
+            o.customer.gid for gid in removed_orders if (o := self.orders[gid]).customer
+        }
         for gid in removed_orders:
             del self.orders[gid]
             self.order_items.pop(gid, None)
         removed_customers = [
-            gid for gid, cust in self.customers.items() if cust.phone == phone_e164
+            gid
+            for gid, cust in self.customers.items()
+            if cust.phone == phone_e164 or gid in linked_customer_gids
         ]
         for gid in removed_customers:
             del self.customers[gid]

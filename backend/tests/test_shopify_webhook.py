@@ -108,13 +108,25 @@ def test_handled_topics_stay_in_sync_with_the_subscribed_topics() -> None:
     """One declaration of the three topic names, not two that can drift apart.
 
     A topic subscribed in `REQUIRED_TOPICS` but missing from the handler's set is a delivery
-    Shopify sends and we silently drop; the reverse is code that can never run.
+    Shopify sends and we silently drop; the reverse is code that can never run. The expected
+    set is spelled out literally -- recomputing the implementation's own expression here would
+    pass no matter how wrong that expression is.
     """
     from app.channels.shopify_webhook import HANDLED_TOPICS
     from app.shopify.subscriptions import REQUIRED_TOPICS
 
-    assert HANDLED_TOPICS == {t.lower().replace("_", "/") for t in REQUIRED_TOPICS}
     assert HANDLED_TOPICS == {"orders/create", "orders/updated", "customers/update"}
+    assert len(HANDLED_TOPICS) == len(REQUIRED_TOPICS)
+
+
+def test_topic_header_name_splits_only_the_resource_prefix() -> None:
+    # Shopify's header form replaces ONLY the first underscore: the GraphQL enum
+    # ORDERS_PARTIALLY_FULFILLED is delivered as `orders/partially_fulfilled`.
+    from app.channels.shopify_webhook import _topic_header_name
+
+    assert _topic_header_name("ORDERS_CREATE") == "orders/create"
+    assert _topic_header_name("CUSTOMERS_UPDATE") == "customers/update"
+    assert _topic_header_name("ORDERS_PARTIALLY_FULFILLED") == "orders/partially_fulfilled"
 
 
 async def test_orders_updated_populates_the_mirror() -> None:
@@ -279,7 +291,11 @@ async def test_garbage_body_with_valid_hmac_ignored() -> None:
     assert resp.json() == {"ok": True, "ignored": True}
 
 
-async def test_type_confused_signed_payload_does_not_500() -> None:
+@pytest.mark.parametrize("topic", ["orders/create", "orders/updated", "customers/update"])
+async def test_type_confused_signed_payload_does_not_500(topic: str) -> None:
+    # Every handled topic parses attacker-typed JSON OUTSIDE the try/except that wraps the
+    # mirror write, so each one needs its own proof that a poison payload cannot 500 a signed
+    # delivery (a 500 burns Shopify's 19-failure budget before it deletes the subscription).
     p = {
         "admin_graphql_api_id": "gid://shopify/Order/poison",
         "name": "tavasX",
@@ -290,7 +306,7 @@ async def test_type_confused_signed_payload_does_not_500() -> None:
         "email": {"x": 1},
     }
     body = json.dumps(p).encode()
-    resp = await post(body, headers(body, webhook_id="wh-poison"))
+    resp = await post(body, headers(body, topic=topic, webhook_id=f"wh-poison-{topic}"))
     assert resp.status_code == 200
 
 

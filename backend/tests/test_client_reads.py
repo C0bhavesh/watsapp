@@ -16,8 +16,15 @@ ORDER_NODE = {
     "cancelledAt": None,
     "customerLocale": "en-IN",
     "totalPriceSet": {"shopMoney": {"amount": "949.0", "currencyCode": "INR"}},
-    "shippingAddress": {"phone": "+918888888888"},
+    "shippingAddress": {
+        "phone": "+918888888888", "address1": "12 MG Road", "address2": None,
+        "city": "Bengaluru", "province": "Karnataka", "zip": "560001", "country": "India",
+    },
     "billingAddress": {"phone": None},
+    "customer": {
+        "id": "gid://shopify/Customer/987654321", "firstName": "Suman", "lastName": "Bayala",
+        "email": "c@example.com",
+    },
     "lineItems": {
         "edges": [
             {
@@ -25,6 +32,7 @@ ORDER_NODE = {
                     "title": "Blue Chikankari Kurti",
                     "quantity": 1,
                     "variant": {"title": "Blue / M"},
+                    "sku": "KUR-BLU-M",
                     "originalUnitPriceSet": {
                         "shopMoney": {"amount": "999.00", "currencyCode": "INR"}
                     },
@@ -35,6 +43,7 @@ ORDER_NODE = {
                     "title": "Cotton Dupatta",
                     "quantity": 2,
                     "variant": {"title": "Red"},
+                    "sku": None,
                     "originalUnitPriceSet": {
                         "shopMoney": {"amount": "150.00", "currencyCode": "INR"}
                     },
@@ -138,6 +147,47 @@ async def test_get_order_missing_line_items_key_parses_to_empty_tuple(settings, 
     order = await client.get_order("gid://shopify/Order/12187547894128")
     assert order is not None
     assert order.line_items == ()
+
+
+async def test_get_order_parses_customer(settings, master_key) -> None:
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"node": ORDER_NODE}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    order = await client.get_order("gid://shopify/Order/12187547894128")
+    assert order is not None
+    assert order.customer is not None
+    assert order.customer.gid == "gid://shopify/Customer/987654321"
+    assert order.customer.first_name == "Suman"
+    assert order.customer.city == "Bengaluru"
+    assert order.customer.postal_code == "560001"
+
+
+async def test_get_order_missing_customer_parses_none(settings, master_key) -> None:
+    node = {k: v for k, v in ORDER_NODE.items() if k != "customer"}
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"node": node}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    order = await client.get_order("gid://shopify/Order/12187547894128")
+    assert order is not None
+    assert order.customer is None
+
+
+async def test_get_order_parses_line_item_sku(settings, master_key) -> None:
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"node": ORDER_NODE}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    order = await client.get_order("gid://shopify/Order/12187547894128")
+    assert order is not None
+    first, second = order.line_items
+    assert first.sku == "KUR-BLU-M"
+    assert second.sku is None
 
 
 async def test_get_order_missing_returns_none(settings, master_key) -> None:

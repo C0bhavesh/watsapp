@@ -15,6 +15,7 @@ from app.shopify.errors import (
 from app.shopify.models import (
     AuthorizedOrder,
     CancelRequested,
+    Customer,
     LineItem,
     Money,
     Order,
@@ -27,11 +28,13 @@ ORDER_FIELDS = (
     "id name email phone tags paymentGatewayNames displayFinancialStatus "
     "displayFulfillmentStatus cancelledAt customerLocale "
     "totalPriceSet { shopMoney { amount currencyCode } } "
-    "shippingAddress { phone } billingAddress { phone } "
+    "shippingAddress { phone address1 address2 city province zip country } "
+    "billingAddress { phone } "
+    "customer { id firstName lastName email } "
     # first: 50 is a query-time ceiling far above any realistic order size -- the display side
     # (order_tracking) shows every item with no further cap, by design (owner's explicit
     # choice: show all, don't summarize/truncate a customer's own order).
-    "lineItems(first: 50) { edges { node { title quantity variant { title } "
+    "lineItems(first: 50) { edges { node { title quantity variant { title } sku "
     "originalUnitPriceSet { shopMoney { amount currencyCode } } } } }"
 )
 
@@ -53,9 +56,33 @@ def _line_items_from_node(node: dict[str, Any]) -> tuple[LineItem, ...]:
                     if price_node
                     else None
                 ),
+                sku=item_node.get("sku"),
             )
         )
     return tuple(items)
+
+
+def _customer_from_node(node: dict[str, Any]) -> Customer | None:
+    customer = node.get("customer")
+    if not isinstance(customer, dict):
+        return None
+    gid = customer.get("id")
+    if not isinstance(gid, str) or not gid:
+        return None
+    shipping = node.get("shippingAddress") or {}
+    return Customer(
+        gid=gid,
+        first_name=customer.get("firstName"),
+        last_name=customer.get("lastName"),
+        email=customer.get("email"),
+        phone=None,
+        address_line1=shipping.get("address1"),
+        address_line2=shipping.get("address2"),
+        city=shipping.get("city"),
+        state=shipping.get("province"),
+        postal_code=shipping.get("zip"),
+        country=shipping.get("country"),
+    )
 
 
 def _order_from_node(node: dict[str, Any]) -> Order:
@@ -77,6 +104,7 @@ def _order_from_node(node: dict[str, Any]) -> Order:
         else None,
         customer_locale=node.get("customerLocale"),
         line_items=_line_items_from_node(node),
+        customer=_customer_from_node(node),
     )
 
 

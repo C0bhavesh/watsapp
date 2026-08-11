@@ -99,8 +99,49 @@ async def test_prepaid_order_maps_but_does_not_queue_under_cod_only() -> None:
 
 async def test_other_topic_ignored() -> None:
     body = json.dumps(payload()).encode()
-    resp = await post(body, headers(body, topic="orders/updated"))
+    resp = await post(body, headers(body, topic="products/create"))
     assert resp.json() == {"ok": True, "ignored": True}
+
+
+async def test_orders_updated_populates_the_mirror() -> None:
+    p = payload("gid://shopify/Order/mirror1")
+    p["fulfillment_status"] = "fulfilled"
+    body = json.dumps(p).encode()
+    resp = await post(body, headers(body, topic="orders/updated", webhook_id="wh-mirror1"))
+    assert resp.status_code == 200
+    store = get_container().ingest
+    assert store.orders["gid://shopify/Order/mirror1"].fulfillment_status == "fulfilled"  # type: ignore[attr-defined]
+
+
+async def test_orders_create_also_populates_the_mirror() -> None:
+    body = json.dumps(payload("gid://shopify/Order/mirror2")).encode()
+    resp = await post(body, headers(body, webhook_id="wh-mirror2"))
+    assert resp.status_code == 200
+    store = get_container().ingest
+    assert "gid://shopify/Order/mirror2" in store.orders  # type: ignore[attr-defined]
+    # The existing mapping/push-eligibility behavior for orders/create is unaffected:
+    assert resp.json() == {"ok": True, "duplicate": False, "queued": True}
+
+
+async def test_customers_update_populates_customers_table_only() -> None:
+    p = {
+        "id": 555, "admin_graphql_api_id": "gid://shopify/Customer/555",
+        "first_name": "Anita", "last_name": "Rao", "email": "a@example.com",
+        "phone": "+919888888888", "default_address": {"city": "Pune"},
+    }
+    body = json.dumps(p).encode()
+    resp = await post(body, headers(body, topic="customers/update", webhook_id="wh-cust1"))
+    assert resp.status_code == 200
+    store = get_container().ingest
+    assert store.customers["gid://shopify/Customer/555"].city == "Pune"  # type: ignore[attr-defined]
+    assert store.orders == {}  # type: ignore[attr-defined]
+    assert not store.mappings  # type: ignore[attr-defined]  # no order-mapping side effect
+
+
+async def test_customers_update_malformed_payload_ignored() -> None:
+    body = json.dumps({"first_name": "no id"}).encode()
+    resp = await post(body, headers(body, topic="customers/update", webhook_id="wh-cust2"))
+    assert resp.status_code == 200
 
 
 async def test_garbage_body_with_valid_hmac_ignored() -> None:

@@ -7,7 +7,9 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from app.channels.shopify_orders import (
     choose_language,
+    customer_from_webhook_payload,
     is_eligible_for_push,
+    order_from_webhook_payload,
     parse_order_created,
 )
 from app.channels.shopify_signature import verify_shopify_hmac
@@ -86,16 +88,42 @@ async def shopify_webhook(request: Request) -> Response:
 
     topic = request.headers.get("X-Shopify-Topic", "")
     webhook_id = request.headers.get("X-Shopify-Webhook-Id", "")
-    if topic != "orders/create" or not webhook_id:
+    handled_topics = {"orders/create", "orders/updated", "customers/update"}
+    if topic not in handled_topics or not webhook_id:
         return JSONResponse({"ok": True, "ignored": True})
 
     try:
         payload = json.loads(raw)
     except (ValueError, RecursionError):
         return JSONResponse({"ok": True, "ignored": True})
-    incoming = parse_order_created(payload) if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        return JSONResponse({"ok": True, "ignored": True})
+
+    # orders/updated and customers/update deliberately do NOT go through the
+    # processed_webhooks dedupe table the way orders/create does below: upsert_order_mirror /
+    # upsert_customer are ON CONFLICT DO UPDATE, so replaying the same webhook twice just
+    # re-writes identical data -- a no-op in effect, unlike orders/create's outbound-message
+    # queuing, which has a real side effect that duplication would actually break.
+    if topic == "customers/update":
+        customer = customer_from_webhook_payload(payload)
+        if customer is None:
+            return JSONResponse({"ok": True, "ignored": True})
+        await c.ingest.upsert_customer(customer)
+        return JSONResponse({"ok": True, "ignored": False})
+
+    if topic == "orders/updated":
+        order = order_from_webhook_payload(payload)
+        if order is None:
+            return JSONResponse({"ok": True, "ignored": True})
+        await c.ingest.upsert_order_mirror(order)
+        return JSONResponse({"ok": True, "ignored": False})
+
+    incoming = parse_order_created(payload)
     if incoming is None:
         return JSONResponse({"ok": True, "ignored": True})
+    mirror_order = order_from_webhook_payload(payload)
+    if mirror_order is not None:
+        await c.ingest.upsert_order_mirror(mirror_order)
 
     language = choose_language(incoming.locale)
     order_name = _clip(incoming.name) or ""

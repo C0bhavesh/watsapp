@@ -463,3 +463,88 @@ async def test_upsert_order_mirror_pg_cancelled_at_round_trips(pool: LazyPool) -
         row = await conn.fetchrow("SELECT cancelled_at FROM orders WHERE gid = $1", gid)
     assert row is not None
     assert row["cancelled_at"] == datetime.fromisoformat(cancelled_at)
+
+
+@pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")
+async def test_get_mirrored_order_pg_returns_full_order_with_items_and_customer(
+    pool: LazyPool,
+) -> None:
+    store = PostgresIngestStore(pool)
+    gid = f"gid://shopify/Order/{uuid.uuid4()}"
+    customer_gid = f"gid://shopify/Customer/{uuid.uuid4()}"
+    await store.upsert_order_mirror(_order(gid=gid, customer=_customer(gid=customer_gid)))
+
+    result = await store.get_mirrored_order(gid)
+
+    assert result is not None
+    assert result.gid == gid
+    assert result.name == "tavas3733"
+    assert len(result.line_items) == 1
+    assert result.line_items[0].title == "Blue Kurti"
+    assert result.customer is not None
+    assert result.customer.first_name == "Suman"
+
+
+@pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")
+async def test_get_mirrored_order_pg_missing_gid_returns_none(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    result = await store.get_mirrored_order(f"gid://shopify/Order/{uuid.uuid4()}")
+    assert result is None
+
+
+@pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")
+async def test_get_mirrored_order_pg_no_customer_returns_none_customer(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    gid = f"gid://shopify/Order/{uuid.uuid4()}"
+    await store.upsert_order_mirror(_order(gid=gid, customer=None))
+
+    result = await store.get_mirrored_order(gid)
+
+    assert result is not None
+    assert result.customer is None
+
+
+@pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")
+async def test_find_mirrored_order_by_name_pg_normalizes_bare_digits(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    gid = f"gid://shopify/Order/{uuid.uuid4()}"
+    await store.upsert_order_mirror(_order(gid=gid, name="tavas3733", customer=None))
+
+    result = await store.find_mirrored_order_by_name("3733")
+
+    assert result is not None
+    assert result.gid == gid
+
+
+@pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")
+async def test_find_mirrored_order_by_name_pg_miss_returns_none(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    result = await store.find_mirrored_order_by_name("tavas000000000")
+    assert result is None
+
+
+@pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")
+async def test_find_mirrored_orders_by_phone_pg_matches_any_of_three_columns(
+    pool: LazyPool,
+) -> None:
+    store = PostgresIngestStore(pool)
+    phone = "+919876500000"
+    gid_ship = f"gid://shopify/Order/{uuid.uuid4()}"
+    gid_bill = f"gid://shopify/Order/{uuid.uuid4()}"
+    await store.upsert_order_mirror(
+        _order(gid=gid_ship, phone=None, shipping_phone=phone, billing_phone=None, customer=None)
+    )
+    await store.upsert_order_mirror(
+        _order(gid=gid_bill, phone=None, shipping_phone=None, billing_phone=phone, customer=None)
+    )
+
+    results = await store.find_mirrored_orders_by_phone(phone)
+
+    assert {o.gid for o in results} == {gid_ship, gid_bill}
+
+
+@pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")
+async def test_find_mirrored_orders_by_phone_pg_no_match_returns_empty(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    results = await store.find_mirrored_orders_by_phone("+919000000000")
+    assert results == []

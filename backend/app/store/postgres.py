@@ -5,7 +5,7 @@ from datetime import datetime
 import asyncpg
 
 from app.core.phone import normalize_phone
-from app.shopify.models import Customer, Order
+from app.shopify.models import Customer, LineItem, Money, Order, normalize_order_name
 from app.store.base import (
     DeletionResult,
     IngestResult,
@@ -36,6 +36,62 @@ _MAX_ORDER_NUMBER_DIGITS = 9
 # pathological order could stall live replies. Matches the `first: 50` cap the GraphQL
 # line-items selection already uses.
 MAX_MIRROR_LINE_ITEMS = 50
+
+
+_MIRROR_ORDER_SELECT = (
+    "SELECT o.gid, o.name, o.email, o.phone, o.shipping_phone, o.billing_phone, "
+    "o.financial_status, o.fulfillment_status, o.cancelled_at, o.tags, "
+    "o.payment_gateway_names, o.total_amount, o.total_currency, o.customer_locale, "
+    "o.updated_at, "
+    "c.gid AS c_gid, c.first_name AS c_first_name, c.last_name AS c_last_name, "
+    "c.email AS c_email, c.phone AS c_phone, c.address_line1 AS c_address_line1, "
+    "c.address_line2 AS c_address_line2, c.city AS c_city, c.state AS c_state, "
+    "c.postal_code AS c_postal_code, c.country AS c_country, "
+    "c.updated_at AS c_updated_at "
+    "FROM orders o LEFT JOIN customers c ON c.gid = o.customer_gid "
+)
+
+
+def _order_from_row(row: asyncpg.Record, items: list[LineItem]) -> Order:
+    customer = None
+    if row["c_gid"] is not None:
+        customer = Customer(
+            gid=row["c_gid"], first_name=row["c_first_name"], last_name=row["c_last_name"],
+            email=row["c_email"], phone=row["c_phone"], address_line1=row["c_address_line1"],
+            address_line2=row["c_address_line2"], city=row["c_city"], state=row["c_state"],
+            postal_code=row["c_postal_code"], country=row["c_country"],
+            updated_at=row["c_updated_at"].isoformat() if row["c_updated_at"] else None,
+        )
+    total = None
+    if row["total_amount"] is not None:
+        total = Money(amount=row["total_amount"], currency=row["total_currency"])
+    return Order(
+        gid=row["gid"], name=row["name"], email=row["email"], phone=row["phone"],
+        shipping_phone=row["shipping_phone"], billing_phone=row["billing_phone"],
+        financial_status=row["financial_status"], fulfillment_status=row["fulfillment_status"],
+        cancelled_at=row["cancelled_at"].isoformat() if row["cancelled_at"] else None,
+        tags=tuple(row["tags"] or ()),
+        payment_gateway_names=tuple(row["payment_gateway_names"] or ()),
+        total=total, customer_locale=row["customer_locale"],
+        line_items=tuple(items), customer=customer,
+        updated_at=row["updated_at"].isoformat() if row["updated_at"] else None,
+    )
+
+
+async def _fetch_mirror_line_items(conn: asyncpg.Connection, order_gid: str) -> list[LineItem]:
+    rows = await conn.fetch(
+        "SELECT title, sku, quantity, variant_title, price_amount, price_currency "
+        "FROM order_items WHERE order_gid = $1",
+        order_gid,
+    )
+    return [
+        LineItem(
+            title=r["title"], quantity=r["quantity"], variant_title=r["variant_title"],
+            price=Money(r["price_amount"], r["price_currency"]) if r["price_amount"] else None,
+            sku=r["sku"],
+        )
+        for r in rows
+    ]
 
 
 def _order_number_from_name(name: str) -> int | None:
@@ -238,6 +294,36 @@ class PostgresIngestStore:
         async with self._pool.acquire() as conn:
             found = await conn.fetchval("SELECT 1 FROM customers WHERE gid = $1", gid)
         return found is not None
+
+    async def get_mirrored_order(self, gid: str) -> Order | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(_MIRROR_ORDER_SELECT + "WHERE o.gid = $1", gid)
+            if row is None:
+                return None
+            items = await _fetch_mirror_line_items(conn, gid)
+        return _order_from_row(row, items)
+
+    async def find_mirrored_order_by_name(self, raw_name: str) -> Order | None:
+        name = normalize_order_name(raw_name)
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(_MIRROR_ORDER_SELECT + "WHERE o.name = $1", name)
+            if row is None:
+                return None
+            items = await _fetch_mirror_line_items(conn, str(row["gid"]))
+        return _order_from_row(row, items)
+
+    async def find_mirrored_orders_by_phone(self, phone_e164: str) -> list[Order]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                _MIRROR_ORDER_SELECT
+                + "WHERE o.phone = $1 OR o.shipping_phone = $1 OR o.billing_phone = $1",
+                phone_e164,
+            )
+            orders = []
+            for row in rows:
+                items = await _fetch_mirror_line_items(conn, str(row["gid"]))
+                orders.append(_order_from_row(row, items))
+        return orders
 
     async def upsert_order_mirror(self, order: Order) -> None:
         # LOCK ORDER: customers, then orders. `delete_by_phone` takes them the other way round

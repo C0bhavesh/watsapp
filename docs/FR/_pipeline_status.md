@@ -158,3 +158,12 @@
 ## Pending client verification — ON HOLD
 
 > All client questions are consolidated in `client-decisions-all.md`. Send that one doc.
+
+- **Q16 (2026-08-12) — phone-match scope for the database-first order-Q&A lookup.** Built and
+  shipped conservatively (buyer's own `orders.phone` only, per rule 8) pending client
+  confirmation on whether shipping/billing-phone matches (gift-recipient numbers) should also
+  unlock an order in chat. See row below and `client-decisions-all.md` Part 6, Q16.
+
+| Module / Feature | Status | Notes |
+|---|---|---|
+| **Phase 5.5 — Database-first order reads for chat Q&A (`MirrorOrderSource`)** | **BUILT + REVIEWED (2026-08-12)** — code review APPROVED (after 1 fix round); security review found 2 code-level MEDIUMs (fixed) + 1 MEDIUM routed to client as Q16 (ON HOLD, shipped conservative default) + several LOW/INFO items | Design: `docs/superpowers/specs/2026-08-12-mirror-first-order-reads-design.md`. Plan: `docs/superpowers/plans/2026-08-12-mirror-first-order-reads.md` (5 tasks, all executed). Adds `MirrorOrderSource` (`app/core/mirror_order_source.py`), a database-first `OrderSource` adapter used ONLY by the order-tracking Q&A pipeline (`conversation.py`'s `_agent_reply`) — reads the `customers`/`orders`/`order_items` mirror first, falls back to live Shopify on a miss or DB error. The Confirm/Cancel mutation path (`order_actions.py`, `resolve_by_gid`) is untouched and verified untouched by both reviews (empty diff across the whole range) — still talks to live Shopify directly, per Critical Rule 3. Code review round 1: 1 MAJOR (unbounded/N+1 `find_mirrored_orders_by_phone` — the primary read path for backfilled customers since the backfill script never populates the `order_mappings` fast-path table) + 2 MINOR, all fixed (capped `LIMIT 10` + batch line-item fetch). Security review: MEDIUM (missing mutation-path regression test proving `order_actions.py` can't be repointed at the mirror — needs a fix), MEDIUM (phone-normalization mismatch between mirror-sourced (`_e164`-normalized) and live-Shopify-sourced (raw) phones weakens the `AuthorizedOrder` ownership-check semantics), MEDIUM → **Q16 above**, plus LOW items (bare-`Exception` swallow could log PII via exception text, missing order-name format guard on the mirror lookup for parity with the live client, `ORDER BY` NULLS-FIRST-on-nullable-column bug). **Status at time of writing: fix round in progress before push.** |

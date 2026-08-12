@@ -213,4 +213,24 @@ running in the WhatsApp Business phone app. A number cannot do both at once; if 
 phone app today, moving it to the API will disconnect it from the app (we'll guide you through
 this). Also please confirm you have access to the Meta Business Manager account that owns it.
 
+## Part 6 — New question (2026-08-12)
+
+**16. Whose phone number should unlock an order in WhatsApp chat?** When a customer messages
+the assistant asking about their order, we now look it up in our own database by phone number
+first (faster, and it still falls back to checking Shopify directly if there's ever a miss).
+An order can have up to three phone numbers on it: the buyer's own number, a shipping-address
+number, and a billing-address number — these are sometimes different people, for example when
+an order is a gift and the shipping number belongs to the recipient, not the buyer.
+
+- A (recommended): only the buyer's own phone number unlocks the order in chat. If someone
+  else's number was used only for shipping or billing on that order, messaging from that number
+  will not surface the order.
+- B: any of the three numbers on the order unlocks it in chat (matches how we already handle a
+  customer's own request to delete their data, where checking all three numbers is intentionally
+  broad). This means, for example, a gift recipient could message and see the buyer's order
+  details.
+
+We've built and shipped Option A as the safe default for now; this only needs your confirmation
+if you'd prefer Option B.
+
 Please reply with your choice for each (or "agree with recommendations, except…"). Thank you.

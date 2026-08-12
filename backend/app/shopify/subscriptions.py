@@ -9,16 +9,21 @@ _LIST_QUERY = (
     "endpoint { __typename ... on WebhookHttpEndpoint { callbackUrl } } } } } }"
 )
 
+# WebhookSubscriptionInput has NO apiVersion field: a subscription's delivered-payload API
+# version is implicitly the version of the request that created/updated it (the endpoint URL's
+# version, i.e. ShopifyClient.api_version), not a settable input. Passing apiVersion here is a
+# schema error against the live Admin API. (apiVersion IS readable back on the node -- see
+# _LIST_QUERY -- which is how F20 detects version drift.)
 _CREATE_MUTATION = (
-    "mutation($topic: WebhookSubscriptionTopic!, $callbackUrl: URL!, $apiVersion: String!) "
+    "mutation($topic: WebhookSubscriptionTopic!, $callbackUrl: URL!) "
     "{ webhookSubscriptionCreate(topic: $topic, webhookSubscription: {callbackUrl: "
-    "$callbackUrl, apiVersion: $apiVersion, format: JSON}) "
+    "$callbackUrl, format: JSON}) "
     "{ webhookSubscription { id } userErrors { message } } }"
 )
 
 _UPDATE_MUTATION = (
-    "mutation($id: ID!, $callbackUrl: URL!, $apiVersion: String!) { webhookSubscriptionUpdate("
-    "id: $id, webhookSubscription: {callbackUrl: $callbackUrl, apiVersion: $apiVersion}) "
+    "mutation($id: ID!, $callbackUrl: URL!) { webhookSubscriptionUpdate("
+    "id: $id, webhookSubscription: {callbackUrl: $callbackUrl}) "
     "{ webhookSubscription { id } userErrors { message } } }"
 )
 
@@ -62,12 +67,12 @@ async def _ensure_one_topic_or_raise(
             return "ok"
         result = await client._graphql(
             _UPDATE_MUTATION,
-            {"id": node["id"], "callbackUrl": callback_url, "apiVersion": version},
+            {"id": node["id"], "callbackUrl": callback_url},
         )
         _raise_on_user_errors(result.get("webhookSubscriptionUpdate") or {})
         return "updated"
     result = await client._graphql(
-        _CREATE_MUTATION, {"topic": topic, "callbackUrl": callback_url, "apiVersion": version}
+        _CREATE_MUTATION, {"topic": topic, "callbackUrl": callback_url}
     )
     _raise_on_user_errors(result.get("webhookSubscriptionCreate") or {})
     return "created"

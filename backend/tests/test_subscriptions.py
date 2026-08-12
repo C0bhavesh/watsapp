@@ -108,7 +108,14 @@ async def test_stale_api_version_is_updated_even_with_correct_url(settings, mast
     assert result["CUSTOMERS_UPDATE"] == "ok"
     update_calls = [c for c in captured if "webhookSubscriptionUpdate" in c["query"]]
     assert len(update_calls) == 1
-    assert update_calls[0]["variables"]["apiVersion"] == "2026-07"
+    # WebhookSubscriptionInput has NO apiVersion field: the update must send exactly id +
+    # callbackUrl, and the mutation must not declare/interpolate $apiVersion (Shopify's live
+    # schema rejects it -- the delivered version is implicitly the request's API version).
+    assert update_calls[0]["variables"] == {
+        "id": "gid://shopify/WebhookSubscription/ORDERS_CREATE",
+        "callbackUrl": "https://x.example/webhooks/shopify",
+    }
+    assert "apiVersion" not in update_calls[0]["query"]
 
 
 async def test_one_topics_user_error_does_not_block_the_other_topics(
@@ -161,7 +168,7 @@ async def test_topic_error_result_does_not_echo_shopifys_message(settings, maste
     assert "secret-ish" not in json.dumps(result)
 
 
-async def test_create_sends_current_api_version(settings, master_key) -> None:
+async def test_create_does_not_send_api_version(settings, master_key) -> None:
     captured: list[dict] = []
 
     def gql(request: httpx.Request) -> httpx.Response:
@@ -178,4 +185,12 @@ async def test_create_sends_current_api_version(settings, master_key) -> None:
     await ensure_subscription(client, "https://x.example/webhooks/shopify")
     create_calls = [c for c in captured if "webhookSubscriptionCreate" in c["query"]]
     assert len(create_calls) == len(REQUIRED_TOPICS)
-    assert all(c["variables"]["apiVersion"] == "2026-07" for c in create_calls)
+    # WebhookSubscriptionInput has NO apiVersion field: the created subscription's version is
+    # implicitly the client's request API version, so create must send exactly topic +
+    # callbackUrl and never declare/interpolate $apiVersion (the live schema rejects it).
+    for call, topic in zip(create_calls, REQUIRED_TOPICS, strict=True):
+        assert call["variables"] == {
+            "topic": topic,
+            "callbackUrl": "https://x.example/webhooks/shopify",
+        }
+        assert "apiVersion" not in call["query"]

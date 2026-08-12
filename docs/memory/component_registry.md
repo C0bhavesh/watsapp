@@ -166,7 +166,7 @@
 - **Purpose:** ensure the ORDERS_CREATE webhook subscription points at our callback URL AND is bound to the current Shopify API version.
 - **Public API:** `async ensure_subscription(client: ShopifyClient, callback_url: str) -> str` → `"ok" | "created" | "updated"`.
 - **Used in:** jobs.router (`ensure_subscription` job).
-- **Notes:** F20 version-aware — a sub is `"ok"` ONLY when callbackUrl matches AND `apiVersion.handle == client.api_version`; a drifted URL **or** a stale API version → `webhookSubscriptionUpdate` (`"updated"`); none → `webhookSubscriptionCreate` (format JSON) → `"created"`. Both create and update pass `apiVersion: $apiVersion` (read via the `ShopifyClient.api_version` accessor, never the private settings attr). `_LIST_QUERY` requests `apiVersion { handle }` per node. userErrors → `ShopifyGraphQLError`.
+- **Notes:** F20 version-aware — a sub is `"ok"` ONLY when callbackUrl matches AND `apiVersion.handle == client.api_version`; a drifted URL **or** a stale API version → `webhookSubscriptionUpdate` (`"updated"`); none → `webhookSubscriptionCreate` (format JSON) → `"created"`. Create/update send ONLY `topic`+`callbackUrl` / `id`+`callbackUrl` — `WebhookSubscriptionInput` has NO `apiVersion` field, so the created sub's version is IMPLICITLY the client's request version (`ShopifyClient.api_version`); passing `apiVersion` as input is a live-schema error (fixed 2026-08-12, see error_learnings). The read-side `current_version = client.api_version` still drives the F20 drift check. `_LIST_QUERY` reads `apiVersion { handle }` per node (valid to READ, not to WRITE). userErrors → `ShopifyGraphQLError`.
 
 ## ConfigService
 - **File:** backend/app/config/service.py

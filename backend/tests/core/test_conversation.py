@@ -12,8 +12,17 @@ import logging
 
 import pytest
 
-from app.core.conversation import _extract_order_number_candidate, _recover_order_by_name
+from app.admin.controls import AdminControls
+from app.agents.base import AgentReply
+from app.channels.whatsapp_inbound import InboundText
+from app.core.conversation import (
+    _agent_reply,
+    _extract_order_number_candidate,
+    _recover_order_by_name,
+)
+from app.deps import get_container, reset_container
 from app.shopify.models import ORDER_NUMBER_DIGIT_LENGTH, Order
+from app.store.base import MappingView
 
 
 def _order(gid: str, name: str, phone: str | None) -> Order:
@@ -207,3 +216,107 @@ def test_extract_order_number_candidate_tavas_prefix_wins_regardless_of_position
 
 def test_extract_order_number_candidate_no_candidate_returns_none() -> None:
     assert _extract_order_number_candidate("where is my order please") is None
+
+
+class _FakeMirrorIngestFull:
+    """Implements every IngestStore method _agent_reply's own code path touches directly
+    (count_orders_by_phone) plus what resolve_by_phone/MirrorOrderSource need."""
+
+    def __init__(
+        self,
+        mappings: list[MappingView] | None = None,
+        mirrored_order: Order | None = None,
+    ) -> None:
+        self.mappings = mappings or []
+        self.mirrored_order = mirrored_order
+        self.mirror_calls: list[str] = []
+
+    async def find_mappings_by_phone(self, phone_e164: str, limit: int = 20) -> list[MappingView]:
+        return [m for m in self.mappings if m.phone_e164 == phone_e164][:limit]
+
+    async def count_orders_by_phone(self, phone_e164: str) -> int:
+        return len([m for m in self.mappings if m.phone_e164 == phone_e164])
+
+    async def get_mirrored_order(self, gid: str) -> Order | None:
+        self.mirror_calls.append("get_mirrored_order")
+        return self.mirrored_order
+
+    async def find_mirrored_order_by_name(self, raw_name: str) -> Order | None:
+        self.mirror_calls.append("find_mirrored_order_by_name")
+        return None
+
+    async def find_mirrored_orders_by_phone(self, phone_e164: str) -> list[Order]:
+        self.mirror_calls.append("find_mirrored_orders_by_phone")
+        return []
+
+
+class _PoisonedShopify:
+    """Raises if the Q&A path ever falls through to it -- proves the mirror served the hit
+    without touching Shopify at all."""
+
+    async def get_order(self, gid: str) -> Order | None:
+        raise AssertionError("Shopify.get_order must not be called on a mirror hit")
+
+    async def find_order_by_name(self, raw_name: str) -> Order | None:
+        return None
+
+    async def find_customer_orders_by_phone(self, phone_e164: str) -> list[Order]:
+        return []
+
+
+async def test_agent_reply_order_tracking_reads_from_mirror_not_shopify(
+    monkeypatch, master_key: str
+) -> None:
+    order = _order("gid://1", "tavas3733", "+919999999999")
+    mapping = MappingView(
+        order_gid="gid://1", order_name="tavas3733", phone_e164="+919999999999",
+        status="pending", is_cod=False, created_at=None,
+    )
+    ingest = _FakeMirrorIngestFull(mappings=[mapping], mirrored_order=order)
+    shopify = _PoisonedShopify()
+
+    # get_container() builds Settings() from env; APP_MASTER_KEY is required (no DATABASE_URL
+    # -> the in-memory container, whose ingest/shopify we then monkeypatch). Same bootstrap the
+    # webhook tests use (tests/test_whatsapp_webhook.py).
+    monkeypatch.setenv("APP_MASTER_KEY", master_key)
+    reset_container()
+    c = get_container()
+    monkeypatch.setattr(c, "ingest", ingest)
+    monkeypatch.setattr(c, "shopify", shopify)
+
+    captured: dict[str, object] = {}
+
+    async def fake_classify_intent(*args: object, **kwargs: object) -> str:
+        return "order_tracking"
+
+    async def fake_assemble_all(self: object) -> dict[str, str]:
+        return {}
+
+    async def fake_run_agent(context: object, intent: str, container: object) -> AgentReply:
+        captured["orders"] = context.orders  # type: ignore[attr-defined]
+        return AgentReply(text="ok", handoff=False)
+
+    monkeypatch.setattr("app.core.conversation.classify_intent", fake_classify_intent)
+    monkeypatch.setattr(
+        "app.core.conversation.KnowledgeLoader.assemble_all", fake_assemble_all
+    )
+    monkeypatch.setattr("app.core.conversation._run_agent", fake_run_agent)
+
+    # The message carries the order token so BOTH mirror reads run: resolve_by_phone -> the
+    # mirror's get_mirrored_order, and _recover_order_by_name -> resolve_by_order_name -> the
+    # mirror's find_mirrored_order_by_name. _PoisonedShopify.get_order raises (proving the phone
+    # path was served from the mirror), while its find_order_by_name is a benign None so the
+    # name path may fall through past the mirror miss without exploding the test.
+    event = InboundText(
+        message_id="wamid.1", wa_id="919999999999", text="where is my order tavas3733",
+        timestamp="1699999999",
+    )
+
+    await _agent_reply(
+        c, event, [], "+919999999999", False, (object(), "model", "key", None), AdminControls()
+    )
+
+    resolved = captured["orders"]
+    assert len(resolved) == 1  # type: ignore[arg-type]
+    assert resolved[0].order.gid == "gid://1"  # type: ignore[index]
+    assert ingest.mirror_calls == ["get_mirrored_order", "find_mirrored_order_by_name"]

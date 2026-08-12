@@ -24,6 +24,7 @@ from app.channels.whatsapp_config import WhatsAppConfig, load_whatsapp_config
 from app.channels.whatsapp_inbound import InboundText
 from app.channels.whatsapp_sender import WhatsAppSendError, send_text
 from app.core.memory import load_history, persist_turn
+from app.core.mirror_order_source import MirrorOrderSource
 from app.core.order_resolver import OrderSource, resolve_by_order_name, resolve_by_phone
 from app.core.phone import normalize_phone
 from app.core.sanitize import strip_markdown
@@ -314,12 +315,18 @@ async def _agent_reply(
     orders: list[AuthorizedOrder] = []
     order_number_format_hint: str | None = None
     if intent == "order_tracking":
-        orders = await resolve_by_phone(c.shopify, c.ingest, event.wa_id)
+        # Q&A reads from our database first (near-real-time via the orders/create,
+        # orders/updated, customers/update webhooks), falling back to live Shopify on a miss
+        # or database error. This does NOT apply to the Confirm/Cancel mutation path
+        # (order_actions.py's resolve_by_gid) -- that keeps re-fetching from Shopify directly,
+        # per Critical Rule 3.
+        order_source = MirrorOrderSource(c.ingest, c.shopify)
+        orders = await resolve_by_phone(order_source, c.ingest, event.wa_id)
         # Always attempted, not only when the phone path found nothing: a customer can own
         # more than one order, or ask about one placed under different contact info.
         # Ownership re-checked, live-refetched, non-enumerable inside resolve_by_order_name.
         extra_orders, order_number_format_hint = await _recover_order_by_name(
-            c.shopify, event.wa_id, event.text
+            order_source, event.wa_id, event.text
         )
         for extra in extra_orders:
             if not any(o.order.name == extra.order.name for o in orders):

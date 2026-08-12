@@ -189,6 +189,41 @@ async def test_resolve_by_phone_keeps_orders_that_did_resolve_when_one_fetch_fai
     assert [o.order.gid for o in result] == ["gid://b"]
 
 
+async def test_resolve_by_phone_drops_mirror_sourced_order_with_wrong_phone() -> None:
+    # A mirror-sourced order (surfaced via MirrorOrderSource) whose stored phone does NOT match the
+    # verified WhatsApp number must be dropped by AuthorizedOrder's ownership invariant, exactly
+    # like a live-Shopify order. Closes the "mirror-sourced" ownership gap explicitly.
+    from app.core.mirror_order_source import MirrorOrderSource
+
+    wrong = _order("gid://m", "tavas-mirror", "+911111111111")
+
+    class _MirrorIngest:
+        async def get_mirrored_order(self, gid: str) -> Order | None:
+            return None
+
+        async def find_mirrored_order_by_name(self, raw_name: str) -> Order | None:
+            return None
+
+        async def find_mirrored_orders_by_phone(self, phone_e164: str) -> list[Order]:
+            return [wrong]
+
+    class _EmptyShopify:
+        async def get_order(self, gid: str) -> Order | None:
+            return None
+
+        async def find_order_by_name(self, raw_name: str) -> Order | None:
+            return None
+
+        async def find_customer_orders_by_phone(self, phone_e164: str) -> list[Order]:
+            return []
+
+    source = MirrorOrderSource(_MirrorIngest(), _EmptyShopify())
+
+    result = await resolve_by_phone(source, _FakeIngest(mappings=[]), "919999999999")
+
+    assert result == []
+
+
 async def test_resolve_by_order_name_ownership_match() -> None:
     order = _order("gid://5", "tavas5", "+919999999999")
     shopify = _FakeShopify(orders_by_name={"tavas5": order})

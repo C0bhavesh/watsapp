@@ -177,6 +177,31 @@ async def test_non_owner_refused_no_mutation_no_leak(master_key: str, sends: Sen
     assert GID not in sends.last_text and "tavas1" not in sends.last_text
 
 
+async def test_dispatch_reads_live_shopify_not_the_stale_mirror(
+    master_key: str, sends: Sends
+) -> None:
+    # Mutation-safety regression guard (Critical Rule 3): order_actions / resolve_by_gid must read
+    # LIVE Shopify, NEVER the database mirror. Seed the mirror with a STALE copy (not cancelled, no
+    # cancel-requested tag) while live Shopify reports the SAME gid already cancelled. Reading live
+    # Shopify makes the cancel-confirm tap reply already-cancelled and fire ZERO mutations. If a
+    # future change repointed resolve_by_gid at MirrorOrderSource, the stale mirror copy would look
+    # cancellable and this dispatch would fire a real orderCancel -- this test would then fail (an
+    # empty mirror would silently miss and fall through to Shopify, catching nothing).
+    live_cancelled = _order(cancelled_at="2026-08-10T00:00:00Z")
+    shopify = FakeShopify(order=live_cancelled)
+    c = await _container(master_key, shopify)
+    stale_mirror = _order(cancelled_at=None, tags=())  # not cancelled; no cancel-requested tag
+    await c.ingest.upsert_order_mirror(stale_mirror)
+
+    await dispatch_button(c, _interactive(f"order:cancel:confirm:{GID}"))
+
+    assert shopify.get_calls == [GID]  # proves the LIVE re-fetch happened
+    assert shopify.cancel_calls == []  # zero mutation despite the stale, cancellable-looking mirror
+    assert shopify.add_tags_calls == []
+    assert c.ingest.order_actions == []
+    assert sends.last_text == copy_for("already_cancelled", "en")
+
+
 async def test_unknown_gid_refused(master_key: str, sends: Sends) -> None:
     shopify = FakeShopify(order=None)  # get_order returns None
     c = await _container(master_key, shopify)

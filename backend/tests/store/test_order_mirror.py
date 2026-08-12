@@ -335,6 +335,94 @@ async def test_find_mirrored_orders_by_phone_no_match_returns_empty() -> None:
     assert results == []
 
 
+async def test_find_mirrored_orders_by_phone_caps_at_ten() -> None:
+    # A backfilled customer with a long order history must not return an unbounded list on the
+    # 5-connection pool shared with the live reply path -- cap it at 10 (matching the Shopify
+    # fallback's `first: 10`). In-memory mirrors the Postgres cap so the two do not diverge.
+    store = InMemoryIngestStore()
+    phone = "+919876500000"
+    for i in range(15):
+        await store.upsert_order_mirror(
+            _order(
+                gid=f"gid://{i}", name=f"tavas{i}", phone=None,
+                shipping_phone=phone, billing_phone=None, customer=None,
+            )
+        )
+    results = await store.find_mirrored_orders_by_phone(phone)
+    assert len(results) == 10
+
+
+def _fake_order_row(gid: str, name: str = "tavas1") -> dict[str, object]:
+    """A minimal `orders LEFT JOIN customers` row (customer absent) for `_order_from_row`."""
+    return {
+        "gid": gid, "name": name, "email": None, "phone": None,
+        "shipping_phone": None, "billing_phone": None, "financial_status": None,
+        "fulfillment_status": None, "cancelled_at": None, "tags": None,
+        "payment_gateway_names": None, "total_amount": None, "total_currency": None,
+        "customer_locale": None, "updated_at": None, "c_gid": None,
+    }
+
+
+class _FakeReadConn:
+    """Serves the two reads `find_mirrored_orders_by_phone` makes, recording every SQL sent."""
+
+    def __init__(
+        self, order_rows: list[dict[str, object]], item_rows: list[dict[str, object]]
+    ) -> None:
+        self._order_rows = order_rows
+        self._item_rows = item_rows
+        self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
+
+    async def fetch(self, sql: str, *args: object) -> list[dict[str, object]]:
+        self.fetch_calls.append((" ".join(sql.split()), args))
+        if "order_items" in sql:
+            return self._item_rows
+        return self._order_rows
+
+
+async def test_find_mirrored_orders_by_phone_pg_caps_and_orders_the_query() -> None:
+    conn = _FakeReadConn([_fake_order_row("gid://a")], [])
+    store = PostgresIngestStore(_FakePool(conn))  # type: ignore[arg-type]
+
+    await store.find_mirrored_orders_by_phone("+919876500000")
+
+    order_sql = conn.fetch_calls[0][0]
+    assert "ORDER BY o.updated_at DESC LIMIT 10" in order_sql
+
+
+async def test_find_mirrored_orders_by_phone_pg_batch_fetches_items_without_n_plus_one() -> None:
+    # One SELECT for the orders, then ONE batched SELECT for every order's items via
+    # `= ANY($1)` -- not one round-trip per order (the N+1 the review flagged).
+    order_rows = [_fake_order_row("gid://a"), _fake_order_row("gid://b")]
+    item_rows = [
+        {"order_gid": "gid://a", "title": "A-item", "sku": None, "quantity": 1,
+         "variant_title": None, "price_amount": None, "price_currency": None},
+        {"order_gid": "gid://b", "title": "B-item", "sku": None, "quantity": 2,
+         "variant_title": None, "price_amount": "10.00", "price_currency": "INR"},
+    ]
+    conn = _FakeReadConn(order_rows, item_rows)
+    store = PostgresIngestStore(_FakePool(conn))  # type: ignore[arg-type]
+
+    results = await store.find_mirrored_orders_by_phone("+919876500000")
+
+    assert len(conn.fetch_calls) == 2  # orders + ONE batched items query, not 1 + N
+    assert "= ANY($1)" in conn.fetch_calls[1][0]
+    by_gid = {o.gid: o for o in results}
+    # Items land on the right order -- no cross-contamination between orders.
+    assert [li.title for li in by_gid["gid://a"].line_items] == ["A-item"]
+    assert [li.title for li in by_gid["gid://b"].line_items] == ["B-item"]
+
+
+async def test_find_mirrored_orders_by_phone_pg_skips_item_query_when_no_orders() -> None:
+    conn = _FakeReadConn([], [])
+    store = PostgresIngestStore(_FakePool(conn))  # type: ignore[arg-type]
+
+    results = await store.find_mirrored_orders_by_phone("+919000000000")
+
+    assert results == []
+    assert len(conn.fetch_calls) == 1  # no orders => no wasted batch items round-trip
+
+
 @pytest.fixture
 async def pool():
     p = LazyPool(DSN)
@@ -548,3 +636,25 @@ async def test_find_mirrored_orders_by_phone_pg_no_match_returns_empty(pool: Laz
     store = PostgresIngestStore(pool)
     results = await store.find_mirrored_orders_by_phone("+919000000000")
     assert results == []
+
+
+@pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")
+async def test_find_mirrored_orders_by_phone_pg_caps_at_ten_most_recent(pool: LazyPool) -> None:
+    # A backfilled customer with >10 orders (the fast-path order_mappings table is empty for
+    # backfilled history) must return only the 10 most-recently-updated, ordered DESC.
+    store = PostgresIngestStore(pool)
+    phone = "+919222200000"
+    for i in range(12):
+        await store.upsert_order_mirror(
+            _order(
+                gid=f"gid://shopify/Order/{uuid.uuid4()}", phone=None,
+                shipping_phone=phone, billing_phone=None, customer=None,
+                updated_at=f"2026-08-{i + 1:02d}T00:00:00+00:00",
+            )
+        )
+
+    results = await store.find_mirrored_orders_by_phone(phone)
+
+    assert len(results) == 10
+    returned = [o.updated_at for o in results]
+    assert returned == sorted(returned, reverse=True)  # newest first

@@ -117,11 +117,14 @@ class InMemoryIngestStore:
         return None
 
     async def find_mirrored_orders_by_phone(self, phone_e164: str) -> list[Order]:
-        return [
+        # Cap matches the Postgres impl (10) so the two do not silently diverge; no ordering
+        # requirement here since this store is test/dev-only.
+        matches = [
             o
             for o in self.orders.values()
             if phone_e164 in (o.phone, o.shipping_phone, o.billing_phone)
         ]
+        return matches[:10]
 
     async def recent_mappings(self, limit: int) -> list[MappingView]:
         views = [

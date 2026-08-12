@@ -78,20 +78,28 @@ def _order_from_row(row: asyncpg.Record, items: list[LineItem]) -> Order:
     )
 
 
+def _line_item_from_row(r: asyncpg.Record) -> LineItem:
+    # price_amount is `text`; compare `is not None` (not truthiness) so a stored "0" is kept and
+    # the check stays correct if the column type ever changes. Single builder shared by the
+    # per-order and the batched (`= ANY`) item reads so they cannot silently diverge.
+    return LineItem(
+        title=r["title"], quantity=r["quantity"], variant_title=r["variant_title"],
+        price=(
+            Money(r["price_amount"], r["price_currency"])
+            if r["price_amount"] is not None
+            else None
+        ),
+        sku=r["sku"],
+    )
+
+
 async def _fetch_mirror_line_items(conn: asyncpg.Connection, order_gid: str) -> list[LineItem]:
     rows = await conn.fetch(
         "SELECT title, sku, quantity, variant_title, price_amount, price_currency "
         "FROM order_items WHERE order_gid = $1",
         order_gid,
     )
-    return [
-        LineItem(
-            title=r["title"], quantity=r["quantity"], variant_title=r["variant_title"],
-            price=Money(r["price_amount"], r["price_currency"]) if r["price_amount"] else None,
-            sku=r["sku"],
-        )
-        for r in rows
-    ]
+    return [_line_item_from_row(r) for r in rows]
 
 
 def _order_number_from_name(name: str) -> int | None:
@@ -313,17 +321,30 @@ class PostgresIngestStore:
         return _order_from_row(row, items)
 
     async def find_mirrored_orders_by_phone(self, phone_e164: str) -> list[Order]:
+        # Backfilled history never writes order_mappings, so resolve_by_phone's fast path is
+        # empty for it and falls through here -- a customer with a long history could otherwise
+        # scan every order + round-trip once per order for line items on the 5-connection pool
+        # shared with the live reply path. Cap at 10 most-recent (matching the Shopify fallback's
+        # `first: 10`) and batch-fetch all items in one query keyed by order gid (no N+1).
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 _MIRROR_ORDER_SELECT
-                + "WHERE o.phone = $1 OR o.shipping_phone = $1 OR o.billing_phone = $1",
+                + "WHERE o.phone = $1 OR o.shipping_phone = $1 OR o.billing_phone = $1 "
+                "ORDER BY o.updated_at DESC LIMIT 10",
                 phone_e164,
             )
-            orders = []
-            for row in rows:
-                items = await _fetch_mirror_line_items(conn, str(row["gid"]))
-                orders.append(_order_from_row(row, items))
-        return orders
+            if not rows:
+                return []
+            gids = [str(row["gid"]) for row in rows]
+            item_rows = await conn.fetch(
+                "SELECT order_gid, title, sku, quantity, variant_title, price_amount, "
+                "price_currency FROM order_items WHERE order_gid = ANY($1)",
+                gids,
+            )
+        items_by_gid: dict[str, list[LineItem]] = {}
+        for r in item_rows:
+            items_by_gid.setdefault(str(r["order_gid"]), []).append(_line_item_from_row(r))
+        return [_order_from_row(row, items_by_gid.get(str(row["gid"]), [])) for row in rows]
 
     async def upsert_order_mirror(self, order: Order) -> None:
         # LOCK ORDER: customers, then orders. `delete_by_phone` takes them the other way round

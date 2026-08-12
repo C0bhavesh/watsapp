@@ -1,4 +1,5 @@
 import logging
+import re
 from dataclasses import replace
 from datetime import datetime
 
@@ -313,6 +314,10 @@ class PostgresIngestStore:
 
     async def find_mirrored_order_by_name(self, raw_name: str) -> Order | None:
         name = normalize_order_name(raw_name)
+        # Parity with ShopifyClient.find_order_by_name: a normalized name that is not [a-z0-9]+ is
+        # not a valid lookup key -- reject it before querying so both OrderSource impls agree.
+        if re.fullmatch(r"[a-z0-9]+", name) is None:
+            return None
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(_MIRROR_ORDER_SELECT + "WHERE o.name = $1", name)
             if row is None:
@@ -326,11 +331,20 @@ class PostgresIngestStore:
         # scan every order + round-trip once per order for line items on the 5-connection pool
         # shared with the live reply path. Cap at 10 most-recent (matching the Shopify fallback's
         # `first: 10`) and batch-fetch all items in one query keyed by order gid (no N+1).
+        #
+        # Q16 (docs/FR/client-decisions-all.md Part 6, ON HOLD): this chat-Q&A lookup matches ONLY
+        # the buyer's own `o.phone`, deliberately NARROWER than delete_by_phone's erasure predicate
+        # (which correctly stays broad across all three columns -- erasure and disclosure have
+        # different safety directions). A gift recipient's shipping-contact number must not surface
+        # the buyer's order in chat; the pending client answer could widen this later.
+        #
+        # NULLS LAST: o.updated_at is nullable, and a plain DESC sorts NULLs FIRST -- that would
+        # push genuinely-recent orders out of the LIMIT 10. o.gid DESC is a deterministic tiebreak.
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 _MIRROR_ORDER_SELECT
-                + "WHERE o.phone = $1 OR o.shipping_phone = $1 OR o.billing_phone = $1 "
-                "ORDER BY o.updated_at DESC LIMIT 10",
+                + "WHERE o.phone = $1 "
+                "ORDER BY o.updated_at DESC NULLS LAST, o.gid DESC LIMIT 10",
                 phone_e164,
             )
             if not rows:

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from app.shopify.models import Customer, LineItem, Order, normalize_order_name
@@ -12,6 +12,7 @@ from app.store.base import (
     OutboundView,
     StoredMessage,
 )
+from app.store.postgres import _e164
 
 
 @dataclass
@@ -98,6 +99,20 @@ class InMemoryIngestStore:
         self.customers[customer.gid] = customer
 
     async def upsert_order_mirror(self, order: Order) -> None:
+        # Normalize phones on write with the SAME `_e164` helper Postgres uses, so the two
+        # IngestStore impls no longer diverge (delete_by_phone / lookups compare E.164). An
+        # unparseable value is kept verbatim (degrade, don't discard).
+        order = replace(
+            order,
+            phone=_e164(order.phone),
+            shipping_phone=_e164(order.shipping_phone),
+            billing_phone=_e164(order.billing_phone),
+            customer=(
+                replace(order.customer, phone=_e164(order.customer.phone))
+                if order.customer is not None
+                else None
+            ),
+        )
         if order.customer is not None:
             await self.upsert_customer(order.customer)
         self.orders[order.gid] = order
@@ -117,13 +132,14 @@ class InMemoryIngestStore:
         return None
 
     async def find_mirrored_orders_by_phone(self, phone_e164: str) -> list[Order]:
+        # Q16 (docs/FR/client-decisions-all.md Part 6, ON HOLD): this chat-Q&A lookup matches ONLY
+        # the buyer's own `o.phone`, deliberately NARROWER than delete_by_phone's erasure predicate
+        # (which correctly stays broad across all three columns — erasure and disclosure have
+        # different safety directions). A gift recipient's shipping-contact number must not surface
+        # the buyer's order in chat; the pending client answer could widen this later.
         # Cap matches the Postgres impl (10) so the two do not silently diverge; no ordering
         # requirement here since this store is test/dev-only.
-        matches = [
-            o
-            for o in self.orders.values()
-            if phone_e164 in (o.phone, o.shipping_phone, o.billing_phone)
-        ]
+        matches = [o for o in self.orders.values() if o.phone == phone_e164]
         return matches[:10]
 
     async def recent_mappings(self, limit: int) -> list[MappingView]:

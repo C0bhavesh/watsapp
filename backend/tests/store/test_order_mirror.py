@@ -99,6 +99,30 @@ async def test_upsert_order_mirror_without_customer_leaves_no_customer_row() -> 
     assert store.customers == {}  # type: ignore[attr-defined]
 
 
+async def test_upsert_order_mirror_normalizes_phones_on_write() -> None:
+    # The in-memory store must normalize phones the same way Postgres's `_e164` does on write, so
+    # the two IngestStore impls no longer diverge (previously only Postgres normalized). An
+    # unparseable value is kept verbatim (degrade, don't discard).
+    store = InMemoryIngestStore()
+    await store.upsert_order_mirror(
+        _order(
+            phone="+91 96642 90413", shipping_phone="09664290413", billing_phone=None,
+            customer=_customer(phone="9664290413"),
+        )
+    )
+    stored = store.orders["gid://shopify/Order/1"]
+    assert stored.phone == "+919664290413"
+    assert stored.shipping_phone == "+919664290413"
+    assert stored.billing_phone is None
+    assert store.customers["gid://shopify/Customer/1"].phone == "+919664290413"
+
+
+async def test_upsert_order_mirror_keeps_an_unparseable_phone_verbatim_in_memory() -> None:
+    store = InMemoryIngestStore()
+    await store.upsert_order_mirror(_order(phone="not-a-phone", customer=None))
+    assert store.orders["gid://shopify/Order/1"].phone == "not-a-phone"
+
+
 async def test_upsert_order_mirror_replaces_items_not_appends() -> None:
     store = InMemoryIngestStore()
     await store.upsert_order_mirror(_order())
@@ -316,17 +340,35 @@ async def test_find_mirrored_order_by_name_miss_returns_none() -> None:
     assert result is None
 
 
-async def test_find_mirrored_orders_by_phone_matches_any_of_three_columns() -> None:
+async def test_find_mirrored_orders_by_phone_matches_only_the_buyer_phone() -> None:
+    # Q16 (docs/FR/client-decisions-all.md Part 6, ON HOLD): the chat-Q&A lookup is deliberately
+    # narrowed to the buyer's own `o.phone`, so a gift recipient's shipping-contact number cannot
+    # surface the buyer's order in chat. This is intentionally narrower than delete_by_phone's
+    # erasure predicate (which correctly stays broad across all three columns).
     store = InMemoryIngestStore()
     phone = "+919876500000"
     await store.upsert_order_mirror(
-        _order(gid="gid://a", phone=None, shipping_phone=phone, billing_phone=None)
+        _order(gid="gid://buyer", phone=phone, shipping_phone=None, billing_phone=None,
+               customer=None)
     )
     await store.upsert_order_mirror(
-        _order(gid="gid://b", phone=None, shipping_phone=None, billing_phone=phone)
+        _order(gid="gid://ship-only", phone=None, shipping_phone=phone, billing_phone=None,
+               customer=None)
     )
     results = await store.find_mirrored_orders_by_phone(phone)
-    assert {o.gid for o in results} == {"gid://a", "gid://b"}
+    assert {o.gid for o in results} == {"gid://buyer"}
+
+
+async def test_find_mirrored_orders_by_phone_ignores_a_shipping_only_match() -> None:
+    # Explicit negative case for Q16: an order where the number is ONLY the shipping contact
+    # (not the buyer's own phone) must NOT come back from the chat-Q&A lookup.
+    store = InMemoryIngestStore()
+    phone = "+919876500000"
+    await store.upsert_order_mirror(
+        _order(gid="gid://ship-only", phone=None, shipping_phone=phone, billing_phone=None,
+               customer=None)
+    )
+    assert await store.find_mirrored_orders_by_phone(phone) == []
 
 
 async def test_find_mirrored_orders_by_phone_no_match_returns_empty() -> None:
@@ -344,8 +386,8 @@ async def test_find_mirrored_orders_by_phone_caps_at_ten() -> None:
     for i in range(15):
         await store.upsert_order_mirror(
             _order(
-                gid=f"gid://{i}", name=f"tavas{i}", phone=None,
-                shipping_phone=phone, billing_phone=None, customer=None,
+                gid=f"gid://{i}", name=f"tavas{i}", phone=phone,
+                shipping_phone=None, billing_phone=None, customer=None,
             )
         )
     results = await store.find_mirrored_orders_by_phone(phone)
@@ -387,7 +429,13 @@ async def test_find_mirrored_orders_by_phone_pg_caps_and_orders_the_query() -> N
     await store.find_mirrored_orders_by_phone("+919876500000")
 
     order_sql = conn.fetch_calls[0][0]
-    assert "ORDER BY o.updated_at DESC LIMIT 10" in order_sql
+    # Q16: the WHERE clause matches ONLY the buyer's own o.phone (no shipping/billing OR-clause);
+    # NULLS LAST so genuinely-recent orders are not pushed out of the LIMIT by NULL updated_at rows
+    # sorting first; o.gid DESC is a deterministic tiebreaker. (shipping_phone/billing_phone still
+    # appear in the SELECT column list -- assert on the WHERE..LIMIT span, not raw substrings.)
+    assert (
+        "WHERE o.phone = $1 ORDER BY o.updated_at DESC NULLS LAST, o.gid DESC LIMIT 10"
+    ) in order_sql
 
 
 async def test_find_mirrored_orders_by_phone_pg_batch_fetches_items_without_n_plus_one() -> None:
@@ -421,6 +469,17 @@ async def test_find_mirrored_orders_by_phone_pg_skips_item_query_when_no_orders(
 
     assert results == []
     assert len(conn.fetch_calls) == 1  # no orders => no wasted batch items round-trip
+
+
+async def test_find_mirrored_order_by_name_pg_rejects_invalid_name_without_querying() -> None:
+    # Parity with ShopifyClient.find_order_by_name's `re.fullmatch(r"[a-z0-9]+", name)` guard: a
+    # normalized name that is not a valid lookup key returns None early, never touching the pool.
+    class _ExplodingPool:
+        def acquire(self) -> object:
+            raise AssertionError("pool must not be acquired for an invalid lookup name")
+
+    store = PostgresIngestStore(_ExplodingPool())  # type: ignore[arg-type]
+    assert await store.find_mirrored_order_by_name("bad name!") is None
 
 
 @pytest.fixture
@@ -612,23 +671,25 @@ async def test_find_mirrored_order_by_name_pg_miss_returns_none(pool: LazyPool) 
 
 
 @pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")
-async def test_find_mirrored_orders_by_phone_pg_matches_any_of_three_columns(
+async def test_find_mirrored_orders_by_phone_pg_matches_only_the_buyer_phone(
     pool: LazyPool,
 ) -> None:
+    # Q16 (docs/FR/client-decisions-all.md Part 6, ON HOLD): narrowed to o.phone only, so a
+    # shipping/billing-only contact number does not surface the buyer's order in chat.
     store = PostgresIngestStore(pool)
     phone = "+919876500000"
+    gid_buyer = f"gid://shopify/Order/{uuid.uuid4()}"
     gid_ship = f"gid://shopify/Order/{uuid.uuid4()}"
-    gid_bill = f"gid://shopify/Order/{uuid.uuid4()}"
     await store.upsert_order_mirror(
-        _order(gid=gid_ship, phone=None, shipping_phone=phone, billing_phone=None, customer=None)
+        _order(gid=gid_buyer, phone=phone, shipping_phone=None, billing_phone=None, customer=None)
     )
     await store.upsert_order_mirror(
-        _order(gid=gid_bill, phone=None, shipping_phone=None, billing_phone=phone, customer=None)
+        _order(gid=gid_ship, phone=None, shipping_phone=phone, billing_phone=None, customer=None)
     )
 
     results = await store.find_mirrored_orders_by_phone(phone)
 
-    assert {o.gid for o in results} == {gid_ship, gid_bill}
+    assert {o.gid for o in results} == {gid_buyer}  # shipping-only order NOT returned
 
 
 @pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")
@@ -647,8 +708,8 @@ async def test_find_mirrored_orders_by_phone_pg_caps_at_ten_most_recent(pool: La
     for i in range(12):
         await store.upsert_order_mirror(
             _order(
-                gid=f"gid://shopify/Order/{uuid.uuid4()}", phone=None,
-                shipping_phone=phone, billing_phone=None, customer=None,
+                gid=f"gid://shopify/Order/{uuid.uuid4()}", phone=phone,
+                shipping_phone=None, billing_phone=None, customer=None,
                 updated_at=f"2026-08-{i + 1:02d}T00:00:00+00:00",
             )
         )

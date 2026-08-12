@@ -1,3 +1,6 @@
+import asyncpg
+import pytest
+
 from app.core.mirror_order_source import MirrorOrderSource
 from app.shopify.models import Order
 
@@ -82,7 +85,7 @@ async def test_get_order_miss_falls_back_to_shopify() -> None:
 
 
 async def test_get_order_db_error_falls_back_to_shopify() -> None:
-    ingest = _FakeMirrorIngest(raises=RuntimeError("db down"))
+    ingest = _FakeMirrorIngest(raises=OSError("db down"))
     shopify = _FakeShopify()
     source = MirrorOrderSource(ingest, shopify)
 
@@ -91,6 +94,32 @@ async def test_get_order_db_error_falls_back_to_shopify() -> None:
     assert result is not None
     assert result.name == "tavas-from-shopify"
     assert shopify.calls == ["get_order"]
+
+
+async def test_get_order_asyncpg_error_falls_back_to_shopify() -> None:
+    # A genuine DB error (asyncpg's base error type) degrades to a Shopify fallback, same as an
+    # OSError -- an infra hiccup on this read path must not break the customer's turn.
+    ingest = _FakeMirrorIngest(raises=asyncpg.PostgresError("db down"))
+    shopify = _FakeShopify()
+    source = MirrorOrderSource(ingest, shopify)
+
+    result = await source.get_order("gid://1")
+
+    assert result is not None
+    assert result.name == "tavas-from-shopify"
+    assert shopify.calls == ["get_order"]
+
+
+async def test_get_order_programming_error_propagates_not_swallowed() -> None:
+    # A genuine bug (e.g. a KeyError from a row-mapping regression) must NOT masquerade as a cache
+    # miss forever -- it surfaces instead of silently falling through to Shopify on every read.
+    ingest = _FakeMirrorIngest(raises=KeyError("row mapping bug"))
+    shopify = _FakeShopify()
+    source = MirrorOrderSource(ingest, shopify)
+
+    with pytest.raises(KeyError):
+        await source.get_order("gid://1")
+    assert shopify.calls == []
 
 
 async def test_find_order_by_name_hit_never_calls_shopify() -> None:
@@ -117,7 +146,7 @@ async def test_find_order_by_name_miss_falls_back_to_shopify() -> None:
 
 
 async def test_find_order_by_name_db_error_falls_back_to_shopify() -> None:
-    ingest = _FakeMirrorIngest(raises=RuntimeError("db down"))
+    ingest = _FakeMirrorIngest(raises=OSError("db down"))
     shopify = _FakeShopify()
     source = MirrorOrderSource(ingest, shopify)
 
@@ -151,7 +180,7 @@ async def test_find_customer_orders_by_phone_empty_falls_back_to_shopify() -> No
 
 
 async def test_find_customer_orders_by_phone_db_error_falls_back_to_shopify() -> None:
-    ingest = _FakeMirrorIngest(raises=RuntimeError("db down"))
+    ingest = _FakeMirrorIngest(raises=OSError("db down"))
     shopify = _FakeShopify()
     source = MirrorOrderSource(ingest, shopify)
 

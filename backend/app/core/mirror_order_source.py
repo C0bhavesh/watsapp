@@ -12,8 +12,17 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Protocol, TypeVar
 
+import asyncpg
+
 from app.core.order_resolver import OrderSource
 from app.shopify.models import Order
+
+# Genuine I/O / DB failures that legitimately degrade to a Shopify fallback (a transient infra
+# hiccup on this read path must not break the customer's turn). Anything else -- e.g. a KeyError
+# from a row-mapping bug -- is a programming error and must surface, not masquerade as a cache
+# miss forever. asyncpg.PostgresError (server errors) + asyncpg.InterfaceError (connection/usage)
+# mirror the DB-error surface the rest of the store layer raises.
+_FALLBACK_ERRORS = (OSError, TimeoutError, asyncpg.PostgresError, asyncpg.InterfaceError)
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +73,12 @@ class MirrorOrderSource:
         # round-trip.
         try:
             return await fn(*args)
-        except Exception:
-            logger.exception("mirror order-source read failed; falling back to Shopify")
+        except _FALLBACK_ERRORS as exc:
+            # Log only the exception TYPE name, never its text: an asyncpg error message can echo
+            # the bound argument (here the customer's phone number) -- logging.exception would
+            # render that PII.
+            logger.warning(
+                "mirror order-source read failed (%s); falling back to Shopify",
+                type(exc).__name__,
+            )
             return None

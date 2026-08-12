@@ -288,6 +288,53 @@ async def test_pg_line_items_are_capped_and_inserted_in_one_batch() -> None:
     assert len(rows) == MAX_MIRROR_LINE_ITEMS
 
 
+async def test_get_mirrored_order_returns_stored_order() -> None:
+    store = InMemoryIngestStore()
+    await store.upsert_order_mirror(_order())
+    result = await store.get_mirrored_order("gid://shopify/Order/1")
+    assert result is not None
+    assert result.name == "tavas3733"
+
+
+async def test_get_mirrored_order_missing_returns_none() -> None:
+    store = InMemoryIngestStore()
+    result = await store.get_mirrored_order("gid://shopify/Order/missing")
+    assert result is None
+
+
+async def test_find_mirrored_order_by_name_normalizes_bare_digits() -> None:
+    store = InMemoryIngestStore()
+    await store.upsert_order_mirror(_order(name="tavas3733"))
+    result = await store.find_mirrored_order_by_name("3733")
+    assert result is not None
+    assert result.gid == "gid://shopify/Order/1"
+
+
+async def test_find_mirrored_order_by_name_miss_returns_none() -> None:
+    store = InMemoryIngestStore()
+    result = await store.find_mirrored_order_by_name("tavas000000000")
+    assert result is None
+
+
+async def test_find_mirrored_orders_by_phone_matches_any_of_three_columns() -> None:
+    store = InMemoryIngestStore()
+    phone = "+919876500000"
+    await store.upsert_order_mirror(
+        _order(gid="gid://a", phone=None, shipping_phone=phone, billing_phone=None)
+    )
+    await store.upsert_order_mirror(
+        _order(gid="gid://b", phone=None, shipping_phone=None, billing_phone=phone)
+    )
+    results = await store.find_mirrored_orders_by_phone(phone)
+    assert {o.gid for o in results} == {"gid://a", "gid://b"}
+
+
+async def test_find_mirrored_orders_by_phone_no_match_returns_empty() -> None:
+    store = InMemoryIngestStore()
+    results = await store.find_mirrored_orders_by_phone("+919000000000")
+    assert results == []
+
+
 @pytest.fixture
 async def pool():
     p = LazyPool(DSN)

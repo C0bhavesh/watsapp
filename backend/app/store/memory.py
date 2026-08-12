@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 
-from app.shopify.models import Customer, LineItem, Order
+from app.shopify.models import Customer, LineItem, Order, normalize_order_name
 from app.store.base import (
     DeletionResult,
     IngestResult,
@@ -105,6 +105,23 @@ class InMemoryIngestStore:
 
     async def customer_exists(self, gid: str) -> bool:
         return gid in self.customers
+
+    async def get_mirrored_order(self, gid: str) -> Order | None:
+        return self.orders.get(gid)
+
+    async def find_mirrored_order_by_name(self, raw_name: str) -> Order | None:
+        name = normalize_order_name(raw_name)
+        for order in self.orders.values():
+            if order.name == name:
+                return order
+        return None
+
+    async def find_mirrored_orders_by_phone(self, phone_e164: str) -> list[Order]:
+        return [
+            o
+            for o in self.orders.values()
+            if phone_e164 in (o.phone, o.shipping_phone, o.billing_phone)
+        ]
 
     async def recent_mappings(self, limit: int) -> list[MappingView]:
         views = [

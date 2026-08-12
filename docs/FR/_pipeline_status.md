@@ -159,10 +159,17 @@
 
 > All client questions are consolidated in `client-decisions-all.md`. Send that one doc.
 
-- **Q16 (2026-08-12) — phone-match scope for the database-first order-Q&A lookup.** Built and
-  shipped conservatively (buyer's own `orders.phone` only, per rule 8) pending client
-  confirmation on whether shipping/billing-phone matches (gift-recipient numbers) should also
-  unlock an order in chat. See row below and `client-decisions-all.md` Part 6, Q16.
+- ~~Q16 (2026-08-12) — phone-match scope for the database-first order-Q&A lookup.~~ **ANSWERED
+  + IMPLEMENTED (2026-08-12): use the shipping mobile number.** Matches a real data constraint —
+  checkout doesn't always capture the buyer's own phone on the order record, but shipping phone is
+  reliably present (same reason the order-confirmation push already falls back to it). Billing
+  stays out of scope. See `client-decisions-all.md` Q16. `find_mirrored_orders_by_phone`
+  (`app/store/postgres.py` + `memory.py`) now matches `o.phone OR o.shipping_phone`; the earlier
+  conservative `o.phone`-only default (commit `26e3d9e`) is replaced. Tests in
+  `tests/store/test_order_mirror.py` updated (shipping-only now returns; billing-only still
+  excluded). 712 passed / 24 skipped, ruff + mypy strict + secrets grep clean;
+  `order_actions.py` diff vs `e13d645` confirmed empty. Committed locally, NOT pushed — Main Claude
+  routes through review + pushes after approval.
 
 | Module / Feature | Status | Notes |
 |---|---|---|

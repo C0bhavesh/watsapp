@@ -213,7 +213,7 @@ running in the WhatsApp Business phone app. A number cannot do both at once; if 
 phone app today, moving it to the API will disconnect it from the app (we'll guide you through
 this). Also please confirm you have access to the Meta Business Manager account that owns it.
 
-## Part 6 — New question (2026-08-12)
+## ✅ ANSWERED (2026-08-12)
 
 **16. Whose phone number should unlock an order in WhatsApp chat?** When a customer messages
 the assistant asking about their order, we now look it up in our own database by phone number
@@ -222,15 +222,21 @@ An order can have up to three phone numbers on it: the buyer's own number, a shi
 number, and a billing-address number — these are sometimes different people, for example when
 an order is a gift and the shipping number belongs to the recipient, not the buyer.
 
-- A (recommended): only the buyer's own phone number unlocks the order in chat. If someone
-  else's number was used only for shipping or billing on that order, messaging from that number
-  will not surface the order.
+**Answer: use the shipping mobile number.** This also matches a real constraint in your order
+data: your checkout doesn't always capture the buyer's own phone number on the order record, but
+the shipping contact number is reliably present — the order-confirmation push (built earlier)
+already falls back to it for the same reason. The billing number stays out of scope (not asked
+for). Shipped: the chat lookup now matches the order's own phone number OR its shipping phone
+number.
+
+<details>
+<summary>Original question (for reference)</summary>
+
+- A (recommended at the time): only the buyer's own phone number unlocks the order in chat.
 - B: any of the three numbers on the order unlocks it in chat (matches how we already handle a
   customer's own request to delete their data, where checking all three numbers is intentionally
-  broad). This means, for example, a gift recipient could message and see the buyer's order
-  details.
+  broad).
 
-We've built and shipped Option A as the safe default for now; this only needs your confirmation
-if you'd prefer Option B.
+We initially shipped Option A as a conservative default pending this answer.
 
-Please reply with your choice for each (or "agree with recommendations, except…"). Thank you.
+</details>

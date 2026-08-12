@@ -332,18 +332,21 @@ class PostgresIngestStore:
         # shared with the live reply path. Cap at 10 most-recent (matching the Shopify fallback's
         # `first: 10`) and batch-fetch all items in one query keyed by order gid (no N+1).
         #
-        # Q16 (docs/FR/client-decisions-all.md Part 6, ON HOLD): this chat-Q&A lookup matches ONLY
-        # the buyer's own `o.phone`, deliberately NARROWER than delete_by_phone's erasure predicate
-        # (which correctly stays broad across all three columns -- erasure and disclosure have
-        # different safety directions). A gift recipient's shipping-contact number must not surface
-        # the buyer's order in chat; the pending client answer could widen this later.
+        # Q16 (docs/FR/client-decisions-all.md, ANSWERED 2026-08-12): this chat-Q&A lookup matches
+        # the buyer's own `o.phone` OR its `o.shipping_phone` (the single $1 reused for both). This
+        # store's Shopflo checkout frequently leaves the order's top-level phone empty, but the
+        # shipping contact number is reliably present -- the same reason the order-confirmation push
+        # falls back to it -- so restricting to o.phone alone would return nothing for many real
+        # orders. Still NARROWER than delete_by_phone's three-column erasure predicate: billing
+        # stays excluded (never asked for), and erasure vs disclosure have different safety
+        # directions so their match sets legitimately differ.
         #
         # NULLS LAST: o.updated_at is nullable, and a plain DESC sorts NULLs FIRST -- that would
         # push genuinely-recent orders out of the LIMIT 10. o.gid DESC is a deterministic tiebreak.
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 _MIRROR_ORDER_SELECT
-                + "WHERE o.phone = $1 "
+                + "WHERE o.phone = $1 OR o.shipping_phone = $1 "
                 "ORDER BY o.updated_at DESC NULLS LAST, o.gid DESC LIMIT 10",
                 phone_e164,
             )

@@ -132,14 +132,18 @@ class InMemoryIngestStore:
         return None
 
     async def find_mirrored_orders_by_phone(self, phone_e164: str) -> list[Order]:
-        # Q16 (docs/FR/client-decisions-all.md Part 6, ON HOLD): this chat-Q&A lookup matches ONLY
-        # the buyer's own `o.phone`, deliberately NARROWER than delete_by_phone's erasure predicate
-        # (which correctly stays broad across all three columns — erasure and disclosure have
-        # different safety directions). A gift recipient's shipping-contact number must not surface
-        # the buyer's order in chat; the pending client answer could widen this later.
+        # Q16 (docs/FR/client-decisions-all.md, ANSWERED 2026-08-12): this chat-Q&A lookup matches
+        # the buyer's own `o.phone` OR its `o.shipping_phone`. The store's Shopflo checkout often
+        # leaves the order's top-level phone empty while the shipping contact number is reliably
+        # present (the order-confirmation push falls back to it for the same reason), so o.phone
+        # alone would miss many real orders. Still NARROWER than delete_by_phone's three-column
+        # erasure predicate — billing stays excluded (never asked for), erasure and disclosure have
+        # different safety directions.
         # Cap matches the Postgres impl (10) so the two do not silently diverge; no ordering
         # requirement here since this store is test/dev-only.
-        matches = [o for o in self.orders.values() if o.phone == phone_e164]
+        matches = [
+            o for o in self.orders.values() if phone_e164 in (o.phone, o.shipping_phone)
+        ]
         return matches[:10]
 
     async def recent_mappings(self, limit: int) -> list[MappingView]:

@@ -340,11 +340,12 @@ async def test_find_mirrored_order_by_name_miss_returns_none() -> None:
     assert result is None
 
 
-async def test_find_mirrored_orders_by_phone_matches_only_the_buyer_phone() -> None:
-    # Q16 (docs/FR/client-decisions-all.md Part 6, ON HOLD): the chat-Q&A lookup is deliberately
-    # narrowed to the buyer's own `o.phone`, so a gift recipient's shipping-contact number cannot
-    # surface the buyer's order in chat. This is intentionally narrower than delete_by_phone's
-    # erasure predicate (which correctly stays broad across all three columns).
+async def test_find_mirrored_orders_by_phone_matches_buyer_or_shipping_phone() -> None:
+    # Q16 (docs/FR/client-decisions-all.md, ANSWERED 2026-08-12): the chat-Q&A lookup matches the
+    # order's own `o.phone` OR its `o.shipping_phone`. Shopflo checkout frequently leaves the
+    # buyer's own top-level phone empty while the shipping contact number is reliably present, so a
+    # buyer + a shipping-only order must BOTH surface. Still narrower than delete_by_phone's
+    # three-column erasure predicate (billing stays excluded -- see the billing-only negative case).
     store = InMemoryIngestStore()
     phone = "+919876500000"
     await store.upsert_order_mirror(
@@ -356,16 +357,16 @@ async def test_find_mirrored_orders_by_phone_matches_only_the_buyer_phone() -> N
                customer=None)
     )
     results = await store.find_mirrored_orders_by_phone(phone)
-    assert {o.gid for o in results} == {"gid://buyer"}
+    assert {o.gid for o in results} == {"gid://buyer", "gid://ship-only"}
 
 
-async def test_find_mirrored_orders_by_phone_ignores_a_shipping_only_match() -> None:
-    # Explicit negative case for Q16: an order where the number is ONLY the shipping contact
-    # (not the buyer's own phone) must NOT come back from the chat-Q&A lookup.
+async def test_find_mirrored_orders_by_phone_ignores_a_billing_only_match() -> None:
+    # Explicit negative case for Q16: billing is still out of scope (never asked for). An order
+    # where the number is ONLY the billing contact must NOT come back from the chat-Q&A lookup.
     store = InMemoryIngestStore()
     phone = "+919876500000"
     await store.upsert_order_mirror(
-        _order(gid="gid://ship-only", phone=None, shipping_phone=phone, billing_phone=None,
+        _order(gid="gid://bill-only", phone=None, shipping_phone=None, billing_phone=phone,
                customer=None)
     )
     assert await store.find_mirrored_orders_by_phone(phone) == []
@@ -429,12 +430,14 @@ async def test_find_mirrored_orders_by_phone_pg_caps_and_orders_the_query() -> N
     await store.find_mirrored_orders_by_phone("+919876500000")
 
     order_sql = conn.fetch_calls[0][0]
-    # Q16: the WHERE clause matches ONLY the buyer's own o.phone (no shipping/billing OR-clause);
-    # NULLS LAST so genuinely-recent orders are not pushed out of the LIMIT by NULL updated_at rows
-    # sorting first; o.gid DESC is a deterministic tiebreaker. (shipping_phone/billing_phone still
-    # appear in the SELECT column list -- assert on the WHERE..LIMIT span, not raw substrings.)
+    # Q16 (ANSWERED 2026-08-12): the WHERE clause matches the buyer's own o.phone OR
+    # o.shipping_phone (billing stays excluded), the single $1 reused for both columns; NULLS LAST
+    # so recent orders are not pushed out of the LIMIT by NULL updated_at rows sorting first; o.gid
+    # DESC is a deterministic tiebreaker. (billing_phone still appears in the SELECT list -- so
+    # assert on the WHERE..LIMIT span, not raw substrings.)
     assert (
-        "WHERE o.phone = $1 ORDER BY o.updated_at DESC NULLS LAST, o.gid DESC LIMIT 10"
+        "WHERE o.phone = $1 OR o.shipping_phone = $1 "
+        "ORDER BY o.updated_at DESC NULLS LAST, o.gid DESC LIMIT 10"
     ) in order_sql
 
 
@@ -671,25 +674,31 @@ async def test_find_mirrored_order_by_name_pg_miss_returns_none(pool: LazyPool) 
 
 
 @pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")
-async def test_find_mirrored_orders_by_phone_pg_matches_only_the_buyer_phone(
+async def test_find_mirrored_orders_by_phone_pg_matches_buyer_or_shipping_phone(
     pool: LazyPool,
 ) -> None:
-    # Q16 (docs/FR/client-decisions-all.md Part 6, ON HOLD): narrowed to o.phone only, so a
-    # shipping/billing-only contact number does not surface the buyer's order in chat.
+    # Q16 (docs/FR/client-decisions-all.md, ANSWERED 2026-08-12): matches o.phone OR
+    # o.shipping_phone (billing stays excluded), so both a buyer-phone order and a shipping-only
+    # order surface, but a billing-only contact number does not.
     store = PostgresIngestStore(pool)
     phone = "+919876500000"
     gid_buyer = f"gid://shopify/Order/{uuid.uuid4()}"
     gid_ship = f"gid://shopify/Order/{uuid.uuid4()}"
+    gid_bill = f"gid://shopify/Order/{uuid.uuid4()}"
     await store.upsert_order_mirror(
         _order(gid=gid_buyer, phone=phone, shipping_phone=None, billing_phone=None, customer=None)
     )
     await store.upsert_order_mirror(
         _order(gid=gid_ship, phone=None, shipping_phone=phone, billing_phone=None, customer=None)
     )
+    await store.upsert_order_mirror(
+        _order(gid=gid_bill, phone=None, shipping_phone=None, billing_phone=phone, customer=None)
+    )
 
     results = await store.find_mirrored_orders_by_phone(phone)
 
-    assert {o.gid for o in results} == {gid_buyer}  # shipping-only order NOT returned
+    # buyer + shipping surface; billing-only order NOT returned
+    assert {o.gid for o in results} == {gid_buyer, gid_ship}
 
 
 @pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")

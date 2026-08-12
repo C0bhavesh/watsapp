@@ -73,6 +73,31 @@ def test_authorized_order_rejects_empty_verified_phone() -> None:
         AuthorizedOrder(order=o, verified_phone="")
 
 
+def test_authorized_order_accepts_same_number_in_different_formats() -> None:
+    # The ownership check must be source-independent: the mirror stores phones E.164-normalized
+    # while live Shopify supplies them raw (customer free-text). Two representations of the SAME
+    # number must be treated as the same number, whichever OrderSource answered.
+    o = make_order(phone="9876543210")  # raw, as live Shopify might return it
+    assert AuthorizedOrder(order=o, verified_phone="+919876543210").order is o
+    o2 = make_order(phone="+919876543210")  # E.164, as the mirror stores it
+    assert AuthorizedOrder(order=o2, verified_phone="09876543210").order is o2
+    assert AuthorizedOrder(order=o2, verified_phone="9876543210").order is o2
+
+
+def test_authorized_order_still_rejects_a_genuinely_different_number() -> None:
+    o = make_order(phone="+919876543210")
+    with pytest.raises(ValueError):
+        AuthorizedOrder(order=o, verified_phone="+919000000000")
+
+
+def test_authorized_order_rejects_when_both_sides_are_unparseable() -> None:
+    # normalize_phone returns None for junk; two None values must NOT be treated as a match
+    # (that would authorize an order against an unverifiable number).
+    o = make_order(phone="junk")
+    with pytest.raises(ValueError):
+        AuthorizedOrder(order=o, verified_phone="also-junk")
+
+
 def test_normalize_order_name_variants() -> None:
     assert normalize_order_name("tavas3733") == "tavas3733"
     assert normalize_order_name("#tavas3733") == "tavas3733"

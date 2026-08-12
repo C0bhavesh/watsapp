@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+from app.core.phone import normalize_phone
+
 
 @dataclass(frozen=True)
 class Money:
@@ -78,8 +80,18 @@ class AuthorizedOrder:
     verified_phone: str
 
     def __post_init__(self) -> None:
-        phones = (self.order.phone, self.order.shipping_phone, self.order.billing_phone)
-        if not self.verified_phone or self.verified_phone not in phones:
+        # Normalize BOTH sides before comparing so the check is source-independent: live Shopify
+        # supplies phones raw (customer free-text like "98765 43210"), the Postgres mirror stores
+        # them E.164-normalized, and the in-memory store now matches. Two representations of the
+        # same number are the same number for an ownership check. An unparseable verified_phone
+        # (normalize -> None) is rejected, and a None never matches a None order phone, so this
+        # never authorizes against an unverifiable number.
+        verified = normalize_phone(self.verified_phone)
+        order_phones = {
+            normalize_phone(p)
+            for p in (self.order.phone, self.order.shipping_phone, self.order.billing_phone)
+        }
+        if not self.verified_phone or verified is None or verified not in order_phones:
             raise ValueError("AuthorizedOrder: verified_phone does not match the order")
 
 

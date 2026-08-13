@@ -232,10 +232,13 @@ number.
 <details>
 <summary>Original question (for reference)</summary>
 
-- A (recommended at the time): only the buyer's own phone number unlocks the order in chat.
+- A (recommended): only the buyer's own phone number unlocks the order in chat. If someone
+  else's number was used only for shipping or billing on that order, messaging from that number
+  will not surface the order.
 - B: any of the three numbers on the order unlocks it in chat (matches how we already handle a
   customer's own request to delete their data, where checking all three numbers is intentionally
-  broad).
+  broad). This means, for example, a gift recipient could message and see the buyer's order
+  details.
 
 We initially shipped Option A as a conservative default pending this answer.
 

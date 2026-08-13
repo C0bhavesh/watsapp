@@ -53,26 +53,32 @@
 
 - **🟠 Phase 5 deferred / later (2026-08-10)** — items intentionally OUT of the confirm/cancel v1,
   none of which block the flow working:
-  1. ~~**Self-invoke-after-webhook latency**~~ **DONE (2026-08-13):** no cron exists on the live
-     deployment and the owner chose the webhook-self-invoke over cron polling — the `orders/create`
-     handler now sends the row it just queued via `BackgroundTasks` (`send_outbound_now`) right
-     after acking Shopify. `dedupe_key UNIQUE` still guarantees exactly-once regardless of trigger.
-  2. **`FOR UPDATE SKIP LOCKED` multi-instance drain** — `claim_queued_outbound` is a plain
-     `SELECT ... WHERE state='queued' ORDER BY created_at LIMIT` + per-row state transition, still
-     safe for the single-instance backstop `run_outbox_drain`. **The self-invoke path (item 1)
-     deliberately does NOT use `claim_queued_outbound`** — it processes only its own known row id,
-     so concurrent orders never contend on the shared queue (that was the whole point of threading
-     `IngestResult.outbound_id` through). If `run_outbox_drain` is ever run on multiple concurrent
-     workers, add `FOR UPDATE SKIP LOCKED` to avoid double-sends.
+  1. ~~**Self-invoke-after-webhook latency**~~ **RESOLVED via cron, NOT self-invoke (2026-08-13,
+     corrected):** the 2026-08-13 self-invoke design (`send_outbound_now` via `BackgroundTasks`) was
+     REVERTED — both code-review and security-review rejected it (Vercel Python `BackgroundTasks`
+     run in-request, delaying the ack; contradicts ADR-001 + the 2026-07-28 error_learning). The
+     actual fix: a **1-minute Vercel Cron** (`vercel.json` `crons` → `GET /internal/jobs/outbox_drain`)
+     is now the sole sender. The webhook is back to pure queue-writer (persist → 200, nothing else).
+     `dedupe_key UNIQUE` still guarantees exactly-once; push latency ≤ ~1 min.
+  2. ~~**`FOR UPDATE SKIP LOCKED` multi-instance drain**~~ **DONE (2026-08-13):** `claim_queued_outbound`
+     is now atomic — a `WITH claimed AS (SELECT id ... WHERE state='queued' ... FOR UPDATE SKIP
+     LOCKED) UPDATE ... SET state='processing' ... RETURNING ...` single statement, so two overlapping
+     cron ticks can never both claim the same row. `bump_outbound_attempt` returns a transient-failed
+     row `processing → queued` for a later tick (or `→ failed` at the cap), never leaving it stuck.
+     Required now that the cron (not a one-shot self-invoke) is the sender. Real-DB concurrency proof:
+     `tests/store/test_outbox_drain_pg.py::test_concurrent_claims_never_return_the_same_row`.
   3. **Literal-YES free-text cancel fallback** — v1 is buttons-only. A `pending_actions` TTL row +
      a "reply YES to confirm" free-text path (for customers who type instead of tapping) is
      deferred; the `pending_actions` table already exists for it.
   4. **Proactive shipped/cancelled push topics** (`orders/fulfilled`/`orders/cancelled`) — each is
      a paid template send and a future client decision (see the existing deferred note below).
-  5. **`outbox_drain` / `reconcile_cancels` cron wiring on Vercel** — both jobs are registered and
-     CRON_SECRET-authed, but no Vercel cron schedule is configured yet (deploy-time step, like the
-     `maxDuration` item below). Until scheduled, they can be invoked manually via
-     `POST /internal/jobs/{outbox_drain,reconcile_cancels}`.
+  5. **`reconcile_cancels` cron wiring on Vercel** — `outbox_drain` is now scheduled (2026-08-13:
+     `vercel.json` `crons` → `* * * * *` GET, Bearer-authed via `CRON_SECRET`). `reconcile_cancels`
+     is registered + CRON_SECRET-authed but has NO Vercel cron schedule yet; until scheduled it is
+     invoked manually via `POST /internal/jobs/reconcile_cancels` (`X-Cron-Secret`). Note
+     `vercel.json` now carries a top-level `crons` key alongside `builds`/`routes` — additive and
+     NOT mutually exclusive (unlike `functions`, see the `maxDuration` item below); confirm the
+     schedule actually fires after the next deploy.
 
 - **⏳ Vercel dashboard: set function `maxDuration` (Task 14 security-review CRITICAL fix,
   2026-08-06)** — `backend/vercel.json` is UNCHANGED (still just `builds`/`routes`/`regions`);

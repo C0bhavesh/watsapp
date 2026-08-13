@@ -24,6 +24,14 @@ async def call(name: str, secret: str | None) -> httpx.Response:
         return await client.post(f"/internal/jobs/{name}", headers=headers)
 
 
+async def call_get(name: str, headers: dict[str, str]) -> httpx.Response:
+    from app.main import app as fastapi_app
+
+    transport = httpx.ASGITransport(app=fastapi_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        return await client.get(f"/internal/jobs/{name}", headers=headers)
+
+
 async def test_wrong_secret_403() -> None:
     assert (await call("ensure_subscription", "nope")).status_code == 403
     assert (await call("ensure_subscription", None)).status_code == 403
@@ -57,15 +65,36 @@ async def test_non_ascii_secret_header_403_not_500() -> None:
     assert resp.status_code == 403
 
 
-async def test_get_on_mutating_job_405() -> None:
-    from app.main import app as fastapi_app
+async def test_get_with_valid_bearer_runs_the_job() -> None:
+    # Vercel Cron fires GET with `Authorization: Bearer <CRON_SECRET>`. outbox_drain needs no
+    # external config to run (default send_mode "off" returns cleanly), so a 200 proves the job ran.
+    resp = await call_get("outbox_drain", {"Authorization": f"Bearer {SECRET}"})
+    assert resp.status_code == 200
+    assert resp.json()["job"] == "outbox_drain"
 
-    transport = httpx.ASGITransport(app=fastapi_app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get(
-            "/internal/jobs/ensure_subscription", headers={"X-Cron-Secret": SECRET}
-        )
-    assert resp.status_code == 405
+
+async def test_get_with_wrong_bearer_403() -> None:
+    resp = await call_get("outbox_drain", {"Authorization": "Bearer nope"})
+    assert resp.status_code == 403
+
+
+async def test_get_with_missing_authorization_403() -> None:
+    resp = await call_get("outbox_drain", {})
+    assert resp.status_code == 403
+
+
+async def test_get_with_old_cron_secret_header_but_no_bearer_403() -> None:
+    # A GET carrying the POST-style X-Cron-Secret header (no Authorization) must NOT be accepted:
+    # each method reads only its own header, so the wrong header on the wrong method fails closed.
+    resp = await call_get("outbox_drain", {"X-Cron-Secret": SECRET})
+    assert resp.status_code == 403
+
+
+async def test_post_with_valid_cron_secret_still_works() -> None:
+    # Regression: the manual/admin POST + X-Cron-Secret path is unchanged.
+    resp = await call("outbox_drain", SECRET)
+    assert resp.status_code == 200
+    assert resp.json()["job"] == "outbox_drain"
 
 
 async def test_unknown_job_404() -> None:

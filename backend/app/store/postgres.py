@@ -282,24 +282,18 @@ class PostgresIngestStore:
                     mapping.is_cod,
                 )
                 queued = False
-                outbound_id: int | None = None
                 if outbound is not None:
-                    # RETURNING id yields the new row's id on insert, and NOTHING on an
-                    # ON CONFLICT DO NOTHING collision (fetchval -> None) — so a None outbound_id
-                    # is exactly "no fresh row was queued", the same signal queued=False carries.
-                    new_id = await conn.fetchval(
+                    result = await conn.execute(
                         "INSERT INTO outbound_messages (dedupe_key, kind, phone_e164, "
                         "payload_json) VALUES ($1, $2, $3, $4) ON CONFLICT (dedupe_key) "
-                        "DO NOTHING RETURNING id",
+                        "DO NOTHING",
                         outbound.dedupe_key,
                         outbound.kind,
                         outbound.phone_e164,
                         outbound.payload_json,
                     )
-                    if new_id is not None:
-                        outbound_id = int(new_id)
-                        queued = True
-                return IngestResult(duplicate=False, queued=queued, outbound_id=outbound_id)
+                    queued = _rows_affected(result) > 0
+                return IngestResult(duplicate=False, queued=queued)
 
     async def upsert_customer(self, customer: Customer) -> None:
         async with self._pool.acquire() as conn:
@@ -645,13 +639,27 @@ class PostgresIngestStore:
     # --- Phase 5: outbox drain + mutation audit + mapping status ---
 
     async def claim_queued_outbound(self, limit: int = 20) -> list[OutboundClaim]:
+        # Atomic claim: SELECT the oldest queued rows AND flip them to 'processing' in ONE
+        # round trip. FOR UPDATE SKIP LOCKED locks the selected rows and makes a concurrent
+        # claim skip them, so two overlapping cron runs (one still in flight when the next
+        # 1-minute tick fires) can NEVER both receive the same row -> no double-send. The CTE
+        # with a row-locking SELECT must run inside an explicit transaction on the connection
+        # (same pattern as ingest_order_created above).
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT id, dedupe_key, phone_e164, payload_json, attempts"
-                " FROM outbound_messages WHERE state = 'queued'"
-                " ORDER BY created_at LIMIT $1",
-                limit,
-            )
+            async with conn.transaction():
+                rows = await conn.fetch(
+                    "WITH claimed AS ("
+                    " SELECT id FROM outbound_messages"
+                    " WHERE state = 'queued'"
+                    " ORDER BY created_at"
+                    " LIMIT $1"
+                    " FOR UPDATE SKIP LOCKED"
+                    ")"
+                    " UPDATE outbound_messages SET state = 'processing', updated_at = now()"
+                    " WHERE id IN (SELECT id FROM claimed)"
+                    " RETURNING id, dedupe_key, phone_e164, payload_json, attempts",
+                    limit,
+                )
         return [
             OutboundClaim(
                 id=int(r["id"]),
@@ -692,11 +700,15 @@ class PostgresIngestStore:
     async def bump_outbound_attempt(self, id: int, code: str, max_attempts: int = 5) -> str:
         # `attempts` in the CASE/SET refers to the pre-update value, so `attempts + 1` is the new
         # count. RETURNING gives the resulting state so the caller learns 'queued' vs 'failed'.
+        # A retryable failure moves the row 'processing' -> 'queued' so a LATER cron run can
+        # re-claim and re-send it; only once attempts hit max_attempts does it go to 'failed'.
+        # It must NOT be left in 'processing' (that would strand it — nothing re-claims a
+        # processing row). Explicit ELSE 'queued', never ELSE state, is the whole point.
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "UPDATE outbound_messages"
                 " SET attempts = attempts + 1, last_error_code = $2,"
-                " state = CASE WHEN attempts + 1 >= $3 THEN 'failed' ELSE state END,"
+                " state = CASE WHEN attempts + 1 >= $3 THEN 'failed' ELSE 'queued' END,"
                 " updated_at = now()"
                 " WHERE id = $1 RETURNING state",
                 id,

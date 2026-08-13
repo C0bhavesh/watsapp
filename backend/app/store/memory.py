@@ -80,7 +80,6 @@ class InMemoryIngestStore:
         self.webhooks.add(key)
         self.mappings[mapping.order_gid] = mapping
         queued = False
-        outbound_id: int | None = None
         if outbound is not None and outbound.dedupe_key not in self.outbound:
             self.outbound[outbound.dedupe_key] = outbound
             row = _OutboundRow(
@@ -94,8 +93,7 @@ class InMemoryIngestStore:
             self._outbound_by_id[row.id] = outbound.dedupe_key
             self._outbound_next_id += 1
             queued = True
-            outbound_id = row.id
-        return IngestResult(duplicate=False, queued=queued, outbound_id=outbound_id)
+        return IngestResult(duplicate=False, queued=queued)
 
     async def upsert_customer(self, customer: Customer) -> None:
         self.customers[customer.gid] = customer
@@ -268,11 +266,16 @@ class InMemoryIngestStore:
 
     async def claim_queued_outbound(self, limit: int = 20) -> list[OutboundClaim]:
         # dict preserves insertion order -> oldest first, mirroring ORDER BY created_at.
+        # Atomically flip each claimed row 'queued' -> 'processing' as it is returned, matching
+        # the Postgres CTE claim's state transition so tests against either store agree (there is
+        # no real concurrency to guard here, but the STATE must move so a claimed row is never
+        # re-claimed by a later call and bump can move it back to 'queued' for a retry).
         claims: list[OutboundClaim] = []
         for key, draft in self.outbound.items():
             meta = self._outbound_meta[key]
             if meta.state != "queued":
                 continue
+            meta.state = "processing"
             claims.append(
                 OutboundClaim(
                     id=meta.id,
@@ -312,6 +315,10 @@ class InMemoryIngestStore:
         if meta.attempts >= max_attempts:
             meta.state = "failed"
             return "failed"
+        # A retryable failure moves the row 'processing' -> 'queued' so a later cron run can
+        # re-claim it; it must NOT stay 'processing' (nothing re-claims a processing row). This
+        # mirrors the Postgres bump's explicit ELSE 'queued'.
+        meta.state = "queued"
         return "queued"
 
     async def set_mapping_status(self, order_gid: str, status: str) -> None:

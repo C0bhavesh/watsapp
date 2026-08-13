@@ -28,7 +28,7 @@ CREATE INDEX IF NOT EXISTS idx_order_mappings_name  ON order_mappings (order_nam
 CREATE TABLE IF NOT EXISTS outbound_messages (
     id              bigserial PRIMARY KEY,
     dedupe_key      text NOT NULL UNIQUE,
-    state           text NOT NULL DEFAULT 'queued',  -- queued|sent|suppressed|failed|undeliverable
+    state           text NOT NULL DEFAULT 'queued',  -- queued|processing|sent|suppressed|failed|undeliverable
     kind            text NOT NULL,
     phone_e164      text NOT NULL,
     payload_json    text NOT NULL,

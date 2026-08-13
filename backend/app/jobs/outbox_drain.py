@@ -1,8 +1,12 @@
 """Outbox drain job (Flow A) — send the queued order-confirmation templates.
 
-A cron/self-invoke calls this via ``GET|POST /internal/jobs/outbox_drain``. It claims queued
-``outbound_messages`` rows and sends each ``order_confirmation_cod`` template with the deterministic
-``order:confirm:{gid}`` / ``order:cancel:{gid}`` quick-reply button payloads.
+The 1-minute Vercel Cron calls this via ``GET /internal/jobs/outbox_drain`` (a manual/admin
+``POST`` with ``X-Cron-Secret`` also works). It is the ONLY sender: the ``orders/create`` webhook
+merely queues a row and acks Shopify — it never sends inline or via a background task (ADR-001;
+Vercel's Python runtime has no reliable process-after-response). Each run atomically claims queued
+``outbound_messages`` rows (``queued -> processing``) and sends each ``order_confirmation_cod``
+template with the deterministic ``order:confirm:{gid}`` / ``order:cancel:{gid}`` quick-reply button
+payloads.
 
 Safety:
 - The ``send_mode`` kill switch (ADR-002) is enforced here in ONE place. ``off`` returns before
@@ -23,7 +27,7 @@ from app.channels.whatsapp_config import WhatsAppConfig, load_whatsapp_config
 from app.channels.whatsapp_sender import WhatsAppSendError, send_template
 from app.core.send_policy import send_decision
 from app.deps import Container
-from app.store.base import OutboundClaim, OutboundDraft
+from app.store.base import OutboundClaim
 
 logger = logging.getLogger("app.jobs.outbox_drain")
 
@@ -104,9 +108,15 @@ async def send_one_outbound(
 ) -> str:
     """Run the full per-row send state machine for ONE claimed outbound row; return its outcome.
 
-    Shared by ``run_outbox_drain``'s loop and the ``orders/create`` webhook self-invoke path so
-    both send identically. Never raises ``WhatsAppSendError`` — a transport error is logged and the
-    row bumped for a future retry. Nothing here mutates a Shopify order; the outbox only SENDS.
+    The row is already in state ``processing`` (``claim_queued_outbound`` flipped it atomically) by
+    the time this function sees it — this function never re-reads or assumes ``state == 'queued'``.
+    On success it calls ``mark_outbound_sent`` (``processing -> sent``); on a Meta-undeliverable
+    code ``mark_outbound_undeliverable`` (``processing -> undeliverable``); on a transport/retryable
+    error ``bump_outbound_attempt``, which moves the row ``processing -> queued`` (or ``failed`` at
+    the attempt cap) so a LATER cron run can re-claim it — it is never left stuck in ``processing``.
+
+    Never raises ``WhatsAppSendError`` — a transport error is logged and the row bumped for a future
+    retry. Nothing here mutates a Shopify order; the outbox only SENDS.
     """
     gid = _gid_from_dedupe_key(row.dedupe_key)
     if gid is None:
@@ -181,40 +191,3 @@ async def run_outbox_drain(c: Container) -> dict[str, object]:
         "failed": failed,
         "undeliverable": undeliverable,
     }
-
-
-async def send_outbound_now(c: Container, outbound: OutboundDraft, outbound_id: int) -> None:
-    """Send the SINGLE row the orders/create webhook just queued, as a post-ack background task.
-
-    Deliberately NEVER calls ``claim_queued_outbound``: that is a plain, non-atomic
-    ``SELECT ... WHERE state='queued'`` (no ``FOR UPDATE SKIP LOCKED``), so two orders arriving
-    close together would spin up concurrent Vercel instances that could both select and both send
-    the same queued row — a real duplicate-WhatsApp-message bug. This path already knows the exact
-    row it created (``outbound_id``) and processes only that one, with no contention.
-
-    The ``send_mode`` kill switch is honoured exactly like ``run_outbox_drain``: ``off`` returns
-    before touching the row (leaving it queued for a future backstop drain), every other mode is
-    decided per-row by ``send_decision`` inside ``send_one_outbound`` (a suppress never calls Meta).
-    Must never raise: ``send_one_outbound`` already handles transport errors (bump for retry), and
-    any other unexpected error is logged and swallowed so a background task can never crash.
-    """
-    try:
-        controls = await load_controls(c.config)
-        if controls.send_mode == "off":
-            return
-        cfg = await load_whatsapp_config(c.config)
-        if cfg is None:
-            logger.warning(
-                "self-invoke send skipped: whatsapp not configured (row %s)", outbound_id
-            )
-            return
-        row = OutboundClaim(
-            id=outbound_id,
-            dedupe_key=outbound.dedupe_key,
-            phone_e164=outbound.phone_e164,
-            payload_json=outbound.payload_json,
-            attempts=0,
-        )
-        await send_one_outbound(c, cfg, controls, row)
-    except Exception:
-        logger.exception("self-invoke outbound send failed (row %s)", outbound_id)

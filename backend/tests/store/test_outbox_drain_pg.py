@@ -1,3 +1,4 @@
+import asyncio
 import os
 import uuid
 
@@ -36,7 +37,12 @@ async def _seed(store: PostgresIngestStore, gid: str, phone: str) -> None:
     )
 
 
-async def test_claim_and_mark_sent(pool: LazyPool) -> None:
+async def _state(pool: LazyPool, id_: int) -> str:
+    async with pool.acquire() as conn:
+        return str(await conn.fetchval("SELECT state FROM outbound_messages WHERE id = $1", id_))
+
+
+async def test_claim_transitions_to_processing_then_mark_sent(pool: LazyPool) -> None:
     store = PostgresIngestStore(pool)
     gid = f"gid://shopify/Order/{uuid.uuid4()}"
     phone = f"+91{uuid.uuid4().int % 10**10:010d}"
@@ -44,16 +50,67 @@ async def test_claim_and_mark_sent(pool: LazyPool) -> None:
     claims = await store.claim_queued_outbound(limit=50)
     mine = [c for c in claims if c.dedupe_key == f"order_created:{gid}"]
     assert len(mine) == 1
+    # The claim atomically flipped the row out of 'queued'.
+    assert await _state(pool, mine[0].id) == "processing"
     await store.mark_outbound_sent(mine[0].id, "wamid.abc")
     async with pool.acquire() as conn:
-        state = await conn.fetchval(
-            "SELECT state FROM outbound_messages WHERE id = $1", mine[0].id
-        )
         wamid = await conn.fetchval(
             "SELECT template_wamid FROM outbound_messages WHERE id = $1", mine[0].id
         )
-    assert state == "sent"
+    assert await _state(pool, mine[0].id) == "sent"
     assert wamid == "wamid.abc"
+
+
+async def test_concurrent_claims_never_return_the_same_row(pool: LazyPool) -> None:
+    # The real duplicate-send guard: two overlapping cron runs claiming at the same time must
+    # partition the queued rows, never both receive one. FOR UPDATE SKIP LOCKED + the atomic
+    # 'queued' -> 'processing' flip make every claimed id unique across concurrent callers.
+    store = PostgresIngestStore(pool)
+    tag = uuid.uuid4()
+    seeded: list[str] = []
+    for i in range(10):
+        gid = f"gid://shopify/Order/{tag}-{i}"
+        phone = f"+91{uuid.uuid4().int % 10**10:010d}"
+        await _seed(store, gid, phone)
+        seeded.append(f"order_created:{gid}")
+
+    batches = await asyncio.gather(*(store.claim_queued_outbound(limit=5) for _ in range(4)))
+
+    claimed_ids = [c.id for batch in batches for c in batch]
+    # No id was handed to two callers.
+    assert len(claimed_ids) == len(set(claimed_ids))
+    # Every one of our seeded rows was claimed exactly once and is now 'processing'.
+    mine = [c for batch in batches for c in batch if c.dedupe_key in set(seeded)]
+    assert sorted(c.dedupe_key for c in mine) == sorted(seeded)
+    for c in mine:
+        assert await _state(pool, c.id) == "processing"
+
+
+async def test_claim_skips_non_queued_states(pool: LazyPool) -> None:
+    # A mixed-state table: only a 'queued' row is claimed; sent/failed/undeliverable/processing
+    # rows are all skipped by the WHERE state='queued' predicate -> never re-sent.
+    store = PostgresIngestStore(pool)
+    tag = uuid.uuid4()
+    ids: dict[str, int] = {}
+    for state in ("sent", "failed", "undeliverable", "processing", "queued"):
+        gid = f"gid://shopify/Order/{tag}-{state}"
+        phone = f"+91{uuid.uuid4().int % 10**10:010d}"
+        await _seed(store, gid, phone)
+        async with pool.acquire() as conn:
+            ids[state] = int(
+                await conn.fetchval(
+                    "UPDATE outbound_messages SET state = $2 WHERE dedupe_key = $1 RETURNING id",
+                    f"order_created:{gid}",
+                    state,
+                )
+            )
+
+    claims = await store.claim_queued_outbound(limit=50)
+
+    claimed_ids = {c.id for c in claims}
+    assert ids["queued"] in claimed_ids
+    for terminal in ("sent", "failed", "undeliverable", "processing"):
+        assert ids[terminal] not in claimed_ids
 
 
 async def test_bump_reaches_failed_at_cap(pool: LazyPool) -> None:

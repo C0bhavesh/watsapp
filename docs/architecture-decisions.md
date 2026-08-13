@@ -19,13 +19,24 @@ returns:
 `INSERT processed_webhooks (conflict → already handled, 200)` + `UPSERT order_mappings` +
 `INSERT outbound_messages(state='queued', dedupe_key UNIQUE, e.g. 'order_created:{gid}')` →
 200. Any transaction failure → 5xx, so Shopify's retry budget IS the queue. Actual sends
-happen from an outbox **drain job** (authenticated; cron + optional fire-and-forget
-self-invocation after the 200 for latency), with bounded concurrency, exponential backoff,
-and Meta error taxonomy (130429/131048 retryable; 131026 → `undeliverable`).
+happen ONLY from an outbox **drain job** (authenticated), driven by a **1-minute Vercel Cron**
+(`GET /internal/jobs/outbox_drain`). Each run **atomically claims** queued rows
+(`queued → processing` in one statement, `FOR UPDATE SKIP LOCKED`, so two overlapping cron
+ticks can never both claim the same row), sends, and transitions `processing → sent` /
+`→ undeliverable` (Meta terminal codes 131026/131047/131049) / back to `queued` for a later
+run on a transient error until `max_attempts` → `failed`.
+
+The webhook does **not** send inline and does **not** register a FastAPI `BackgroundTask` to
+send: on Vercel's Python runtime `BackgroundTasks` run inside the request cycle and can be
+killed on instance reclaim, so a background-task send is neither low-latency nor durable — it
+is exactly the "no reliable process-after-response" hazard this ADR exists to avoid. This is
+NOT an endorsement of an in-request background send; the queue → cron → atomic-claim → send
+shape is the only sanctioned path. (A one-off 2026-08-13 webhook self-invoke experiment was
+reverted the same day for precisely this reason.)
 
 **Consequences.** Sends are retryable, observable, and exactly-once per order by DB
-constraint. Push latency depends on drain cadence (self-invoke keeps it near-instant).
-No Meta/LLM call ever happens inside the Shopify webhook request.
+constraint. Push latency is at most the ~1-minute cron cadence. No Meta/LLM call ever happens
+inside the Shopify webhook request.
 
 ---
 

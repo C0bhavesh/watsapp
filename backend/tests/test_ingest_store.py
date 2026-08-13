@@ -24,18 +24,14 @@ async def test_first_ingest_maps_and_queues() -> None:
     assert ("wh1", "orders/create") in store.webhooks
     assert "gid://shopify/Order/1" in store.mappings
     assert "order_created:gid://shopify/Order/1" in store.outbound
-    # The freshly-queued row's own id is surfaced so the orders/create webhook can send exactly
-    # that one row (never the shared non-atomic claim path). It matches the claimable row's id.
-    assert result.outbound_id is not None
-    claims = await store.claim_queued_outbound()
-    assert [claim.id for claim in claims] == [result.outbound_id]
+    assert result == IngestResult(duplicate=False, queued=True)
 
 
 async def test_duplicate_webhook_id_is_noop() -> None:
     store = InMemoryIngestStore()
     await store.ingest_order_created("wh1", "orders/create", mapping(), outbound())
     result = await store.ingest_order_created("wh1", "orders/create", mapping(), outbound())
-    assert result == IngestResult(duplicate=True, queued=False, outbound_id=None)
+    assert result == IngestResult(duplicate=True, queued=False)
     assert len(store.outbound) == 1
 
 
@@ -43,16 +39,79 @@ async def test_outbox_dedupe_key_unique_across_webhook_ids() -> None:
     store = InMemoryIngestStore()
     await store.ingest_order_created("wh1", "orders/create", mapping(), outbound())
     result = await store.ingest_order_created("wh2", "orders/create", mapping(), outbound())
-    # mapping upserted, push already queued once -> no fresh row, so no outbound_id to send.
-    assert result == IngestResult(duplicate=False, queued=False, outbound_id=None)
+    # mapping upserted, push already queued once -> no fresh row queued.
+    assert result == IngestResult(duplicate=False, queued=False)
     assert len(store.outbound) == 1
 
 
 async def test_ineligible_ingest_maps_without_queueing() -> None:
     store = InMemoryIngestStore()
     result = await store.ingest_order_created("wh1", "orders/create", mapping(), None)
-    assert result == IngestResult(duplicate=False, queued=False, outbound_id=None)
+    assert result == IngestResult(duplicate=False, queued=False)
     assert "gid://shopify/Order/1" in store.mappings and not store.outbound
+
+
+def _state(store: InMemoryIngestStore, dedupe_key: str) -> str:
+    meta = store._outbound_meta[dedupe_key]
+    return meta.state
+
+
+async def test_claim_transitions_queued_to_processing() -> None:
+    # The atomic claim flips 'queued' -> 'processing' (matching the Postgres CTE claim), so a
+    # claimed row is never handed out again by a later claim while it is in flight.
+    store = InMemoryIngestStore()
+    await store.ingest_order_created("wh1", "orders/create", mapping(), outbound())
+    key = "order_created:gid://shopify/Order/1"
+    assert _state(store, key) == "queued"
+
+    (claim,) = await store.claim_queued_outbound()
+
+    assert _state(store, key) == "processing"
+    # A second claim finds nothing queued -> the same row is never handed out twice.
+    assert await store.claim_queued_outbound() == []
+
+
+async def test_success_flow_queued_processing_sent() -> None:
+    store = InMemoryIngestStore()
+    await store.ingest_order_created("wh1", "orders/create", mapping(), outbound())
+    key = "order_created:gid://shopify/Order/1"
+    (claim,) = await store.claim_queued_outbound()
+    assert _state(store, key) == "processing"
+    await store.mark_outbound_sent(claim.id, "wamid.1")
+    assert _state(store, key) == "sent"
+    assert await store.claim_queued_outbound() == []  # a sent row is never re-claimed
+
+
+async def test_transport_failure_returns_processing_to_queued_until_cap() -> None:
+    # A retryable failure must move the row back to 'queued' (re-claimable by a later cron run),
+    # never leave it stuck in 'processing'. Only at max_attempts does it become terminal 'failed'.
+    store = InMemoryIngestStore()
+    await store.ingest_order_created("wh1", "orders/create", mapping(), outbound())
+    key = "order_created:gid://shopify/Order/1"
+
+    states: list[str] = []
+    for _ in range(3):
+        (claim,) = await store.claim_queued_outbound()
+        assert _state(store, key) == "processing"  # never stuck: re-claimable each round
+        states.append(await store.bump_outbound_attempt(claim.id, "transport", max_attempts=3))
+
+    assert states == ["queued", "queued", "failed"]
+    assert _state(store, key) == "failed"
+    assert await store.claim_queued_outbound() == []  # terminal -> never re-claimed
+
+
+async def test_terminal_rows_are_never_reclaimed() -> None:
+    # A mixed-state table: only the 'queued' row is ever handed out; sent/failed/undeliverable
+    # rows (and a suppressed one) are all skipped by the WHERE state='queued' claim.
+    store = InMemoryIngestStore()
+    for i, state in enumerate(("sent", "failed", "undeliverable", "suppressed", "queued")):
+        gid = f"gid://shopify/Order/{i}"
+        await store.ingest_order_created(f"wh{i}", "orders/create", mapping(gid), outbound(gid))
+        store._outbound_meta[f"order_created:{gid}"].state = state
+
+    claims = await store.claim_queued_outbound()
+
+    assert [c.dedupe_key for c in claims] == ["order_created:gid://shopify/Order/4"]
 
 
 async def test_find_mappings_by_phone_returns_matches_only() -> None:

@@ -3,7 +3,7 @@ import logging
 import math
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, BackgroundTasks, Request, Response
+from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from app.channels.shopify_orders import (
@@ -17,7 +17,6 @@ from app.channels.shopify_orders import (
 from app.channels.shopify_signature import verify_shopify_hmac
 from app.config.crypto import VaultError
 from app.deps import Container, get_container
-from app.jobs.outbox_drain import send_outbound_now
 from app.shopify.models import Customer, Order
 from app.shopify.subscriptions import REQUIRED_TOPICS
 from app.store.base import MappingUpsert, OutboundDraft
@@ -105,7 +104,7 @@ def _staleness_hours(raw: str | None) -> float:
 
 
 @router.post("/webhooks/shopify")
-async def shopify_webhook(request: Request, background_tasks: BackgroundTasks) -> Response:
+async def shopify_webhook(request: Request) -> Response:
     # Reject oversized bodies pre-auth: declared Content-Length first, then actual bytes.
     declared = request.headers.get("content-length")
     if declared is not None:
@@ -216,16 +215,15 @@ async def shopify_webhook(request: Request, background_tasks: BackgroundTasks) -
     # The mapping + outbox write goes FIRST: that row IS the customer's confirmation message,
     # while the mirror has no live reader yet. Mirroring afterwards (and non-fatally, inside
     # _mirror_order) means a mirror hiccup costs a stale row, never the customer's message.
+    #
+    # The webhook ONLY queues the order and acknowledges Shopify — it never sends the WhatsApp
+    # message inline and never via a background task. On Vercel's Python runtime, FastAPI
+    # BackgroundTasks do NOT reliably run after the response reaches the client (they execute
+    # inside the request cycle and can be killed on instance reclaim — ADR-001, and the
+    # 2026-07-28 "no reliable process-after-response" error_learning). Delivery is handled
+    # entirely by the 1-minute cron sender (`/internal/jobs/outbox_drain`), which atomically
+    # claims queued rows and sends them; `dedupe_key UNIQUE` keeps it exactly-once per order.
     result = await c.ingest.ingest_order_created(webhook_id, topic, mapping, outbound)
-
-    # Send that ONE freshly-queued row itself, right after acking Shopify, via a BackgroundTask
-    # (runs after the response is constructed, within the request lifecycle Vercel's ASGI runtime
-    # waits for before freezing the function — safe on serverless, unlike a bare fire-and-forget).
-    # outbound_id is non-None only when a fresh row was queued THIS call (not a duplicate; and
-    # eligibility already passed since `outbound` is non-None), so we send exactly that row by id
-    # and never the non-atomic claim_queued_outbound path two concurrent orders could both hit.
-    if outbound is not None and result.outbound_id is not None:
-        background_tasks.add_task(send_outbound_now, c, outbound, result.outbound_id)
 
     mirror_order = order_from_webhook_payload(payload)
     if mirror_order is not None:

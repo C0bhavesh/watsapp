@@ -80,6 +80,29 @@ async def test_orders_create_ingests_and_queues() -> None:
     assert draft.phone_e164 == "+919664290413"
 
 
+async def test_webhook_queues_but_never_sends_whatsapp(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ADR-001 regression: the webhook only queues + acks Shopify. It must NEVER run any send
+    # logic itself — not inline, not via a background task. Delivery is the 1-minute cron's job
+    # (`send_one_outbound`). Any call to send_template/send_one_outbound from the webhook path
+    # would trip these guards. The row is left `queued` for the cron to pick up.
+    import app.jobs.outbox_drain as drain
+
+    def _boom(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("the webhook path must not send WhatsApp — the cron does that")
+
+    monkeypatch.setattr(drain, "send_template", _boom)
+    monkeypatch.setattr(drain, "send_one_outbound", _boom)
+
+    body = json.dumps(payload("gid://shopify/Order/nosend")).encode()
+    resp = await post(body, headers(body, webhook_id="wh-nosend"))
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "duplicate": False, "queued": True}
+    store = get_container().ingest
+    (row,) = await store.claim_queued_outbound()  # still queued (pre-claim), nothing sent it
+    assert row.dedupe_key == "order_created:gid://shopify/Order/nosend"
+
+
 async def test_duplicate_webhook_id_reports_duplicate() -> None:
     body = json.dumps(payload()).encode()
     await post(body, headers(body))

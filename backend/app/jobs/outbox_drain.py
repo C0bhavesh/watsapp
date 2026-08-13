@@ -32,7 +32,13 @@ from app.store.base import OutboundClaim
 logger = logging.getLogger("app.jobs.outbox_drain")
 
 _DEDUPE_PREFIX = "order_created:"
-_CLAIM_LIMIT = 25
+# Rows claimed per cron tick. Kept small so a run comfortably fits inside any reasonable
+# per-invocation time budget: send_template's per-call timeout is 20s, and Vercel's platform
+# timeout on this legacy-`builds` config may be as low as the ~10-15s default (maxDuration unset).
+# 5/min = 7200/day, well above the v1 target of 100-500 orders/day; a leftover row is simply
+# picked up by the next 1-minute tick, and any row stranded 'processing' by a killed invocation is
+# reclaimed by claim_queued_outbound's staleness predicate.
+_CLAIM_LIMIT = 5
 
 # Meta send-error codes that mean "will never be delivered" (recipient not reachable / not on
 # WhatsApp / re-engagement outside the window) — terminal, do NOT retry. These are the provider's

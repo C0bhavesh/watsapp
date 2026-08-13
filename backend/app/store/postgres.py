@@ -645,12 +645,21 @@ class PostgresIngestStore:
         # 1-minute tick fires) can NEVER both receive the same row -> no double-send. The CTE
         # with a row-locking SELECT must run inside an explicit transaction on the connection
         # (same pattern as ingest_order_created above).
+        #
+        # The predicate also RECLAIMS stale in-flight rows: a row a killed invocation flipped to
+        # 'processing' but never finished sending (Vercel timeout / instance reclaim) would
+        # otherwise be stranded there forever — nothing else re-queues a 'processing' row. Any
+        # 'processing' row whose updated_at is older than 10 minutes is treated as abandoned and
+        # re-claimed. That threshold is two orders of magnitude above send_template's 20s timeout,
+        # so a genuinely in-flight row (claimed moments ago, fresh updated_at) can NEVER collide
+        # with this reclaim; only rows truly abandoned by a dead invocation are recovered.
         async with self._pool.acquire() as conn:
             async with conn.transaction():
                 rows = await conn.fetch(
                     "WITH claimed AS ("
                     " SELECT id FROM outbound_messages"
                     " WHERE state = 'queued'"
+                    " OR (state = 'processing' AND updated_at < now() - interval '10 minutes')"
                     " ORDER BY created_at"
                     " LIMIT $1"
                     " FOR UPDATE SKIP LOCKED"

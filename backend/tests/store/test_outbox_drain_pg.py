@@ -113,6 +113,41 @@ async def test_claim_skips_non_queued_states(pool: LazyPool) -> None:
         assert ids[terminal] not in claimed_ids
 
 
+async def test_stale_processing_row_reclaimed_recent_is_not(pool: LazyPool) -> None:
+    # The stranded-row guard: a 'processing' row abandoned by a killed invocation (updated_at
+    # older than the 10-minute threshold) IS reclaimed by a later claim, while a 'processing'
+    # row with a recent updated_at (still plausibly in-flight) is NOT — so a genuinely-in-flight
+    # send is never double-sent, but a permanently-stranded one is recovered.
+    store = PostgresIngestStore(pool)
+    stale_gid = f"gid://shopify/Order/{uuid.uuid4()}"
+    recent_gid = f"gid://shopify/Order/{uuid.uuid4()}"
+    for gid in (stale_gid, recent_gid):
+        phone = f"+91{uuid.uuid4().int % 10**10:010d}"
+        await _seed(store, gid, phone)
+    async with pool.acquire() as conn:
+        stale_id = int(
+            await conn.fetchval(
+                "UPDATE outbound_messages SET state = 'processing',"
+                " updated_at = now() - interval '15 minutes' WHERE dedupe_key = $1 RETURNING id",
+                f"order_created:{stale_gid}",
+            )
+        )
+        recent_id = int(
+            await conn.fetchval(
+                "UPDATE outbound_messages SET state = 'processing', updated_at = now()"
+                " WHERE dedupe_key = $1 RETURNING id",
+                f"order_created:{recent_gid}",
+            )
+        )
+
+    claimed_ids = {c.id for c in await store.claim_queued_outbound(limit=500)}
+
+    assert stale_id in claimed_ids  # abandoned in-flight row recovered
+    assert recent_id not in claimed_ids  # genuinely in-flight row left alone
+    # The reclaim re-stamps updated_at, so the recovered row is 'processing' again (fresh).
+    assert await _state(pool, stale_id) == "processing"
+
+
 async def test_bump_reaches_failed_at_cap(pool: LazyPool) -> None:
     store = PostgresIngestStore(pool)
     gid = f"gid://shopify/Order/{uuid.uuid4()}"

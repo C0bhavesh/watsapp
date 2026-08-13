@@ -74,7 +74,13 @@ async def test_claim_sql_is_atomic_transactional_and_skip_locked() -> None:
     assert ran_in_txn is True  # the CTE + row lock must run inside an explicit transaction
     assert "FOR UPDATE SKIP LOCKED" in sql  # concurrent claims skip already-locked rows
     assert "state = 'processing'" in sql  # atomically flips claimed rows out of 'queued'
-    assert "WHERE state = 'queued'" in sql  # selects only queued rows
+    # Claims queued rows AND reclaims stale in-flight ('processing') rows abandoned by a killed
+    # invocation: the 10-minute threshold is two orders of magnitude above the 20s send timeout,
+    # so a genuinely-in-flight row can never be reclaimed while a stranded one always is.
+    assert (
+        "WHERE state = 'queued'"
+        " OR (state = 'processing' AND updated_at < now() - interval '10 minutes')"
+    ) in sql
     assert "RETURNING id, dedupe_key, phone_e164, payload_json, attempts" in sql
     assert args == (25,)
     assert claims == [

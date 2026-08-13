@@ -83,14 +83,19 @@ async def test_orders_create_ingests_and_queues() -> None:
 async def test_webhook_queues_but_never_sends_whatsapp(monkeypatch: pytest.MonkeyPatch) -> None:
     # ADR-001 regression: the webhook only queues + acks Shopify. It must NEVER run any send
     # logic itself — not inline, not via a background task. Delivery is the 1-minute cron's job
-    # (`send_one_outbound`). Any call to send_template/send_one_outbound from the webhook path
-    # would trip these guards. The row is left `queued` for the cron to pick up.
+    # (`send_one_outbound`). We patch `send_template` at its SOURCE module
+    # (`app.channels.whatsapp_sender`, where it is defined), not at the drain module's import
+    # location — so the guard holds even if a FUTURE change added a direct
+    # `from app.channels.whatsapp_sender import send_template` call inside shopify_webhook.py
+    # itself, bypassing the drain module entirely. `send_one_outbound` is likewise patched at its
+    # own definition site (the drain module). The row is left `queued` for the cron to pick up.
+    import app.channels.whatsapp_sender as whatsapp_sender
     import app.jobs.outbox_drain as drain
 
     def _boom(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("the webhook path must not send WhatsApp — the cron does that")
 
-    monkeypatch.setattr(drain, "send_template", _boom)
+    monkeypatch.setattr(whatsapp_sender, "send_template", _boom)
     monkeypatch.setattr(drain, "send_one_outbound", _boom)
 
     body = json.dumps(payload("gid://shopify/Order/nosend")).encode()

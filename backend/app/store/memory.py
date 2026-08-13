@@ -1,5 +1,5 @@
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from app.shopify.models import Customer, LineItem, Order, normalize_order_name
 from app.store.base import (
@@ -14,6 +14,11 @@ from app.store.base import (
 )
 from app.store.postgres import _e164
 
+# A 'processing' row older than this is treated as abandoned by a dead invocation and re-claimed
+# (mirrors the Postgres claim's `interval '10 minutes'`). There is no real concurrency in the
+# in-memory store, but the staleness semantics must not regress behind Postgres's.
+_PROCESSING_STALE = timedelta(minutes=10)
+
 
 @dataclass
 class _OutboundRow:
@@ -24,6 +29,9 @@ class _OutboundRow:
     attempts: int
     last_error_code: str | None
     template_wamid: str | None
+    # Stamp of the last state transition — the in-memory analogue of the Postgres `updated_at`
+    # column. Used only to decide whether a 'processing' row is stale enough to reclaim.
+    updated_at: datetime
 
 
 class InMemoryConfigRepo:
@@ -88,6 +96,7 @@ class InMemoryIngestStore:
                 attempts=0,
                 last_error_code=None,
                 template_wamid=None,
+                updated_at=datetime.now(UTC),
             )
             self._outbound_meta[outbound.dedupe_key] = row
             self._outbound_by_id[row.id] = outbound.dedupe_key
@@ -270,12 +279,20 @@ class InMemoryIngestStore:
         # the Postgres CTE claim's state transition so tests against either store agree (there is
         # no real concurrency to guard here, but the STATE must move so a claimed row is never
         # re-claimed by a later call and bump can move it back to 'queued' for a retry).
+        # Also reclaim a 'processing' row abandoned by a dead invocation once it is older than the
+        # staleness threshold — mirroring the Postgres predicate so this store does not regress
+        # behind it (a stranded 'processing' row would otherwise be lost forever).
+        now = datetime.now(UTC)
         claims: list[OutboundClaim] = []
         for key, draft in self.outbound.items():
             meta = self._outbound_meta[key]
-            if meta.state != "queued":
+            is_stale_processing = (
+                meta.state == "processing" and now - meta.updated_at >= _PROCESSING_STALE
+            )
+            if meta.state != "queued" and not is_stale_processing:
                 continue
             meta.state = "processing"
+            meta.updated_at = now
             claims.append(
                 OutboundClaim(
                     id=meta.id,

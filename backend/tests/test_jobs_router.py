@@ -90,6 +90,21 @@ async def test_get_with_old_cron_secret_header_but_no_bearer_403() -> None:
     assert resp.status_code == 403
 
 
+async def test_post_with_bearer_header_but_no_x_cron_secret_403() -> None:
+    # Mirror image of the GET test above: a POST carrying the NEW GET-style
+    # `Authorization: Bearer` header (and NO X-Cron-Secret) must NOT be accepted — POST reads
+    # only its own X-Cron-Secret header, so the wrong header on the wrong method fails closed.
+    from app.main import app as fastapi_app
+
+    transport = httpx.ASGITransport(app=fastapi_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/internal/jobs/outbox_drain",
+            headers={"Authorization": f"Bearer {SECRET}"},
+        )
+    assert resp.status_code == 403
+
+
 async def test_post_with_valid_cron_secret_still_works() -> None:
     # Regression: the manual/admin POST + X-Cron-Secret path is unchanged.
     resp = await call("outbox_drain", SECRET)

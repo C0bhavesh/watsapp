@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 from app.store.base import MappingUpsert, OutboundClaim, OutboundDraft
 from app.store.memory import InMemoryIngestStore
 
@@ -42,6 +44,33 @@ async def test_claim_respects_limit() -> None:
     await _seed(store, 3)
     claims = await store.claim_queued_outbound(limit=2)
     assert len(claims) == 2
+
+
+async def test_claim_reclaims_stale_processing_row() -> None:
+    # A row claimed by a drain invocation that was then killed mid-send is stranded in
+    # 'processing'. A later claim MUST reclaim it once it is older than the staleness threshold,
+    # else the message is lost forever (nothing else re-queues a 'processing' row).
+    store = InMemoryIngestStore()
+    await _seed(store, 1)
+    key = "order_created:gid://shopify/Order/1"
+    claim = (await store.claim_queued_outbound())[0]
+    assert claim.dedupe_key == key
+    meta = store._outbound_meta[key]
+    assert meta.state == "processing"
+    # Backdate its updated_at well past the reclaim threshold (simulating a dead invocation).
+    meta.updated_at = datetime.now(UTC) - timedelta(minutes=15)
+    reclaimed = await store.claim_queued_outbound()
+    assert [c.dedupe_key for c in reclaimed] == [key]
+
+
+async def test_claim_does_not_reclaim_recent_processing_row() -> None:
+    # A genuinely-in-flight row (just claimed moments ago, recent updated_at) must NOT be
+    # reclaimed by a concurrent/subsequent claim — that would double-send.
+    store = InMemoryIngestStore()
+    await _seed(store, 1)
+    claim = (await store.claim_queued_outbound())[0]
+    assert store._outbound_meta[claim.dedupe_key].state == "processing"
+    assert await store.claim_queued_outbound() == []
 
 
 async def test_mark_sent_transitions_and_leaves_queue() -> None:

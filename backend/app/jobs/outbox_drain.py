@@ -18,11 +18,12 @@ import logging
 import re
 from dataclasses import dataclass
 
-from app.admin.controls import load_controls
-from app.channels.whatsapp_config import load_whatsapp_config
+from app.admin.controls import AdminControls, load_controls
+from app.channels.whatsapp_config import WhatsAppConfig, load_whatsapp_config
 from app.channels.whatsapp_sender import WhatsAppSendError, send_template
 from app.core.send_policy import send_decision
 from app.deps import Container
+from app.store.base import OutboundClaim, OutboundDraft
 
 logger = logging.getLogger("app.jobs.outbox_drain")
 
@@ -84,6 +85,73 @@ def _meta_error_code(error: str | None) -> int | None:
     return int(match.group(1)) if match else None
 
 
+# Outcome of processing one row, returned by send_one_outbound so each caller can count/branch
+# without re-deriving the row's fate. RETRY covers both a transport error and a non-terminal Meta
+# error (the row is bumped but stays queued for a later run_outbox_drain pass) — neither is a
+# terminal count in the drain's summary, matching its pre-extraction behaviour.
+OUTCOME_SENT = "sent"
+OUTCOME_SUPPRESSED = "suppressed"
+OUTCOME_UNDELIVERABLE = "undeliverable"
+OUTCOME_FAILED = "failed"
+OUTCOME_RETRY = "retry"
+
+
+async def send_one_outbound(
+    c: Container,
+    cfg: WhatsAppConfig,
+    controls: AdminControls,
+    row: OutboundClaim,
+) -> str:
+    """Run the full per-row send state machine for ONE claimed outbound row; return its outcome.
+
+    Shared by ``run_outbox_drain``'s loop and the ``orders/create`` webhook self-invoke path so
+    both send identically. Never raises ``WhatsAppSendError`` — a transport error is logged and the
+    row bumped for a future retry. Nothing here mutates a Shopify order; the outbox only SENDS.
+    """
+    gid = _gid_from_dedupe_key(row.dedupe_key)
+    if gid is None:
+        # Corrupt dedupe_key -> terminal failure (max_attempts=1 flips it to 'failed'
+        # immediately). Never reaches the sender, so the rest of the queue is unaffected.
+        await c.ingest.bump_outbound_attempt(row.id, "bad_dedupe_key", max_attempts=1)
+        return OUTCOME_FAILED
+
+    decision = send_decision(controls.send_mode, controls.allowlist_phones, row.phone_e164)
+    if decision == "suppress":
+        await c.ingest.mark_outbound_suppressed(row.id)
+        return OUTCOME_SUPPRESSED
+
+    payload = _parse_payload(row.payload_json)
+    if payload is None:
+        await c.ingest.mark_outbound_undeliverable(row.id, "bad_payload")
+        return OUTCOME_UNDELIVERABLE
+
+    try:
+        result = await send_template(
+            c.http, cfg, row.phone_e164, payload.template, payload.language,
+            [payload.customer_name, payload.order_name, payload.amount],
+            button_payloads=[f"order:confirm:{gid}", f"order:cancel:{gid}"],
+        )
+    except WhatsAppSendError:
+        # Transport/timeout failure: retryable. Bump and move on — never abort the drain.
+        # The exception text (an httpx network error) carries no secret, but is not logged
+        # to keep the drain output clean; the row id is enough to trace.
+        logger.warning("outbox drain: transport error sending row %s (retry queued)", row.id)
+        await c.ingest.bump_outbound_attempt(row.id, "transport_error")
+        return OUTCOME_RETRY
+
+    if result.ok:
+        await c.ingest.mark_outbound_sent(row.id, result.wamid)
+        await c.ingest.set_mapping_status(gid, "template_sent")
+        return OUTCOME_SENT
+
+    code = _meta_error_code(result.error)
+    if code in _UNDELIVERABLE_CODES:
+        await c.ingest.mark_outbound_undeliverable(row.id, str(code))
+        return OUTCOME_UNDELIVERABLE
+    state = await c.ingest.bump_outbound_attempt(row.id, str(result.status_code))
+    return OUTCOME_FAILED if state == "failed" else OUTCOME_RETRY
+
+
 async def run_outbox_drain(c: Container) -> dict[str, object]:
     controls = await load_controls(c.config)
     if controls.send_mode == "off":
@@ -95,54 +163,16 @@ async def run_outbox_drain(c: Container) -> dict[str, object]:
     rows = await c.ingest.claim_queued_outbound(limit=_CLAIM_LIMIT)
     sent = suppressed = failed = undeliverable = 0
     for row in rows:
-        gid = _gid_from_dedupe_key(row.dedupe_key)
-        if gid is None:
-            # Corrupt dedupe_key -> terminal failure (max_attempts=1 flips it to 'failed'
-            # immediately). Never reaches the sender, so the rest of the queue is unaffected.
-            await c.ingest.bump_outbound_attempt(row.id, "bad_dedupe_key", max_attempts=1)
-            failed += 1
-            continue
-
-        decision = send_decision(controls.send_mode, controls.allowlist_phones, row.phone_e164)
-        if decision == "suppress":
-            await c.ingest.mark_outbound_suppressed(row.id)
-            suppressed += 1
-            continue
-
-        payload = _parse_payload(row.payload_json)
-        if payload is None:
-            await c.ingest.mark_outbound_undeliverable(row.id, "bad_payload")
-            undeliverable += 1
-            continue
-
-        try:
-            result = await send_template(
-                c.http, cfg, row.phone_e164, payload.template, payload.language,
-                [payload.customer_name, payload.order_name, payload.amount],
-                button_payloads=[f"order:confirm:{gid}", f"order:cancel:{gid}"],
-            )
-        except WhatsAppSendError:
-            # Transport/timeout failure: retryable. Bump and move on — never abort the drain.
-            # The exception text (an httpx network error) carries no secret, but is not logged
-            # to keep the drain output clean; the row id is enough to trace.
-            logger.warning("outbox drain: transport error sending row %s (retry queued)", row.id)
-            await c.ingest.bump_outbound_attempt(row.id, "transport_error")
-            continue
-
-        if result.ok:
-            await c.ingest.mark_outbound_sent(row.id, result.wamid)
-            await c.ingest.set_mapping_status(gid, "template_sent")
+        outcome = await send_one_outbound(c, cfg, controls, row)
+        if outcome == OUTCOME_SENT:
             sent += 1
-            continue
-
-        code = _meta_error_code(result.error)
-        if code in _UNDELIVERABLE_CODES:
-            await c.ingest.mark_outbound_undeliverable(row.id, str(code))
+        elif outcome == OUTCOME_SUPPRESSED:
+            suppressed += 1
+        elif outcome == OUTCOME_UNDELIVERABLE:
             undeliverable += 1
-        else:
-            state = await c.ingest.bump_outbound_attempt(row.id, str(result.status_code))
-            if state == "failed":
-                failed += 1
+        elif outcome == OUTCOME_FAILED:
+            failed += 1
+        # OUTCOME_RETRY: bumped but still queued -> not a terminal count, exactly as before.
 
     return {
         "drained": len(rows),
@@ -151,3 +181,40 @@ async def run_outbox_drain(c: Container) -> dict[str, object]:
         "failed": failed,
         "undeliverable": undeliverable,
     }
+
+
+async def send_outbound_now(c: Container, outbound: OutboundDraft, outbound_id: int) -> None:
+    """Send the SINGLE row the orders/create webhook just queued, as a post-ack background task.
+
+    Deliberately NEVER calls ``claim_queued_outbound``: that is a plain, non-atomic
+    ``SELECT ... WHERE state='queued'`` (no ``FOR UPDATE SKIP LOCKED``), so two orders arriving
+    close together would spin up concurrent Vercel instances that could both select and both send
+    the same queued row — a real duplicate-WhatsApp-message bug. This path already knows the exact
+    row it created (``outbound_id``) and processes only that one, with no contention.
+
+    The ``send_mode`` kill switch is honoured exactly like ``run_outbox_drain``: ``off`` returns
+    before touching the row (leaving it queued for a future backstop drain), every other mode is
+    decided per-row by ``send_decision`` inside ``send_one_outbound`` (a suppress never calls Meta).
+    Must never raise: ``send_one_outbound`` already handles transport errors (bump for retry), and
+    any other unexpected error is logged and swallowed so a background task can never crash.
+    """
+    try:
+        controls = await load_controls(c.config)
+        if controls.send_mode == "off":
+            return
+        cfg = await load_whatsapp_config(c.config)
+        if cfg is None:
+            logger.warning(
+                "self-invoke send skipped: whatsapp not configured (row %s)", outbound_id
+            )
+            return
+        row = OutboundClaim(
+            id=outbound_id,
+            dedupe_key=outbound.dedupe_key,
+            phone_e164=outbound.phone_e164,
+            payload_json=outbound.payload_json,
+            attempts=0,
+        )
+        await send_one_outbound(c, cfg, controls, row)
+    except Exception:
+        logger.exception("self-invoke outbound send failed (row %s)", outbound_id)

@@ -55,6 +55,11 @@ class OutboundClaim:
 class IngestResult:
     duplicate: bool
     queued: bool
+    # id of the outbound_messages row this call freshly queued (None when no OutboundDraft was
+    # given, or none was inserted — a duplicate webhook, or the dedupe_key already existed). The
+    # orders/create webhook uses it to send exactly THAT one row via a background task, never the
+    # non-atomic claim_queued_outbound path (two concurrent invocations could both claim one row).
+    outbound_id: int | None = None
 
 
 @dataclass(frozen=True)

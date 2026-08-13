@@ -20,17 +20,22 @@ def outbound(gid: str = "gid://shopify/Order/1") -> OutboundDraft:
 async def test_first_ingest_maps_and_queues() -> None:
     store = InMemoryIngestStore()
     result = await store.ingest_order_created("wh1", "orders/create", mapping(), outbound())
-    assert result == IngestResult(duplicate=False, queued=True)
+    assert (result.duplicate, result.queued) == (False, True)
     assert ("wh1", "orders/create") in store.webhooks
     assert "gid://shopify/Order/1" in store.mappings
     assert "order_created:gid://shopify/Order/1" in store.outbound
+    # The freshly-queued row's own id is surfaced so the orders/create webhook can send exactly
+    # that one row (never the shared non-atomic claim path). It matches the claimable row's id.
+    assert result.outbound_id is not None
+    claims = await store.claim_queued_outbound()
+    assert [claim.id for claim in claims] == [result.outbound_id]
 
 
 async def test_duplicate_webhook_id_is_noop() -> None:
     store = InMemoryIngestStore()
     await store.ingest_order_created("wh1", "orders/create", mapping(), outbound())
     result = await store.ingest_order_created("wh1", "orders/create", mapping(), outbound())
-    assert result == IngestResult(duplicate=True, queued=False)
+    assert result == IngestResult(duplicate=True, queued=False, outbound_id=None)
     assert len(store.outbound) == 1
 
 
@@ -38,15 +43,15 @@ async def test_outbox_dedupe_key_unique_across_webhook_ids() -> None:
     store = InMemoryIngestStore()
     await store.ingest_order_created("wh1", "orders/create", mapping(), outbound())
     result = await store.ingest_order_created("wh2", "orders/create", mapping(), outbound())
-    # mapping upserted, push already queued once
-    assert result == IngestResult(duplicate=False, queued=False)
+    # mapping upserted, push already queued once -> no fresh row, so no outbound_id to send.
+    assert result == IngestResult(duplicate=False, queued=False, outbound_id=None)
     assert len(store.outbound) == 1
 
 
 async def test_ineligible_ingest_maps_without_queueing() -> None:
     store = InMemoryIngestStore()
     result = await store.ingest_order_created("wh1", "orders/create", mapping(), None)
-    assert result == IngestResult(duplicate=False, queued=False)
+    assert result == IngestResult(duplicate=False, queued=False, outbound_id=None)
     assert "gid://shopify/Order/1" in store.mappings and not store.outbound
 
 

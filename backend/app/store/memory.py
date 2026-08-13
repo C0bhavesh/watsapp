@@ -80,6 +80,7 @@ class InMemoryIngestStore:
         self.webhooks.add(key)
         self.mappings[mapping.order_gid] = mapping
         queued = False
+        outbound_id: int | None = None
         if outbound is not None and outbound.dedupe_key not in self.outbound:
             self.outbound[outbound.dedupe_key] = outbound
             row = _OutboundRow(
@@ -93,7 +94,8 @@ class InMemoryIngestStore:
             self._outbound_by_id[row.id] = outbound.dedupe_key
             self._outbound_next_id += 1
             queued = True
-        return IngestResult(duplicate=False, queued=queued)
+            outbound_id = row.id
+        return IngestResult(duplicate=False, queued=queued, outbound_id=outbound_id)
 
     async def upsert_customer(self, customer: Customer) -> None:
         self.customers[customer.gid] = customer

@@ -79,6 +79,35 @@ def _install_sender(monkeypatch: pytest.MonkeyPatch, sender: FakeSender) -> None
     monkeypatch.setattr("app.jobs.outbox_drain.send_template", sender)
 
 
+async def test_send_one_outbound_sends_and_transitions(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The shared per-row helper (reused by both run_outbox_drain and the orders/create self-invoke)
+    # runs the full state machine for ONE claimed row and reports its outcome.
+    from app.admin.controls import load_controls
+    from app.channels.whatsapp_config import load_whatsapp_config
+    from app.jobs.outbox_drain import send_one_outbound
+
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    gid = "gid://shopify/Order/1"
+    await _seed_row(gid)
+    sender = FakeSender(SendResult(ok=True, status_code=200, wamid="wamid.1", error=None))
+    _install_sender(monkeypatch, sender)
+
+    controls = await load_controls(c.config)
+    cfg = await load_whatsapp_config(c.config)
+    assert cfg is not None
+    (row,) = await c.ingest.claim_queued_outbound()
+
+    outcome = await send_one_outbound(c, cfg, controls, row)
+
+    assert outcome == "sent"
+    assert sender.calls[0]["button_payloads"] == [f"order:confirm:{gid}", f"order:cancel:{gid}"]
+    views = {v.dedupe_key: v for v in await c.ingest.recent_outbound(10)}
+    assert views[f"order_created:{gid}"].state == "sent"
+    mappings = {m.order_gid: m for m in await c.ingest.recent_mappings(10)}
+    assert mappings[gid].status == "template_sent"
+
+
 async def test_send_mode_off_short_circuits(monkeypatch: pytest.MonkeyPatch) -> None:
     c = get_container()
     await _seed_row("gid://shopify/Order/1")

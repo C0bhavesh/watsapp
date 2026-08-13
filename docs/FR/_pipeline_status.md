@@ -45,7 +45,7 @@
 | Phase 5 — Flow C Gemini Q&A + knowledge base | PENDING (gate: Phase 4 + D-2 + Q14 content) | LiteLLM/Gemini provider layer [copy from cafe] · order-intent JSON engine w/ hardened parser [adapt] · `order_resolver` ownership chain [NEW] · `app/knowledge/` loader+assembler+cache+seeds [adapt] · windowed memory [copy] · hi/en/hinglish/gu. Implementation plan not yet written (written one phase ahead, by design). |
 | Phase 6 — Parallel run + cutover | PENDING (gate: client Q8) | Run alongside current tool, then switch same-day. |
 
-| Deploy workflow — GitHub → Vercel CI/CD | **REPO MOVED (2026-07-28): github.com/C0bhavesh/watsapp (private)** — supersedes the earlier Devpanchal37/thetavas-order-bot | Original repo created under Devpanchal37 to stay separate from the old WATI bridge (also under C0bhavesh) — but the environment's authenticated GitHub identity here is C0bhavesh, which could not see/push to the Devpanchal37 repo (`git fetch`/`gh repo view` both failed to resolve it — not a permissions gap, a different-account gap). **Owner decision (2026-07-28): push under C0bhavesh anyway** ("nothing to do with wati") — new repo `watsapp` created via `gh repo create C0bhavesh/watsapp --private`, `origin` repointed, `main` pushed (17 commits incl. all of Phases 1–3). Vercel connection still deferred by owner until code is complete — once connected, CLAUDE.md rule 7 applies in full (every push to main = prod deploy → explicit approval). |
+| Deploy workflow — GitHub → Vercel CI/CD | **✅ VERCEL IS CONNECTED AND AUTO-DEPLOYING (confirmed 2026-08-13) — corrects the stale "deferred" note below** | Project `tavas/thetavas-bot` (Vercel CLI confirms, logged in as `c0bhavesh`), production alias `thetavas-bot.vercel.app` live for 14+ days, auto-deploys on every push to `main` (deployment history shows continuous Production deploys going back 6+ days at minimum, i.e. this has been true across multiple recent sessions, not just today). Verified 2026-08-13 by hitting `/health` on the production alias → `200 {"status":"ok","service":"thetavas-order-bot"}`, matching the just-pushed commit. `DATABASE_URL` and `ADMIN_PASSWORD` are set as Vercel project env vars (owner-confirmed). **CLAUDE.md rule 7 is in full effect for every push from now on — treat every `git push origin main` as an immediate production deploy, not a staging step.** Open question: whether Shopify/Meta webhooks are actually pointed at this deployment yet, or whether WATI is still the live traffic handler (cutover per Q8 not yet confirmed done) — deployment being live does not by itself mean it's receiving real customer webhook traffic. — Original repo-move history (2026-07-28, still accurate): repo created under `C0bhavesh/watsapp` (private) after a different-GitHub-account gap blocked using the original `Devpanchal37/thetavas-order-bot`; owner approved pushing under `C0bhavesh` anyway. |
 | **First WhatsApp template message DELIVERED (2026-07-28)** | ✅ Meta channel E2E proven pre-code | `order_confirmation_cod` **hi + gu APPROVED ~minutes; en PENDING at check** (retry shortly). Hindi template sent to owner's verified test number (+91 7575072795) with sample data + both quick-reply button payloads (`order:confirm/cancel:gid://...TEST123`) — Meta accepted (`message_status: accepted`). NOTE: button taps currently go nowhere (no webhook yet — that's Phase 2/3); payload format already matches the v1.1 design. |
 | Meta dev setup — WABA verified + templates created | **DONE / LIVE-VERIFIED (2026-07-28)** | App ID `771818472295971` ("Demo") · Test number `+1 555-651-8147` (quality GREEN, CLOUD_API) · Phone Number ID `1298805403309058` · WABA `2454816495000045` ("Test WhatsApp Business Account"). **Permanent system-user token working** (never expires; system user = "Conversions API System User" — WABA asset assignment was initially missing, fixed by owner; a dedicated `thetavas-bot` system user is a later nice-to-have). App secret received. Secrets in session scratchpad only → go into Vercel env/Fernet vault in Phase 1. **All 3 templates created via API: `order_confirmation_cod` en/hi/gu — category accepted as UTILITY (₹0.12 pricing assumption validated), status PENDING** (owner says ≈2–3 min to approve; re-check next session). Remaining for first live send: owner adds 1–5 verified test-recipient numbers on the API Setup page + shares one to message. |
 
@@ -53,14 +53,17 @@
 
 - **🟠 Phase 5 deferred / later (2026-08-10)** — items intentionally OUT of the confirm/cancel v1,
   none of which block the flow working:
-  1. **Self-invoke-after-webhook latency** — the outbox drain runs on cron cadence only; a
-     Shopify order → template send waits for the next cron tick. A self-invoke right after the
-     `orders/create` webhook would cut that latency. Not built (cron cadence is enough for v1);
-     `dedupe_key UNIQUE` already guarantees exactly-once regardless of trigger.
+  1. ~~**Self-invoke-after-webhook latency**~~ **DONE (2026-08-13):** no cron exists on the live
+     deployment and the owner chose the webhook-self-invoke over cron polling — the `orders/create`
+     handler now sends the row it just queued via `BackgroundTasks` (`send_outbound_now`) right
+     after acking Shopify. `dedupe_key UNIQUE` still guarantees exactly-once regardless of trigger.
   2. **`FOR UPDATE SKIP LOCKED` multi-instance drain** — `claim_queued_outbound` is a plain
-     `SELECT ... WHERE state='queued' ORDER BY created_at LIMIT` + per-row state transition, safe
-     for the single-instance cron at v1 volume (100–500 orders/day). If the drain is ever run on
-     multiple concurrent workers, add `FOR UPDATE SKIP LOCKED` to avoid double-sends.
+     `SELECT ... WHERE state='queued' ORDER BY created_at LIMIT` + per-row state transition, still
+     safe for the single-instance backstop `run_outbox_drain`. **The self-invoke path (item 1)
+     deliberately does NOT use `claim_queued_outbound`** — it processes only its own known row id,
+     so concurrent orders never contend on the shared queue (that was the whole point of threading
+     `IngestResult.outbound_id` through). If `run_outbox_drain` is ever run on multiple concurrent
+     workers, add `FOR UPDATE SKIP LOCKED` to avoid double-sends.
   3. **Literal-YES free-text cancel fallback** — v1 is buttons-only. A `pending_actions` TTL row +
      a "reply YES to confirm" free-text path (for customers who type instead of tapping) is
      deferred; the `pending_actions` table already exists for it.

@@ -282,18 +282,24 @@ class PostgresIngestStore:
                     mapping.is_cod,
                 )
                 queued = False
+                outbound_id: int | None = None
                 if outbound is not None:
-                    result = await conn.execute(
+                    # RETURNING id yields the new row's id on insert, and NOTHING on an
+                    # ON CONFLICT DO NOTHING collision (fetchval -> None) — so a None outbound_id
+                    # is exactly "no fresh row was queued", the same signal queued=False carries.
+                    new_id = await conn.fetchval(
                         "INSERT INTO outbound_messages (dedupe_key, kind, phone_e164, "
                         "payload_json) VALUES ($1, $2, $3, $4) ON CONFLICT (dedupe_key) "
-                        "DO NOTHING",
+                        "DO NOTHING RETURNING id",
                         outbound.dedupe_key,
                         outbound.kind,
                         outbound.phone_e164,
                         outbound.payload_json,
                     )
-                    queued = _rows_affected(result) > 0
-                return IngestResult(duplicate=False, queued=queued)
+                    if new_id is not None:
+                        outbound_id = int(new_id)
+                        queued = True
+                return IngestResult(duplicate=False, queued=queued, outbound_id=outbound_id)
 
     async def upsert_customer(self, customer: Customer) -> None:
         async with self._pool.acquire() as conn:

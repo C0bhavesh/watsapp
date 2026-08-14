@@ -131,17 +131,20 @@ class InMemoryIngestStore:
         self.mappings[mapping.order_gid] = mapping
         self._mapping_created_at.setdefault(mapping.order_gid, datetime.now(UTC))
         self._mapping_updated_at[mapping.order_gid] = datetime.now(UTC)
-        queued = self._enqueue(outbound) if outbound is not None else False
-        return IngestResult(duplicate=False, queued=queued)
+        outbound_id = self._enqueue(outbound) if outbound is not None else None
+        return IngestResult(
+            duplicate=False, queued=outbound_id is not None, outbound_id=outbound_id
+        )
 
-    def _enqueue(self, outbound: OutboundDraft) -> bool:
+    def _enqueue(self, outbound: OutboundDraft) -> int | None:
         """Queue one draft, idempotent on dedupe_key (mirrors Postgres ON CONFLICT DO NOTHING).
 
         Shared by ingest_order_created (original push) and enqueue_outbound (reminder re-queue) so
         the outbox bookkeeping (id, state, updated_at, id index) is created identically for both.
+        Returns the new row's id, or None if the dedupe_key already existed (nothing queued).
         """
         if outbound.dedupe_key in self.outbound:
-            return False
+            return None
         self.outbound[outbound.dedupe_key] = outbound
         row = _OutboundRow(
             id=self._outbound_next_id,
@@ -154,7 +157,7 @@ class InMemoryIngestStore:
         self._outbound_meta[outbound.dedupe_key] = row
         self._outbound_by_id[row.id] = outbound.dedupe_key
         self._outbound_next_id += 1
-        return True
+        return row.id
 
     async def upsert_customer(self, customer: Customer) -> None:
         self.customers[customer.gid] = customer
@@ -323,7 +326,7 @@ class InMemoryIngestStore:
         return {k: self.outbound[k] for k in dedupe_keys if k in self.outbound}
 
     async def enqueue_outbound(self, outbound: OutboundDraft) -> bool:
-        return self._enqueue(outbound)
+        return self._enqueue(outbound) is not None
 
     async def delete_by_phone(self, phone_e164: str) -> DeletionResult:
         removed_mappings = [
@@ -436,6 +439,31 @@ class InMemoryIngestStore:
             if len(claims) >= limit:
                 break
         return claims
+
+    async def claim_outbound_by_id(self, id: int) -> OutboundClaim | None:
+        # Atomically claim ONE specific row by id — the inline order-confirmation send path
+        # (jobs.outbox_drain.send_inline_outbound) targets only the row it just created. Flip
+        # 'queued' -> 'processing' exactly like claim_queued_outbound so a concurrent/backstop
+        # run_outbox_drain can never also claim and double-send it. Returns None if the row is
+        # missing or not 'queued' (already claimed/sent/suppressed) -> the caller sends nothing.
+        # Unlike claim_queued_outbound this does NOT reclaim a stale 'processing' row: the inline
+        # path only ever targets a just-queued row, and stale reclaim stays the drain's job.
+        key = self._outbound_by_id.get(id)
+        if key is None:
+            return None
+        meta = self._outbound_meta.get(key)
+        if meta is None or meta.state != "queued":
+            return None
+        meta.state = "processing"
+        meta.updated_at = datetime.now(UTC)
+        draft = self.outbound[key]
+        return OutboundClaim(
+            id=meta.id,
+            dedupe_key=key,
+            phone_e164=draft.phone_e164,
+            payload_json=draft.payload_json,
+            attempts=meta.attempts,
+        )
 
     async def mark_outbound_sent(self, id: int, wamid: str | None) -> None:
         meta = self._meta_by_id(id)

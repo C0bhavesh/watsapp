@@ -18,6 +18,7 @@ from app.channels.shopify_orders import (
 from app.channels.shopify_signature import verify_shopify_hmac
 from app.config.crypto import VaultError
 from app.deps import Container, get_container
+from app.jobs.outbox_drain import send_inline_outbound
 from app.shopify.models import Customer, Fulfillment, Order
 from app.shopify.subscriptions import REQUIRED_TOPICS
 from app.store.base import MappingUpsert, OutboundDraft
@@ -277,17 +278,20 @@ async def shopify_webhook(request: Request) -> Response:
     # The mapping + outbox write goes FIRST: that row IS the customer's confirmation message,
     # while the mirror has no live reader yet. Mirroring afterwards (and non-fatally, inside
     # _mirror_order) means a mirror hiccup costs a stale row, never the customer's message.
-    #
-    # The webhook ONLY queues the order and acknowledges Shopify — it never sends the WhatsApp
-    # message inline and never via a background task. On Vercel's Python runtime, FastAPI
-    # BackgroundTasks do NOT reliably run after the response reaches the client (they execute
-    # inside the request cycle and can be killed on instance reclaim — ADR-001, and the
-    # 2026-07-28 "no reliable process-after-response" error_learning). Delivery is handled
-    # entirely by the 1-minute cron sender (`/internal/jobs/outbox_drain`), which atomically
-    # claims queued rows and sends them; `dedupe_key UNIQUE` keeps it exactly-once per order.
     result = await c.ingest.ingest_order_created(webhook_id, topic, mapping, outbound)
 
     mirror_order = order_from_webhook_payload(payload)
     if mirror_order is not None:
         await _mirror_order(c, mirror_order)
+
+    # Send the confirmation INLINE — a genuine `await` before the ack (ADR-001 amendment,
+    # owner-directed 2026-08-15). The prior queue+external-cron design is kept as a backstop
+    # (`/internal/jobs/outbox_drain` still exists), but the external scheduler stopped working, so
+    # the PRIMARY send now runs here. This is NOT a BackgroundTask (which does not reliably run
+    # after the response on Vercel's Python runtime); the ack is legitimately delayed by the send,
+    # which is why send_inline_outbound bounds the WhatsApp call with a SHORT timeout so the whole
+    # handler stays under Shopify's <5s ack budget. It claims ONLY the row just queued (by id, an
+    # atomic queued->processing flip), so the backstop drain can never double-send it; it NEVER
+    # raises, so a send failure/timeout can never turn the 200 ack into a 500.
+    await send_inline_outbound(c, result.outbound_id)
     return JSONResponse({"ok": True, "duplicate": result.duplicate, "queued": result.queued})

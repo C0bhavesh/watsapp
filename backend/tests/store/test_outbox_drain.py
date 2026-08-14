@@ -73,6 +73,64 @@ async def test_claim_does_not_reclaim_recent_processing_row() -> None:
     assert await store.claim_queued_outbound() == []
 
 
+async def test_ingest_returns_the_new_outbound_row_id() -> None:
+    # The inline send path needs the freshly-queued row's id to claim exactly it.
+    store = InMemoryIngestStore()
+    gid = "gid://shopify/Order/1"
+    result = await store.ingest_order_created("wh1", "orders/create", _mapping(gid), _draft(gid))
+    assert result.queued is True
+    assert result.outbound_id is not None
+    claim = await store.claim_outbound_by_id(result.outbound_id)
+    assert claim is not None
+    assert claim.dedupe_key == f"order_created:{gid}"
+
+
+async def test_ingest_outbound_id_none_when_nothing_queued() -> None:
+    store = InMemoryIngestStore()
+    gid = "gid://shopify/Order/1"
+    # No draft -> nothing queued.
+    r1 = await store.ingest_order_created("wh1", "orders/create", _mapping(gid), None)
+    assert r1.queued is False
+    assert r1.outbound_id is None
+    # Duplicate dedupe_key -> ON CONFLICT DO NOTHING -> no fresh row (fresh webhook_id so it is
+    # not a webhook-level duplicate; the outbox row already exists from a prior order).
+    await store.ingest_order_created("wh2", "orders/create", _mapping(gid), _draft(gid))
+    r3 = await store.ingest_order_created("wh3", "orders/create", _mapping(gid), _draft(gid))
+    assert r3.outbound_id is None  # dedupe_key collided -> nothing re-queued
+
+
+async def test_claim_outbound_by_id_claims_only_that_row() -> None:
+    # The inline path must touch ONLY the row it created, never other queued rows (which the
+    # backstop drain owns) — proving no shared-claim interaction.
+    store = InMemoryIngestStore()
+    await _seed(store, 2)
+    one = "order_created:gid://shopify/Order/1"
+    two = "order_created:gid://shopify/Order/2"
+    target_id = store._outbound_meta[one].id
+
+    claim = await store.claim_outbound_by_id(target_id)
+
+    assert claim is not None
+    assert claim.dedupe_key == one
+    assert store._outbound_meta[one].state == "processing"
+    assert store._outbound_meta[two].state == "queued"  # untouched
+
+
+async def test_claim_outbound_by_id_returns_none_when_already_claimed() -> None:
+    # A second claim of the same row (e.g. a racing backstop drain) must get None -> no double-send.
+    store = InMemoryIngestStore()
+    await _seed(store, 1)
+    key = "order_created:gid://shopify/Order/1"
+    target_id = store._outbound_meta[key].id
+    assert await store.claim_outbound_by_id(target_id) is not None
+    assert await store.claim_outbound_by_id(target_id) is None
+
+
+async def test_claim_outbound_by_id_unknown_id_returns_none() -> None:
+    store = InMemoryIngestStore()
+    assert await store.claim_outbound_by_id(999) is None
+
+
 async def test_mark_sent_transitions_and_leaves_queue() -> None:
     store = InMemoryIngestStore()
     await _seed(store, 2)

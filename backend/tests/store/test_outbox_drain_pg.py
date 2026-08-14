@@ -148,6 +148,42 @@ async def test_stale_processing_row_reclaimed_recent_is_not(pool: LazyPool) -> N
     assert await _state(pool, stale_id) == "processing"
 
 
+async def test_ingest_returns_outbound_id_and_claim_by_id_is_atomic(pool: LazyPool) -> None:
+    # The inline send path: ingest_order_created returns the freshly-queued row's id, and
+    # claim_outbound_by_id atomically flips ONLY that row 'queued' -> 'processing'. A second claim
+    # of the same id returns None (a racing backstop drain can never double-send it), and an
+    # UNRELATED queued row is left untouched (the inline path never touches the generic queue).
+    store = PostgresIngestStore(pool)
+    mine_gid = f"gid://shopify/Order/{uuid.uuid4()}"
+    other_gid = f"gid://shopify/Order/{uuid.uuid4()}"
+    phone = f"+91{uuid.uuid4().int % 10**10:010d}"
+    other_phone = f"+91{uuid.uuid4().int % 10**10:010d}"
+    draft = OutboundDraft(
+        dedupe_key=f"order_created:{mine_gid}", kind="order_confirmation",
+        phone_e164=phone, payload_json="{}",
+    )
+    result = await store.ingest_order_created(
+        f"wh-{uuid.uuid4()}", "orders/create", _mapping(mine_gid, phone), draft
+    )
+    assert result.outbound_id is not None
+    await _seed(store, other_gid, other_phone)  # unrelated queued row
+
+    claim = await store.claim_outbound_by_id(result.outbound_id)
+
+    assert claim is not None
+    assert claim.dedupe_key == f"order_created:{mine_gid}"
+    assert await _state(pool, result.outbound_id) == "processing"
+    # A second claim of the same row -> None (already out of 'queued').
+    assert await store.claim_outbound_by_id(result.outbound_id) is None
+    # The unrelated queued row was never touched.
+    async with pool.acquire() as conn:
+        other_state = await conn.fetchval(
+            "SELECT state FROM outbound_messages WHERE dedupe_key = $1",
+            f"order_created:{other_gid}",
+        )
+    assert other_state == "queued"
+
+
 async def test_bump_reaches_failed_at_cap(pool: LazyPool) -> None:
     store = PostgresIngestStore(pool)
     gid = f"gid://shopify/Order/{uuid.uuid4()}"

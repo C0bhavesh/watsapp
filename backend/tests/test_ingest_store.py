@@ -24,7 +24,9 @@ async def test_first_ingest_maps_and_queues() -> None:
     assert ("wh1", "orders/create") in store.webhooks
     assert "gid://shopify/Order/1" in store.mappings
     assert "order_created:gid://shopify/Order/1" in store.outbound
-    assert result == IngestResult(duplicate=False, queued=True)
+    # outbound_id carries the freshly-queued row's id (for the inline send to claim exactly it).
+    assert result.outbound_id is not None
+    assert result == IngestResult(duplicate=False, queued=True, outbound_id=result.outbound_id)
 
 
 async def test_duplicate_webhook_id_is_noop() -> None:

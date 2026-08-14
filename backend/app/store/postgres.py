@@ -375,19 +375,24 @@ class PostgresIngestStore:
                     mapping.financial_status_at_create,
                     mapping.is_cod,
                 )
-                queued = False
+                outbound_id: int | None = None
                 if outbound is not None:
-                    result = await conn.execute(
+                    # RETURNING id gives the freshly-queued row's id (None on ON CONFLICT DO
+                    # NOTHING) so the inline send (send_inline_outbound) can claim exactly it.
+                    outbound_id = await conn.fetchval(
                         "INSERT INTO outbound_messages (dedupe_key, kind, phone_e164, "
                         "payload_json) VALUES ($1, $2, $3, $4) ON CONFLICT (dedupe_key) "
-                        "DO NOTHING",
+                        "DO NOTHING RETURNING id",
                         outbound.dedupe_key,
                         outbound.kind,
                         outbound.phone_e164,
                         outbound.payload_json,
                     )
-                    queued = _rows_affected(result) > 0
-                return IngestResult(duplicate=False, queued=queued)
+                return IngestResult(
+                    duplicate=False,
+                    queued=outbound_id is not None,
+                    outbound_id=outbound_id,
+                )
 
     async def upsert_customer(self, customer: Customer) -> None:
         async with self._pool.acquire() as conn:
@@ -915,6 +920,37 @@ class PostgresIngestStore:
             )
             for r in rows
         ]
+
+    async def claim_outbound_by_id(self, id: int) -> OutboundClaim | None:
+        # Atomic single-row claim by id for the inline send path (send_inline_outbound): flip the
+        # ONE just-created row 'queued' -> 'processing' in one statement, FOR UPDATE SKIP LOCKED so
+        # a concurrent/backstop run_outbox_drain's claim skips it — the row can never be claimed by
+        # both, so it is never double-sent. WHERE state = 'queued' only (no stale-'processing'
+        # reclaim here): the inline path only ever targets a freshly-queued row; reclaiming an
+        # abandoned in-flight row stays claim_queued_outbound's job. Returns None when the row is
+        # not (or no longer) 'queued' -> the caller sends nothing.
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "WITH claimed AS ("
+                    " SELECT id FROM outbound_messages"
+                    " WHERE id = $1 AND state = 'queued'"
+                    " FOR UPDATE SKIP LOCKED"
+                    ")"
+                    " UPDATE outbound_messages SET state = 'processing', updated_at = now()"
+                    " WHERE id IN (SELECT id FROM claimed)"
+                    " RETURNING id, dedupe_key, phone_e164, payload_json, attempts",
+                    id,
+                )
+        if row is None:
+            return None
+        return OutboundClaim(
+            id=int(row["id"]),
+            dedupe_key=str(row["dedupe_key"]),
+            phone_e164=str(row["phone_e164"]),
+            payload_json=str(row["payload_json"]),
+            attempts=int(row["attempts"]),
+        )
 
     async def mark_outbound_sent(self, id: int, wamid: str | None) -> None:
         async with self._pool.acquire() as conn:

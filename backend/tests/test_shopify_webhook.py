@@ -89,20 +89,18 @@ async def test_orders_create_ingests_and_queues() -> None:
     assert draft.phone_e164 == "+919664290413"
 
 
-async def test_webhook_queues_but_never_sends_whatsapp(monkeypatch: pytest.MonkeyPatch) -> None:
-    # ADR-001 regression: the webhook only queues + acks Shopify. It must NEVER run any send
-    # logic itself — not inline, not via a background task. Delivery is the 1-minute cron's job
-    # (`send_one_outbound`). We patch `send_template` at its SOURCE module
-    # (`app.channels.whatsapp_sender`, where it is defined), not at the drain module's import
-    # location — so the guard holds even if a FUTURE change added a direct
-    # `from app.channels.whatsapp_sender import send_template` call inside shopify_webhook.py
-    # itself, bypassing the drain module entirely. `send_one_outbound` is likewise patched at its
-    # own definition site (the drain module). The row is left `queued` for the cron to pick up.
+async def test_webhook_does_not_send_inline_when_send_mode_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The inline send (ADR-001 amendment) honours the send_mode kill switch exactly like the
+    # drain: under the default `off` mode it claims nothing and sends nothing, leaving the row
+    # `queued` for the backstop drain. We patch `send_template` at its SOURCE module and
+    # `send_one_outbound` at its definition site so the guard holds regardless of import path.
     import app.channels.whatsapp_sender as whatsapp_sender
     import app.jobs.outbox_drain as drain
 
     def _boom(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("the webhook path must not send WhatsApp — the cron does that")
+        raise AssertionError("send_mode off must not send inline")
 
     monkeypatch.setattr(whatsapp_sender, "send_template", _boom)
     monkeypatch.setattr(drain, "send_one_outbound", _boom)
@@ -605,3 +603,181 @@ async def test_oversized_field_is_clipped_to_256() -> None:
     assert resp.status_code == 200
     stored = get_container().ingest.mappings["gid://shopify/Order/longname"]  # type: ignore[attr-defined]
     assert len(stored.order_name) == 256
+
+
+# --- Inline order-confirmation send (ADR-001 amendment, 2026-08-15) ---------------------------
+#
+# The webhook now sends the confirmation INLINE (a genuine await before the ack), bounded by a
+# short timeout, claiming ONLY the row it just queued. These tests drive the real ASGI handler
+# and assert the send happened within the SAME request/response cycle (the fake sender records
+# its calls during the POST), that the ack is always 200 even when the send fails/raises, and
+# that the send_mode kill switch and single-row isolation both hold.
+
+
+class _RecordingSender:
+    """Records send_template calls made during a request; returns/raises a scripted result."""
+
+    def __init__(self, result: object) -> None:
+        self.calls: list[dict[str, object]] = []
+        self._result = result
+
+    async def __call__(
+        self, http, cfg, to, template_name, language, body_params,
+        button_payloads=(), timeout=20.0,
+    ):
+        self.calls.append(
+            {"to": to, "template": template_name, "button_payloads": list(button_payloads),
+             "timeout": timeout}
+        )
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
+
+
+async def _enable_live_sending() -> None:
+    from app.admin.controls import AdminControls, save_controls
+
+    c = get_container()
+    await c.config.set_secret("whatsapp:access_token", "tok")
+    await c.config.set_secret("whatsapp:app_secret", "sec")
+    await c.config.set_secret("whatsapp:verify_token", "ver")
+    await c.config.set_plain("whatsapp:phone_number_id", "1298805403309058")
+    await c.config.set_plain("whatsapp:waba_id", "2454816495000045")
+    await c.config.set_plain("whatsapp:api_version", "v23.0")
+    await save_controls(c.config, AdminControls(send_mode="live"))
+
+
+async def test_inline_send_fires_within_the_webhook_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.channels.whatsapp_sender import SendResult
+
+    await _enable_live_sending()
+    sender = _RecordingSender(SendResult(ok=True, status_code=200, wamid="wamid.1", error=None))
+    monkeypatch.setattr("app.jobs.outbox_drain.send_template", sender)
+
+    gid = "gid://shopify/Order/inline1"
+    body = json.dumps(payload(gid)).encode()
+    resp = await post(body, headers(body, webhook_id="wh-inline1"))
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "duplicate": False, "queued": True}
+    # The send happened inline (recorded during the handler), with the confirm/cancel buttons and
+    # the SHORT inline timeout (distinct from the cron 20s default).
+    assert len(sender.calls) == 1
+    assert sender.calls[0]["button_payloads"] == [f"order:confirm:{gid}", f"order:cancel:{gid}"]
+    assert sender.calls[0]["timeout"] == 3.0
+    # The row was marked sent by the inline path -> nothing left for the backstop drain.
+    store = get_container().ingest
+    assert await store.claim_queued_outbound() == []
+    views = {v.dedupe_key: v for v in await store.recent_outbound(10)}
+    assert views[f"order_created:{gid}"].state == "sent"
+
+
+async def test_inline_send_failure_still_acks_200(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.channels.whatsapp_sender import WhatsAppSendError
+
+    await _enable_live_sending()
+    # A transport error inside the sender must not turn the ack into a 500.
+    sender = _RecordingSender(WhatsAppSendError("network down"))
+    monkeypatch.setattr("app.jobs.outbox_drain.send_template", sender)
+
+    gid = "gid://shopify/Order/inlinefail"
+    body = json.dumps(payload(gid)).encode()
+    resp = await post(body, headers(body, webhook_id="wh-inlinefail"))
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "duplicate": False, "queued": True}
+    assert len(sender.calls) == 1
+    # The transport error bumped the row back to 'queued' for the backstop drain to retry.
+    store = get_container().ingest
+    views = {v.dedupe_key: v for v in await store.recent_outbound(10)}
+    assert views[f"order_created:{gid}"].state == "queued"
+
+
+async def test_inline_send_unexpected_error_never_500s(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Even an UNEXPECTED error deeper in the inline path (not a WhatsAppSendError) must never
+    # propagate out and 500 the signed delivery — send_inline_outbound's outer guard swallows it.
+    await _enable_live_sending()
+
+    async def _boom(*_args: object, **_kwargs: object):
+        raise RuntimeError("unexpected")
+
+    # claim_outbound_by_id lives on the ingest store; make it raise an unexpected error mid-path.
+    store = get_container().ingest
+    monkeypatch.setattr(store, "claim_outbound_by_id", _boom)
+
+    gid = "gid://shopify/Order/inlineboom"
+    body = json.dumps(payload(gid)).encode()
+    resp = await post(body, headers(body, webhook_id="wh-inlineboom"))
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "duplicate": False, "queued": True}
+
+
+async def test_inline_send_suppressed_in_shadow_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.admin.controls import AdminControls, save_controls
+    from app.channels.whatsapp_sender import SendResult
+
+    await _enable_live_sending()
+    await save_controls(get_container().config, AdminControls(send_mode="shadow"))
+    sender = _RecordingSender(SendResult(ok=True, status_code=200, wamid="w", error=None))
+    monkeypatch.setattr("app.jobs.outbox_drain.send_template", sender)
+
+    gid = "gid://shopify/Order/shadow"
+    body = json.dumps(payload(gid)).encode()
+    resp = await post(body, headers(body, webhook_id="wh-shadow"))
+
+    assert resp.status_code == 200
+    assert sender.calls == []  # shadow -> zero real Meta calls
+    store = get_container().ingest
+    views = {v.dedupe_key: v for v in await store.recent_outbound(10)}
+    assert views[f"order_created:{gid}"].state == "suppressed"
+
+
+async def test_inline_send_touches_only_its_own_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Two orders arriving one after another: each webhook's inline send affects ONLY the row it
+    # created (no shared-claim interaction). We pre-seed an UNRELATED queued row and prove the
+    # first order's inline send never touches it, then the second order sends its own row.
+    from app.channels.whatsapp_sender import SendResult
+    from app.store.base import MappingUpsert, OutboundDraft
+
+    await _enable_live_sending()
+    sender = _RecordingSender(SendResult(ok=True, status_code=200, wamid="w", error=None))
+    monkeypatch.setattr("app.jobs.outbox_drain.send_template", sender)
+
+    store = get_container().ingest
+    # An unrelated queued row that belongs to the backstop drain, not the inline path.
+    other_gid = "gid://shopify/Order/other"
+    await store.ingest_order_created(
+        "wh-other", "orders/create",
+        MappingUpsert(
+            order_gid=other_gid, order_name="tavasX", order_number_int=9,
+            phone_e164="+911111111111", customer_name="X", email=None, language="en",
+            financial_status_at_create="PENDING", is_cod=True,
+        ),
+        OutboundDraft(
+            dedupe_key=f"order_created:{other_gid}", kind="order_confirmation",
+            phone_e164="+911111111111", payload_json="{}",
+        ),
+    )
+
+    gid_a = "gid://shopify/Order/isoA"
+    resp_a = await post(json.dumps(payload(gid_a)).encode(), headers(
+        json.dumps(payload(gid_a)).encode(), webhook_id="wh-isoA"))
+    assert resp_a.status_code == 200
+
+    # Only order A's row was sent; the unrelated row is still queued (untouched by the inline path).
+    assert [call["button_payloads"][0] for call in sender.calls] == [f"order:confirm:{gid_a}"]
+    views = {v.dedupe_key: v for v in await store.recent_outbound(10)}
+    assert views[f"order_created:{gid_a}"].state == "sent"
+    assert views[f"order_created:{other_gid}"].state == "queued"
+
+    gid_b = "gid://shopify/Order/isoB"
+    resp_b = await post(json.dumps(payload(gid_b)).encode(), headers(
+        json.dumps(payload(gid_b)).encode(), webhook_id="wh-isoB"))
+    assert resp_b.status_code == 200
+    # Order B sent its OWN row; still nothing touched the unrelated backstop row.
+    views = {v.dedupe_key: v for v in await store.recent_outbound(10)}
+    assert views[f"order_created:{gid_b}"].state == "sent"
+    assert views[f"order_created:{other_gid}"].state == "queued"

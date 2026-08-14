@@ -38,6 +38,52 @@ reverted the same day for precisely this reason.)
 constraint. Push latency is at most the ~1-minute cron cadence. No Meta/LLM call ever happens
 inside the Shopify webhook request.
 
+### Amendment 2026-08-15 — INLINE send is now the PRIMARY trigger (owner-directed)
+
+**Status:** ACCEPTED (owner-directed reversal, live production code). The original decision
+above (queue → external scheduler → atomic-claim → send) is NOT erased — it remains the design
+of record for the drain machinery, and the drain endpoint is kept as a backstop. This amendment
+records that the PRIMARY send trigger has moved back into the webhook request, inline.
+
+**Context (what changed).** The external scheduler the owner relied on to hit
+`/internal/jobs/outbox_drain` (cron-job.org) stopped working, so queued confirmations were not
+being sent at all. The owner was presented with the tradeoffs — explicitly including that an
+earlier same-day attempt to "send inline" via FastAPI `BackgroundTasks` was rejected because
+BackgroundTasks do not reliably run after the response on Vercel's buffered Python runtime — and
+chose to proceed with a **genuine inline `await`** rather than continue depending on an external
+cron service for the primary order-confirmation send.
+
+**Decision.** After its existing fast DB writes (`ingest_order_created` + best-effort mirror),
+the `orders/create` handler `await`s the send **inline**, before constructing the 200 response
+(`jobs.outbox_drain.send_inline_outbound`). This is NOT `BackgroundTasks`/`create_task`/any
+fire-and-hope mechanism — it is a real awaited call, so Shopify's ack IS legitimately delayed by
+the send. That delay is **bounded** by a short, path-specific timeout on the WhatsApp call
+(`_INLINE_SEND_TIMEOUT_SECONDS = 3.0`, distinct from the drain's 20s default) so the whole
+handler — DB writes + the bounded send + overhead — stays safely under Shopify's <5s ack budget
+even against a slow/unresponsive Meta endpoint. This is the key difference from the reverted
+BackgroundTasks attempt: predictable, bounded delay, not silent unreliability.
+
+**Safety invariants (unchanged bar).** (1) The inline path operates ONLY on the single row it
+just created: `ingest_order_created` now returns `IngestResult.outbound_id`, and
+`claim_outbound_by_id` atomically flips **that** row `queued → processing` (`FOR UPDATE SKIP
+LOCKED`), so a still-available backstop drain can never also claim and double-send it. It never
+touches the generic `claim_queued_outbound`/drain path. (2) A retryable failure/timeout bumps the
+row back to `queued`, and a killed invocation leaves it `processing` for the drain's 10-minute
+stale-reclaim — so the durable outbox is still the source of truth and delivery is still
+retryable. (3) The `send_mode` kill switch is enforced exactly as elsewhere (`off` leaves the row
+queued and sends nothing; shadow/allowlist-miss suppress with zero Meta calls). (4) The inline
+send NEVER raises past the webhook boundary — a send failure/timeout can never turn the 200 ack
+into a 5xx.
+
+**Consequences.** Push latency drops from ~1 minute to "within the confirming webhook request."
+Delivery no longer depends on any external scheduler. The `/internal/jobs/outbox_drain` endpoint
+and its 1-minute-cron shape are RETAINED as a manual/backstop tool (for retrying rows the inline
+send could not complete within its short budget, or if the owner re-adds a scheduler later) — it
+is simply no longer the primary trigger. `reminders.py`/`send_reminders` is unaffected and still
+needs external periodic triggering. Tradeoff explicitly accepted by the owner: a bounded ack
+delay (≤ the 3s send timeout + DB/overhead) in exchange for not depending on an external cron for
+the primary send.
+
 ---
 
 ## ADR-002 — Send-policy chokepoint and kill switch

@@ -47,6 +47,7 @@ class FakeSender:
                 "language": language,
                 "body_params": list(body_params),
                 "button_payloads": list(button_payloads),
+                "timeout": timeout,
             }
         )
         result = self._results.pop(0) if isinstance(self._results, list) else self._results
@@ -106,6 +107,56 @@ async def test_send_one_outbound_sends_and_transitions(monkeypatch: pytest.Monke
     assert views[f"order_created:{gid}"].state == "sent"
     mappings = {m.order_gid: m for m in await c.ingest.recent_mappings(10)}
     assert mappings[gid].status == "template_sent"
+
+
+async def test_send_one_outbound_default_timeout_is_the_send_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The cron-drain path passes NO timeout, so send_template's own 20s default applies — a cron
+    # invocation has no <5s ack constraint. This pins that the added optional `timeout` param does
+    # not alter the default (cron) behaviour when omitted.
+    from app.admin.controls import load_controls
+    from app.channels.whatsapp_config import load_whatsapp_config
+    from app.jobs.outbox_drain import send_one_outbound
+
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    await _seed_row("gid://shopify/Order/1")
+    sender = FakeSender(SendResult(ok=True, status_code=200, wamid="w", error=None))
+    _install_sender(monkeypatch, sender)
+    controls = await load_controls(c.config)
+    cfg = await load_whatsapp_config(c.config)
+    assert cfg is not None
+    (row,) = await c.ingest.claim_queued_outbound()
+
+    await send_one_outbound(c, cfg, controls, row)
+
+    assert sender.calls[0]["timeout"] == 20.0
+
+
+async def test_send_one_outbound_inline_uses_a_short_distinct_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The inline path (send_inline_outbound) passes the SHORT _INLINE_SEND_TIMEOUT_SECONDS so the
+    # Shopify webhook it runs inside stays under the <5s ack budget — distinct from the cron 20s.
+    from app.admin.controls import load_controls
+    from app.channels.whatsapp_config import load_whatsapp_config
+    from app.jobs.outbox_drain import _INLINE_SEND_TIMEOUT_SECONDS, send_one_outbound
+
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    await _seed_row("gid://shopify/Order/1")
+    sender = FakeSender(SendResult(ok=True, status_code=200, wamid="w", error=None))
+    _install_sender(monkeypatch, sender)
+    controls = await load_controls(c.config)
+    cfg = await load_whatsapp_config(c.config)
+    assert cfg is not None
+    (row,) = await c.ingest.claim_queued_outbound()
+
+    await send_one_outbound(c, cfg, controls, row, timeout=_INLINE_SEND_TIMEOUT_SECONDS)
+
+    assert sender.calls[0]["timeout"] == _INLINE_SEND_TIMEOUT_SECONDS
+    assert _INLINE_SEND_TIMEOUT_SECONDS < 20.0  # genuinely shorter than the cron default
 
 
 async def test_send_mode_off_short_circuits(monkeypatch: pytest.MonkeyPatch) -> None:

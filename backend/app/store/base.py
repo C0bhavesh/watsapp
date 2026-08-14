@@ -55,6 +55,12 @@ class OutboundClaim:
 class IngestResult:
     duplicate: bool
     queued: bool
+    # id of the outbound_messages row this ingest freshly queued, or None when nothing was
+    # queued (no eligible draft, or the dedupe_key already existed -> ON CONFLICT DO NOTHING).
+    # The inline order-confirmation send (jobs.outbox_drain.send_inline_outbound, ADR-001
+    # 2026-08-15 amendment) claims EXACTLY this row by id so it never touches the generic
+    # claim/drain path; a duplicate/no-op ingest carries None and triggers no inline send.
+    outbound_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -148,6 +154,8 @@ class IngestStore(Protocol):
     # --- Phase 5: outbox drain + mutation audit + mapping status ---
 
     async def claim_queued_outbound(self, limit: int = 20) -> list[OutboundClaim]: ...
+
+    async def claim_outbound_by_id(self, id: int) -> OutboundClaim | None: ...
 
     async def mark_outbound_sent(self, id: int, wamid: str | None) -> None: ...
 

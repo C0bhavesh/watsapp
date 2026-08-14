@@ -11,23 +11,13 @@ from app.jobs.reconcile import run_reconcile_cancels
 from app.jobs.reminders import run_send_reminders
 from app.jobs.retention import run_retention_purge
 from app.shopify.errors import ShopifyError
-from app.shopify.subscriptions import ensure_subscription
 
 router = APIRouter()
 
 JobFn = Callable[[Container], Awaitable[dict[str, Any]]]
 
 
-async def _job_ensure_subscription(c: Container) -> dict[str, Any]:
-    base_url = await c.config.get_plain("public_base_url")
-    if not base_url:
-        return {"error": "public_base_url not configured"}
-    status = await ensure_subscription(c.shopify, f"{base_url.rstrip('/')}/webhooks/shopify")
-    return {"status": status}
-
-
 JOBS: dict[str, JobFn] = {
-    "ensure_subscription": _job_ensure_subscription,
     "retention_purge": run_retention_purge,
     "outbox_drain": run_outbox_drain,
     "reconcile_cancels": run_reconcile_cancels,

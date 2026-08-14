@@ -33,14 +33,15 @@ async def call_get(name: str, headers: dict[str, str]) -> httpx.Response:
 
 
 async def test_wrong_secret_403() -> None:
-    assert (await call("ensure_subscription", "nope")).status_code == 403
-    assert (await call("ensure_subscription", None)).status_code == 403
+    # The auth check runs before job lookup, so any valid job name exercises the 403 path.
+    assert (await call("outbox_drain", "nope")).status_code == 403
+    assert (await call("outbox_drain", None)).status_code == 403
 
 
 async def test_unset_secret_503(monkeypatch: pytest.MonkeyPatch, master_key: str) -> None:
     monkeypatch.setenv("CRON_SECRET", "")
     reset_container()
-    assert (await call("ensure_subscription", "")).status_code == 503
+    assert (await call("outbox_drain", "")).status_code == 503
 
 
 async def test_short_secret_treated_as_misconfigured_503(
@@ -48,7 +49,7 @@ async def test_short_secret_treated_as_misconfigured_503(
 ) -> None:
     monkeypatch.setenv("CRON_SECRET", "12345678")  # len 8 < 16 -> disabled
     reset_container()
-    assert (await call("ensure_subscription", "12345678")).status_code == 503
+    assert (await call("outbox_drain", "12345678")).status_code == 503
 
 
 async def test_non_ascii_secret_header_403_not_500() -> None:
@@ -59,7 +60,7 @@ async def test_non_ascii_secret_header_403_not_500() -> None:
     transport = httpx.ASGITransport(app=fastapi_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post(
-            "/internal/jobs/ensure_subscription",
+            "/internal/jobs/outbox_drain",
             headers=[(b"x-cron-secret", b"\xe9")],
         )
     assert resp.status_code == 403
@@ -114,15 +115,6 @@ async def test_post_with_valid_cron_secret_still_works() -> None:
 
 async def test_unknown_job_404() -> None:
     assert (await call("nope", SECRET)).status_code == 404
-
-
-async def test_ensure_subscription_without_base_url_reports_error() -> None:
-    resp = await call("ensure_subscription", SECRET)
-    assert resp.status_code == 200
-    assert resp.json() == {
-        "job": "ensure_subscription",
-        "result": {"error": "public_base_url not configured"},
-    }
 
 
 async def test_shopify_failure_returns_502_without_leaking_detail(

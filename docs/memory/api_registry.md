@@ -112,9 +112,15 @@
 - **Response:** `{"messages": [{"id": "wamid..."}]}` → `SendResult(ok=True, wamid=...)`; >=400 → `SendResult(ok=False, status_code, error=body[:500])`; transport error → `WhatsAppSendError`.
 - **Notes:** access token is a Fernet-encrypted secret (`whatsapp:access_token`), never logged. Timeout default 20s.
 
-## [external] Shopify webhook subscription management (per-topic self-heal)
-- **Caller:** backend/app/shopify/subscriptions.py (`ensure_subscription`)
-- **Topics (`REQUIRED_TOPICS`, 2026-08-14):** `ORDERS_CREATE, ORDERS_UPDATED, CUSTOMERS_UPDATE, FULFILLMENTS_CREATE, FULFILLMENTS_UPDATE` — each subscribed independently; a failure on one (e.g. `read_fulfillments` scope not granted → the two FULFILLMENTS_* topics) is isolated to that topic's `"error"` result, the rest still succeed. **Correction pass:** `_ensure_one_topic` now catches the broad `ShopifyError` base (not only `ShopifyGraphQLError`) — an ACCESS_DENIED can surface as a non-200 HTTP response (`ShopifyUnavailable`/`ShopifyAuthError`), which would otherwise escape the per-topic guard and 500 the whole job.
-- **Endpoint:** Admin GraphQL — `webhookSubscriptions(first:20, topics:[<TOPIC>])` (list), `webhookSubscriptionCreate` (format JSON), `webhookSubscriptionUpdate` (on URL/version drift).
-- **Request/Response:** create/update take `$callbackUrl: URL!` (update also `$id: ID!`); return `{webhookSubscription{id}, userErrors{message}}`.
-- **Notes:** invoked via the `ensure_subscription` job (`GET|POST /internal/jobs/ensure_subscription`). callbackUrl = `{public_base_url}/webhooks/shopify`. userErrors → `ShopifyGraphQLError`.
+## [external] Shopify webhook subscription management — REMOVED (2026-08-15)
+- **Status:** the app-managed self-heal that CREATED/UPDATED Shopify webhook subscriptions
+  (`ensure_subscription`, `webhookSubscriptionCreate`/`webhookSubscriptionUpdate`, the
+  `GET|POST /internal/jobs/ensure_subscription` job) was **deleted**. Webhook delivery is now
+  driven entirely by **Admin-created webhooks** (Shopify Settings → Notifications → Webhooks,
+  cutover 2026-08-14, verified live). Recreating an app-managed subscription would double-deliver
+  every event, so the self-heal code was removed rather than left dormant. This app no longer makes
+  any `webhookSubscription*` GraphQL call.
+- **Retained:** only the `REQUIRED_TOPICS` tuple survives in `backend/app/shopify/subscriptions.py`
+  (`ORDERS_CREATE, ORDERS_UPDATED, CUSTOMERS_UPDATE, FULFILLMENTS_CREATE, FULFILLMENTS_UPDATE`) — it
+  is now purely receiver-side data: `app/channels/shopify_webhook.py` derives its `HANDLED_TOPICS`
+  set from it, and Admin-created webhooks must be registered for exactly these topics.

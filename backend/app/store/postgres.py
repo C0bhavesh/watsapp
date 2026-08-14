@@ -45,10 +45,12 @@ _MAX_ORDER_NUMBER_DIGITS = 9
 # line-items selection already uses.
 MAX_MIRROR_LINE_ITEMS = 50
 
-# Cap on fulfillments stored per order (parity with MAX_MIRROR_LINE_ITEMS and the live GraphQL
-# fetch's `first: 5`). Bounds a pathological order and keeps the mirror read/prompt render bounded
-# without an explicit read-side LIMIT. An order having more than this many split shipments is not
-# realistic for this store.
+# Cap on fulfillments carried into a single order-mirror WRITE (parity with MAX_MIRROR_LINE_ITEMS
+# and the live GraphQL fetch's `first: 5`). This bounds `upsert_order_mirror`'s per-order write
+# only -- the webhook write path (`upsert_fulfillment`, one signed delivery per shipment) is not
+# capped by it, and the read paths bound themselves separately (`_fetch_mirror_fulfillments` reuses
+# this constant as its LIMIT). An order having more than this many split shipments is not realistic
+# for this store.
 MAX_MIRROR_FULFILLMENTS = 10
 
 
@@ -98,13 +100,16 @@ def _order_from_row(
 
 
 _FULFILLMENT_COLUMNS = (
-    "gid, status, tracking_company, tracking_number, tracking_url, created_at"
+    "gid, status, tracking_company, tracking_number, tracking_url, created_at, "
+    "shopify_updated_at"
 )
 
 
 def _fulfillment_from_row(r: asyncpg.Record) -> Fulfillment:
     # Single builder shared by the per-order and batched (`= ANY`) fulfillment reads so they
-    # cannot silently diverge (same discipline as _line_item_from_row).
+    # cannot silently diverge (same discipline as _line_item_from_row). shopify_updated_at maps
+    # back onto Fulfillment.updated_at so a mirror read carries the same freshness stamp the
+    # in-memory store returns (otherwise updated_at would always read back None).
     return Fulfillment(
         gid=str(r["gid"]),
         status=r["status"],
@@ -112,14 +117,21 @@ def _fulfillment_from_row(r: asyncpg.Record) -> Fulfillment:
         tracking_number=r["tracking_number"],
         tracking_url=r["tracking_url"],
         created_at=r["created_at"].isoformat() if r["created_at"] else None,
+        updated_at=(
+            r["shopify_updated_at"].isoformat() if r["shopify_updated_at"] else None
+        ),
     )
 
 
 async def _fetch_mirror_fulfillments(
     conn: asyncpg.Connection, order_gid: str
 ) -> list[Fulfillment]:
+    # ORDER BY + LIMIT for deterministic ordering and defense-in-depth: the write path caps at
+    # MAX_MIRROR_FULFILLMENTS, but the webhook write path (upsert_fulfillment) is uncapped, so a
+    # bound here keeps a pathological order from over-reading onto the shared pool.
     rows = await conn.fetch(
-        f"SELECT {_FULFILLMENT_COLUMNS} FROM fulfillments WHERE order_gid = $1",
+        f"SELECT {_FULFILLMENT_COLUMNS} FROM fulfillments WHERE order_gid = $1 "
+        f"ORDER BY created_at NULLS LAST, gid LIMIT {MAX_MIRROR_FULFILLMENTS}",
         order_gid,
     )
     return [_fulfillment_from_row(r) for r in rows]
@@ -134,8 +146,12 @@ async def _upsert_fulfillment_on_conn(
     The DO UPDATE is guarded on the fulfillment's OWN Shopify updated_at (shopify_updated_at):
     Shopify does not guarantee webhook delivery order, so a replayed fulfillments/create
     (label made, tracking often empty) arriving after a fulfillments/update (tracking populated)
-    must not silently revert good tracking to stale/NULL. NULL on either side still writes
-    (backfill / payloads without the field), matching the orders/customers guards.
+    must not silently revert good tracking to stale/NULL. A STORED NULL stamp is always
+    overwritable (backfill / payloads without the field); but unlike the orders/customers guards
+    this one has no ``EXCLUDED... IS NULL`` half, so an INCOMING NULL stamp LOSES against a stored
+    non-NULL one (it does not overwrite). That asymmetry is deliberate and fail-safe: it matches
+    memory.py's documented direction -- an unstamped replay never clobbers a stamped row's
+    tracking -- so the two IngestStore impls agree.
     """
     await conn.execute(
         "INSERT INTO fulfillments (gid, order_gid, status, tracking_company, "

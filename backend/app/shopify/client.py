@@ -293,7 +293,17 @@ class ShopifyClient:
         return _fulfillments_from_node(node)
 
     async def _with_fulfillments(self, order: Order) -> Order:
-        """Best-effort attach live tracking AFTER the core order fetch already succeeded."""
+        """Best-effort attach live tracking AFTER the core order fetch already succeeded.
+
+        Skip the sub-fetch entirely for an order that cannot have fulfillments yet
+        (displayFulfillmentStatus None/UNFULFILLED) -- there is nothing to fetch, so issuing
+        get_order_fulfillments would be a pure-latency round trip (and, while read_fulfillments
+        is not granted, a guaranteed ACCESS_DENIED). Most COD order-status questions are about
+        pending/unfulfilled orders, so this removes nearly all the extra calls; only a
+        (partially) fulfilled order actually queries for tracking.
+        """
+        if order.fulfillment_status in (None, "UNFULFILLED"):
+            return order
         return replace(order, fulfillments=await self.get_order_fulfillments(order.gid))
 
     async def get_order(self, gid: str) -> Order | None:
@@ -393,7 +403,11 @@ class ShopifyClient:
         ]
         # Attach tracking best-effort AFTER the core orders resolved -- get_order_fulfillments
         # swallows a missing-scope ACCESS_DENIED, so this never fails the phone lookup.
-        return [await self._with_fulfillments(o) for o in orders]
+        # Fan the (up to 10) per-order fulfillment fetches out CONCURRENTLY rather than awaiting
+        # them one at a time -- a customer-facing Q&A path must not serialize 10 round trips.
+        # _with_fulfillments itself skips the fetch for None/UNFULFILLED orders, so in the common
+        # case (pending COD orders) most of these resolve without any extra call at all.
+        return list(await asyncio.gather(*(self._with_fulfillments(o) for o in orders)))
 
     async def search_products(self, query: str, limit: int = 5) -> list[Product] | None:
         """Search the live catalog. ``None`` = the query had no searchable term (never

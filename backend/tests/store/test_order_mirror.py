@@ -1,6 +1,6 @@
 import os
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
@@ -590,7 +590,8 @@ async def test_find_mirrored_orders_by_phone_pg_batch_fetches_items_without_n_pl
     fulfillment_rows = [
         {"order_gid": "gid://a", "gid": "gid://f/a", "status": "success",
          "tracking_company": "Delhivery", "tracking_number": "AWB-A",
-         "tracking_url": "https://track/AWB-A", "created_at": None},
+         "tracking_url": "https://track/AWB-A", "created_at": None,
+         "shopify_updated_at": datetime(2026, 8, 14, 3, 20, tzinfo=UTC)},
     ]
     conn = _FakeReadConn(order_rows, item_rows, fulfillment_rows)
     store = PostgresIngestStore(_FakePool(conn))  # type: ignore[arg-type]
@@ -606,6 +607,9 @@ async def test_find_mirrored_orders_by_phone_pg_batch_fetches_items_without_n_pl
     assert [li.title for li in by_gid["gid://a"].line_items] == ["A-item"]
     assert [li.title for li in by_gid["gid://b"].line_items] == ["B-item"]
     assert [f.tracking_number for f in by_gid["gid://a"].fulfillments] == ["AWB-A"]
+    # shopify_updated_at is selected and round-trips onto Fulfillment.updated_at (a mirror read no
+    # longer drops the freshness stamp the in-memory store returns).
+    assert by_gid["gid://a"].fulfillments[0].updated_at == "2026-08-14T03:20:00+00:00"
     assert by_gid["gid://b"].fulfillments == ()
 
 
@@ -679,6 +683,17 @@ async def test_upsert_order_mirror_pg_persists_carried_fulfillments() -> None:
     ]
     assert len(fulfillment_inserts) == 1
     assert "AWB-BF" in fulfillment_inserts[0][1]
+
+    # Same-transaction ATOMICITY is the load-bearing correctness claim: the fulfillment INSERT must
+    # run AFTER the orders INSERT (the standalone upsert_fulfillment's existence guard is skipped
+    # here precisely because the order row is written first in this same transaction). Assert the
+    # call-index ordering on the recording fake, not merely that both ran on the same connection.
+    sqls = [sql for sql, _ in conn.executed]
+    orders_idx = next(i for i, sql in enumerate(sqls) if sql.startswith("INSERT INTO orders"))
+    fulfillment_idx = next(
+        i for i, sql in enumerate(sqls) if sql.startswith("INSERT INTO fulfillments")
+    )
+    assert fulfillment_idx > orders_idx
 
 
 @pytest.fixture

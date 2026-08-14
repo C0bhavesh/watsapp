@@ -56,6 +56,11 @@ ORDER_NODE = {
     },
 }
 
+# A (partially) fulfilled order IS the only kind that can carry fulfillments -- _with_fulfillments
+# now skips the tracking sub-fetch entirely for None/UNFULFILLED orders (nothing to fetch), so the
+# tracking-parse tests must drive a genuinely fulfilled node for the follow-up query to fire.
+_FULFILLED_ORDER_NODE = {**ORDER_NODE, "displayFulfillmentStatus": "FULFILLED"}
+
 
 async def test_get_order_parses_full_node(settings, master_key) -> None:
     def gql(request: httpx.Request) -> httpx.Response:
@@ -106,7 +111,7 @@ def _split_order_handler(fulfillments_response: dict[str, object]):
         query = json.loads(request.content)["query"]
         if "fulfillments(first: 5)" in query:
             return httpx.Response(200, json=fulfillments_response)
-        return httpx.Response(200, json={"data": {"node": ORDER_NODE}})
+        return httpx.Response(200, json={"data": {"node": _FULFILLED_ORDER_NODE}})
 
     return gql
 
@@ -119,7 +124,7 @@ async def test_core_order_query_does_not_select_fulfillments(settings, master_ke
         queries.append(query)
         if "fulfillments(first: 5)" in query:
             return httpx.Response(200, json={"data": {"order": {"fulfillments": []}}})
-        return httpx.Response(200, json={"data": {"node": ORDER_NODE}})
+        return httpx.Response(200, json={"data": {"node": _FULFILLED_ORDER_NODE}})
 
     client, config = make_client(settings, master_key, grant_or(gql))
     await seed(config)
@@ -160,6 +165,32 @@ async def test_get_order_without_fulfillments_has_empty_tuple(settings, master_k
     assert order.fulfillments == ()
 
 
+async def test_get_order_skips_fulfillments_query_when_unfulfilled(
+    settings, master_key
+) -> None:
+    # MEDIUM (security review): an order with fulfillment_status None/UNFULFILLED has no
+    # fulfillments yet, so _with_fulfillments must NOT issue the follow-up tracking query --
+    # while read_fulfillments is ungranted every such call is a guaranteed-ACCESS_DENIED,
+    # pure-latency round trip on the customer-facing path. ORDER_NODE is UNFULFILLED.
+    queries: list[str] = []
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        query = json.loads(request.content)["query"]
+        queries.append(query)
+        if "fulfillments(first: 5)" in query:
+            return httpx.Response(
+                200, json={"data": {"order": {"fulfillments": _FULFILLMENTS_PAYLOAD}}}
+            )
+        return httpx.Response(200, json={"data": {"node": ORDER_NODE}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    order = await client.get_order("gid://shopify/Order/12187547894128")
+    assert order is not None
+    assert order.fulfillments == ()
+    assert not any("fulfillments(first: 5)" in q for q in queries)
+
+
 async def test_get_order_survives_fulfillments_access_denied(settings, master_key) -> None:
     """THE critical invariant of the whole fulfillment feature.
 
@@ -185,7 +216,9 @@ async def test_find_order_by_name_survives_fulfillments_access_denied(
         query = json.loads(request.content)["query"]
         if "fulfillments(first: 5)" in query:
             return httpx.Response(200, json=_ACCESS_DENIED)
-        return httpx.Response(200, json={"data": {"orders": {"edges": [{"node": ORDER_NODE}]}}})
+        return httpx.Response(
+            200, json={"data": {"orders": {"edges": [{"node": _FULFILLED_ORDER_NODE}]}}}
+        )
 
     client, config = make_client(settings, master_key, grant_or(gql))
     await seed(config)

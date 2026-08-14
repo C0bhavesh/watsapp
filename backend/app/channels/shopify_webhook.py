@@ -60,8 +60,13 @@ async def _mirror_order(c: Container, order: Order) -> bool:
     """
     try:
         await c.ingest.upsert_order_mirror(order)
-    except Exception:
-        logger.exception("order mirror sync failed: gid=%s", order.gid)
+    except Exception as exc:
+        # Log only the exception TYPE, never the rendered exception/traceback (2026-08-13
+        # error_learning): now that upsert_order_mirror writes fulfillment rows, asyncpg's error
+        # text can echo a tracking number/URL, which must not reach the logs.
+        logger.error(
+            "order mirror sync failed: gid=%s type=%s", order.gid, type(exc).__name__
+        )
         return False
     return True
 

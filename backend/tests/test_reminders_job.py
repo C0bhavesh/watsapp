@@ -49,8 +49,9 @@ async def _seed_template_sent(gid: str, age_minutes: int, status: str = "templat
     )
     await c.ingest.ingest_order_created(f"wh-{gid}", "orders/create", mapping, draft)
     await c.ingest.set_mapping_status(gid, status)
-    # In-memory analogue of backdating order_mappings.created_at.
-    c.ingest._mapping_created_at[gid] = datetime.now(UTC) - timedelta(minutes=age_minutes)
+    # In-memory analogue of backdating order_mappings.updated_at -- the moment the mapping became
+    # template_sent, which is what the sweep ages off (NOT created_at / webhook-ingest time).
+    c.ingest._mapping_updated_at[gid] = datetime.now(UTC) - timedelta(minutes=age_minutes)
 
 
 class FakeSender:
@@ -88,6 +89,33 @@ async def test_recent_order_not_reminded() -> None:
     c = get_container()
     gid = "gid://shopify/Order/2"
     await _seed_template_sent(gid, age_minutes=30)  # inside the 1-hour window
+
+    result = await run_send_reminders(c)
+
+    assert result == {"swept": 0, "queued": 0}
+    assert await c.ingest.find_outbound_by_dedupe_key(f"order_reminder:{gid}") is None
+
+
+async def test_freshly_sent_backlog_order_not_reminded() -> None:
+    # HIGH #1: an order ingested long ago whose template only just SENT (updated_at = now) must
+    # NOT be reminded on the next sweep -- the clock is anchored to the template-sent moment.
+    c = get_container()
+    gid = "gid://shopify/Order/backlog"
+    await _seed_template_sent(gid, age_minutes=90)  # updated_at 90m ago
+    # Simulate a backlog flush: the drain just re-stamped template_sent -> updated_at = now.
+    await c.ingest.set_mapping_status(gid, "template_sent")
+
+    result = await run_send_reminders(c)
+
+    assert result == {"swept": 0, "queued": 0}
+    assert await c.ingest.find_outbound_by_dedupe_key(f"order_reminder:{gid}") is None
+
+
+async def test_very_old_order_excluded_by_ceiling() -> None:
+    # HIGH #2: a 30-hour-old unanswered template_sent order is past the 24h ceiling -> never swept.
+    c = get_container()
+    gid = "gid://shopify/Order/ancient"
+    await _seed_template_sent(gid, age_minutes=30 * 60)
 
     result = await run_send_reminders(c)
 
@@ -134,12 +162,15 @@ async def test_queued_reminder_flows_through_existing_drain(
     c = get_container()
     await save_controls(c.config, AdminControls(send_mode="live"))
     gid = "gid://shopify/Order/5"
-    await _seed_template_sent(gid, age_minutes=90)
+    await _seed_template_sent(gid, age_minutes=0)
     # Drain the ORIGINAL push first so only the reminder is left queued.
     sender = FakeSender(SendResult(ok=True, status_code=200, wamid="wamid.orig", error=None))
     monkeypatch.setattr("app.jobs.outbox_drain.send_template", sender)
     await run_outbox_drain(c)
     assert not await c.ingest.claim_queued_outbound()
+    # The drain just re-stamped template_sent (updated_at = now, as in production); age it past the
+    # 1-hour threshold so the sweep now considers it stale.
+    c.ingest._mapping_updated_at[gid] = datetime.now(UTC) - timedelta(minutes=90)
 
     await run_send_reminders(c)
 

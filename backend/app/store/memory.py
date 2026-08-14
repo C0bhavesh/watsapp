@@ -19,6 +19,11 @@ from app.store.postgres import _e164
 # in-memory store, but the staleness semantics must not regress behind Postgres's.
 _PROCESSING_STALE = timedelta(minutes=10)
 
+# Cap on the reminder sweep, mirroring the Postgres query's LIMIT. Bounds a single tick's work on
+# the shared pool (matches the sibling capped reads: find_mappings_by_phone LIMIT 20, mirror LIMIT
+# 10) — a leftover stale row is just picked up on the next tick.
+_STALE_SWEEP_LIMIT = 25
+
 
 @dataclass
 class _OutboundRow:
@@ -71,9 +76,15 @@ class InMemoryIngestStore:
         self._outbound_next_id = 1
         self._mapping_status: dict[str, str] = {}
         # Creation timestamp per mapping — the in-memory analogue of order_mappings.created_at,
-        # stamped once on first ingest (Postgres never resets it on ON CONFLICT DO UPDATE). Used
-        # only by find_stale_template_sent's age filter; tests backdate it to simulate an old order.
+        # stamped once on first ingest (Postgres never resets it on ON CONFLICT DO UPDATE) and
+        # surfaced as MappingView.created_at.
         self._mapping_created_at: dict[str, datetime] = {}
+        # Last-write timestamp per mapping — the in-memory analogue of order_mappings.updated_at,
+        # re-stamped now() on every ingest upsert and every set_mapping_status (mirrors Postgres'
+        # `updated_at = now()`). find_stale_template_sent ages off THIS, not created_at, so a
+        # mapping that only just became 'template_sent' (e.g. a backlog flush hours after ingest)
+        # is NOT reminded instantly. tests backdate it to simulate an old template-sent order.
+        self._mapping_updated_at: dict[str, datetime] = {}
         self.order_actions: list[dict[str, str | None]] = []
         self.customers: dict[str, Customer] = {}
         self.orders: dict[str, Order] = {}
@@ -92,6 +103,7 @@ class InMemoryIngestStore:
         self.webhooks.add(key)
         self.mappings[mapping.order_gid] = mapping
         self._mapping_created_at.setdefault(mapping.order_gid, datetime.now(UTC))
+        self._mapping_updated_at[mapping.order_gid] = datetime.now(UTC)
         queued = self._enqueue(outbound) if outbound is not None else False
         return IngestResult(duplicate=False, queued=queued)
 
@@ -212,33 +224,52 @@ class InMemoryIngestStore:
         ]
         return list(reversed(views))[:limit]
 
-    async def find_stale_template_sent(self, older_than_minutes: int) -> list[MappingView]:
-        # Q17: a mapping still at status 'template_sent' whose order was created more than
-        # `older_than_minutes` ago = the customer never tapped Confirm/Cancel within the window.
-        # A button tap moves the status off 'template_sent' (order_actions), so a tapped order is
-        # excluded automatically — no separate cancellation flag needed.
-        cutoff = datetime.now(UTC) - timedelta(minutes=older_than_minutes)
-        views: list[MappingView] = []
+    async def find_stale_template_sent(
+        self, older_than_minutes: int, max_age_minutes: int
+    ) -> list[MappingView]:
+        # Q17: a mapping still at status 'template_sent' whose template was SENT between
+        # `older_than_minutes` and `max_age_minutes` ago = the customer never tapped Confirm/Cancel
+        # in the window. Anchored on updated_at (the template-sent moment), NOT created_at: a
+        # backlog flushed hours after ingest would otherwise be reminded the instant it sends.
+        # Bounded on both ends: the upper ceiling stops a historically-unanswered order (mappings
+        # are kept indefinitely, client Q15) from being mass-reminded on first run. Capped +
+        # ordered like the sibling reads (find_mappings_by_phone LIMIT 20 / mirror LIMIT 10).
+        now = datetime.now(UTC)
+        min_cutoff = now - timedelta(minutes=older_than_minutes)  # updated_at must be <= this
+        max_cutoff = now - timedelta(minutes=max_age_minutes)  # updated_at must be > this
+        rows: list[tuple[datetime, MappingView]] = []
         for gid, m in self.mappings.items():
             if self._mapping_status.get(gid, "pending") != "template_sent":
                 continue
-            created = self._mapping_created_at.get(gid)
-            if created is None or created > cutoff:
+            updated = self._mapping_updated_at.get(gid)
+            if updated is None or updated > min_cutoff or updated <= max_cutoff:
                 continue
-            views.append(
-                MappingView(
-                    order_gid=m.order_gid,
-                    order_name=m.order_name,
-                    phone_e164=m.phone_e164,
-                    status="template_sent",
-                    is_cod=m.is_cod,
-                    created_at=created.isoformat(),
+            rows.append(
+                (
+                    updated,
+                    MappingView(
+                        order_gid=m.order_gid,
+                        order_name=m.order_name,
+                        phone_e164=m.phone_e164,
+                        status="template_sent",
+                        is_cod=m.is_cod,
+                        created_at=self._mapping_created_at[gid].isoformat(),
+                    ),
                 )
             )
-        return views
+        rows.sort(key=lambda r: r[0])
+        return [view for _, view in rows[:_STALE_SWEEP_LIMIT]]
 
     async def find_outbound_by_dedupe_key(self, dedupe_key: str) -> OutboundDraft | None:
         return self.outbound.get(dedupe_key)
+
+    async def find_outbound_by_dedupe_keys(
+        self, dedupe_keys: list[str]
+    ) -> dict[str, OutboundDraft]:
+        # Batched sibling of find_outbound_by_dedupe_key: one lookup for the whole sweep, so the
+        # reminder job never round-trips once per stale row (mirrors the mirror-order line-item
+        # WHERE ... = ANY($1) batching).
+        return {k: self.outbound[k] for k in dedupe_keys if k in self.outbound}
 
     async def enqueue_outbound(self, outbound: OutboundDraft) -> bool:
         return self._enqueue(outbound)
@@ -250,6 +281,7 @@ class InMemoryIngestStore:
         for gid in removed_mappings:
             del self.mappings[gid]
             self._mapping_created_at.pop(gid, None)
+            self._mapping_updated_at.pop(gid, None)
         removed_outbound = [
             key for key, o in self.outbound.items() if o.phone_e164 == phone_e164
         ]
@@ -385,6 +417,9 @@ class InMemoryIngestStore:
 
     async def set_mapping_status(self, order_gid: str, status: str) -> None:
         self._mapping_status[order_gid] = status
+        # Mirror Postgres' `updated_at = now()`: the transition to 'template_sent' (drain) is what
+        # the reminder sweep ages off, so it must move the clock here too.
+        self._mapping_updated_at[order_gid] = datetime.now(UTC)
 
     async def record_order_action(
         self,

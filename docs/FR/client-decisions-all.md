@@ -225,9 +225,13 @@ resend the same message once as a reminder (and never again after that)?
 - B: no reminder — an unanswered order simply stays pending until the customer replies on their
   own or contacts support.
 
-Being built as an owner-directed decision pending your confirmation; fully gated behind the
-same send-mode kill switch as every other outbound message, so it has no live effect until
-explicitly enabled.
+Being built as an owner-directed decision pending your confirmation. Note on live effect: a
+reminder is QUEUED for any order that goes 1 to 24 hours past its confirmation-message send time
+without a Confirm/Cancel tap. Sending obeys the same send-mode setting as every other outbound
+message — and because that setting is currently LIVE on this store, a queued reminder WILL go out
+on the next send tick, not sit inert. In other words, once this ships it is active for real orders
+right away; it is not silently disabled behind an off switch. (Orders older than 24 hours are never
+reminded, so turning it on does not blast historically-unanswered orders.)
 
 ## ✅ ANSWERED (2026-08-12)
 

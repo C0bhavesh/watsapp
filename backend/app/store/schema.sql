@@ -24,6 +24,10 @@ CREATE TABLE IF NOT EXISTS order_mappings (
 );
 CREATE INDEX IF NOT EXISTS idx_order_mappings_phone ON order_mappings (phone_e164);
 CREATE INDEX IF NOT EXISTS idx_order_mappings_name  ON order_mappings (order_name);
+-- Supports the Q17 reminder sweep's WHERE status = 'template_sent' AND updated_at BETWEEN ...
+-- filter (find_stale_template_sent). Additive + idempotent (CREATE INDEX IF NOT EXISTS), so it
+-- needs no live ALTER — it is applied the same way every other index here is.
+CREATE INDEX IF NOT EXISTS idx_order_mappings_status_updated ON order_mappings (status, updated_at);
 
 CREATE TABLE IF NOT EXISTS outbound_messages (
     id              bigserial PRIMARY KEY,

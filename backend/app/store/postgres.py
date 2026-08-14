@@ -502,20 +502,32 @@ class PostgresIngestStore:
             for r in rows
         ]
 
-    async def find_stale_template_sent(self, older_than_minutes: int) -> list[MappingView]:
-        # Q17 reminder sweep: mappings still at status 'template_sent' whose order was created more
-        # than `older_than_minutes` ago (customer never tapped Confirm/Cancel in the window). A tap
-        # moves status off 'template_sent' (order_actions), so a tapped order is excluded here
-        # automatically. make_interval(mins => $1) parameterizes the window (int, injection-safe) so
-        # the same query is testable with a small interval, never a hardcoded 60 in SQL.
+    async def find_stale_template_sent(
+        self, older_than_minutes: int, max_age_minutes: int
+    ) -> list[MappingView]:
+        # Q17 reminder sweep: mappings still at status 'template_sent' whose template was SENT
+        # between `older_than_minutes` and `max_age_minutes` ago (customer never tapped
+        # Confirm/Cancel in that window). Anchored on updated_at, NOT created_at: set_mapping_status
+        # stamps updated_at = now() when the drain transitions a row to 'template_sent', so this
+        # ages off the actual send moment — a backlog flushed hours after webhook-ingest is not
+        # reminded instantly (created_at would be already >1h old). The status = 'template_sent'
+        # filter keeps this correct despite the ingest upsert also touching updated_at: any tap
+        # moves status OFF 'template_sent', so a template_sent row's most-recent updated_at IS its
+        # template-sent (or a later duplicate-ingest) time, which only DELAYS a reminder, never
+        # duplicates one. The upper ceiling stops a historically-unanswered mapping (kept
+        # indefinitely, client Q15) from being mass-reminded on first run. make_interval(mins => $n)
+        # parameterizes both bounds (int, injection-safe). ORDER BY updated_at LIMIT bounds a tick's
+        # work on the shared pool, matching the sibling capped reads.
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT order_gid, order_name, phone_e164, status, is_cod, created_at"
                 " FROM order_mappings"
                 " WHERE status = 'template_sent'"
-                " AND created_at <= now() - make_interval(mins => $1)"
-                " ORDER BY created_at",
+                " AND updated_at <= now() - make_interval(mins => $1)"
+                " AND updated_at > now() - make_interval(mins => $2)"
+                " ORDER BY updated_at LIMIT 25",
                 older_than_minutes,
+                max_age_minutes,
             )
         return [
             MappingView(
@@ -548,6 +560,31 @@ class PostgresIngestStore:
             phone_e164=str(row["phone_e164"]),
             payload_json=str(row["payload_json"]),
         )
+
+    async def find_outbound_by_dedupe_keys(
+        self, dedupe_keys: list[str]
+    ) -> dict[str, OutboundDraft]:
+        # Batched sibling of find_outbound_by_dedupe_key: fetch every stale row's original push
+        # payload in ONE round-trip (WHERE ... = ANY($1)) instead of one query per swept row, so the
+        # reminder sweep never N+1s the pool it shares with the live reply path (same batching
+        # discipline as find_mirrored_orders_by_phone's line-item fetch).
+        if not dedupe_keys:
+            return {}
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT dedupe_key, kind, phone_e164, payload_json FROM outbound_messages"
+                " WHERE dedupe_key = ANY($1)",
+                dedupe_keys,
+            )
+        return {
+            str(r["dedupe_key"]): OutboundDraft(
+                dedupe_key=str(r["dedupe_key"]),
+                kind=str(r["kind"]),
+                phone_e164=str(r["phone_e164"]),
+                payload_json=str(r["payload_json"]),
+            )
+            for r in rows
+        }
 
     async def enqueue_outbound(self, outbound: OutboundDraft) -> bool:
         # Same ON CONFLICT (dedupe_key) DO NOTHING idempotency ingest_order_created uses: the UNIQUE

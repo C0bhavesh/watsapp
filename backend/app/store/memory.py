@@ -1,7 +1,7 @@
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
-from app.shopify.models import Customer, LineItem, Order, normalize_order_name
+from app.shopify.models import Customer, Fulfillment, LineItem, Order, normalize_order_name
 from app.store.base import (
     DeletionResult,
     IngestResult,
@@ -89,6 +89,11 @@ class InMemoryIngestStore:
         self.customers: dict[str, Customer] = {}
         self.orders: dict[str, Order] = {}
         self.order_items: dict[str, tuple[LineItem, ...]] = {}
+        # order_gid -> {fulfillment_gid: Fulfillment}. Keyed by fulfillment gid so a
+        # fulfillments/update replaces the same shipment in place; the outer dict-of-dicts models
+        # split shipments (several fulfillments per order). Kept separate from `self.orders` so it
+        # survives an order re-mirror, exactly like the Postgres fulfillments table + FK.
+        self.fulfillments: dict[str, dict[str, Fulfillment]] = {}
 
     async def ingest_order_created(
         self,
@@ -152,17 +157,32 @@ class InMemoryIngestStore:
         self.orders[order.gid] = order
         self.order_items[order.gid] = order.line_items
 
+    async def upsert_fulfillment(self, order_gid: str, fulfillment: Fulfillment) -> None:
+        # Skip a fulfillment for an order we have not mirrored -- parity with the Postgres FK
+        # (fulfillments.order_gid REFERENCES orders(gid)), which would reject it. Never raises.
+        if order_gid not in self.orders:
+            return
+        self.fulfillments.setdefault(order_gid, {})[fulfillment.gid] = fulfillment
+
+    def _with_fulfillments(self, order: Order | None) -> Order | None:
+        if order is None:
+            return None
+        stored = self.fulfillments.get(order.gid)
+        if not stored:
+            return order
+        return replace(order, fulfillments=tuple(stored.values()))
+
     async def customer_exists(self, gid: str) -> bool:
         return gid in self.customers
 
     async def get_mirrored_order(self, gid: str) -> Order | None:
-        return self.orders.get(gid)
+        return self._with_fulfillments(self.orders.get(gid))
 
     async def find_mirrored_order_by_name(self, raw_name: str) -> Order | None:
         name = normalize_order_name(raw_name)
         for order in self.orders.values():
             if order.name == name:
-                return order
+                return self._with_fulfillments(order)
         return None
 
     async def find_mirrored_orders_by_phone(self, phone_e164: str) -> list[Order]:
@@ -178,7 +198,7 @@ class InMemoryIngestStore:
         matches = [
             o for o in self.orders.values() if phone_e164 in (o.phone, o.shipping_phone)
         ]
-        return matches[:10]
+        return [self._with_fulfillments(o) or o for o in matches[:10]]
 
     async def recent_mappings(self, limit: int) -> list[MappingView]:
         views = [

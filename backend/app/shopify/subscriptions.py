@@ -1,7 +1,16 @@
 from app.shopify.client import ShopifyClient
 from app.shopify.errors import ShopifyGraphQLError
 
-REQUIRED_TOPICS: tuple[str, ...] = ("ORDERS_CREATE", "ORDERS_UPDATED", "CUSTOMERS_UPDATE")
+# FULFILLMENTS_CREATE/UPDATE deliver courier/tracking data (needs the read_fulfillments scope).
+# Each topic is subscribed independently and a userError on one (e.g. the scope not yet granted)
+# is isolated to that topic's "error" entry -- the others still succeed (see _ensure_one_topic).
+REQUIRED_TOPICS: tuple[str, ...] = (
+    "ORDERS_CREATE",
+    "ORDERS_UPDATED",
+    "CUSTOMERS_UPDATE",
+    "FULFILLMENTS_CREATE",
+    "FULFILLMENTS_UPDATE",
+)
 
 _LIST_QUERY = (
     "query($topics: [WebhookSubscriptionTopic!]) { webhookSubscriptions(first: 20, "

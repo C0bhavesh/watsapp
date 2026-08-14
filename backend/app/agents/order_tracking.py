@@ -11,7 +11,7 @@ from app.agents.base import (
 )
 from app.channels.copy import copy_for
 from app.providers.base import Message, ProviderError
-from app.shopify.models import AuthorizedOrder, LineItem, Money
+from app.shopify.models import AuthorizedOrder, Fulfillment, LineItem, Money
 
 _SYSTEM_TEMPLATE = """{personality}
 
@@ -24,6 +24,12 @@ order details.
 Store cancellation policy: orders can only be cancelled BEFORE they are dispatched. Once
 dispatched, cancellation is not possible -- if the customer asks to cancel a dispatched order,
 tell them clearly and do not offer a cancel option for it.
+
+If an order has shipped and tracking details are shown above, share the courier name, tracking
+number, and the tracking link exactly as given so the customer can track it. Never invent a
+tracking number, courier, or delivery date, and do not estimate an arrival time beyond what the
+tracking data states -- if no tracking is shown for an order, it has not shipped yet, so say so
+rather than making one up.
 
 If the customer wants to cancel an order that IS still eligible, tell them you'll bring up a
 Confirm/Cancel button for them to tap -- you never cancel anything yourself.
@@ -86,16 +92,30 @@ def _is_cancel_eligible(order: AuthorizedOrder) -> bool:
     return order.order.fulfillment_status in (None, "UNFULFILLED")
 
 
+def _tracking_line(fulfillment: Fulfillment) -> str:
+    parts = []
+    if fulfillment.tracking_company:
+        parts.append(f"courier {fulfillment.tracking_company}")
+    if fulfillment.tracking_number:
+        parts.append(f"tracking number {fulfillment.tracking_number}")
+    if fulfillment.tracking_url:
+        parts.append(f"tracking link {fulfillment.tracking_url}")
+    return "  - Tracking: " + ", ".join(parts)
+
+
 def _order_line(order: AuthorizedOrder, reveal_fields: Sequence[str]) -> str:
     """Render one order using ONLY the fields the admin approved for disclosure.
 
-    ``AdminControls.reveal_fields`` allows ``order_number`` / ``email`` / ``status`` / ``items``.
-    ``order_number`` is the order name; ``status`` covers the whole payment/fulfillment/
-    cancellation picture, cancel-eligibility included (it is derived from fulfillment and
-    cancellation state, so it discloses nothing beyond them); ``items`` adds each line item's
-    product name, variant, and price. ``email`` has never been rendered into this prompt, so
-    there is nothing to gate for it. Withheld fields are omitted from the prompt entirely rather
-    than merely "not to be mentioned" -- what the model never sees, it can never leak.
+    ``AdminControls.reveal_fields`` allows ``order_number`` / ``email`` / ``status`` / ``items`` /
+    ``tracking``. ``order_number`` is the order name; ``status`` covers the whole payment/
+    fulfillment/cancellation picture, cancel-eligibility included (it is derived from fulfillment
+    and cancellation state, so it discloses nothing beyond them); ``items`` adds each line item's
+    product name, variant, and price; ``tracking`` adds each shipped fulfillment's courier,
+    tracking number, and link (Q10). ``email`` has never been rendered into this prompt, so there
+    is nothing to gate for it. Withheld fields are omitted from the prompt entirely rather than
+    merely "not to be mentioned" -- what the model never sees, it can never leak. Tracking is
+    rendered only within the status-approved block: a tracking link inherently reveals the order
+    shipped, so if status is withheld tracking is withheld too (the more conservative gate).
     """
     label = f"order {order.order.name}" if "order_number" in reveal_fields else "an order"
     if "status" not in reveal_fields:
@@ -109,6 +129,12 @@ def _order_line(order: AuthorizedOrder, reveal_fields: Sequence[str]) -> str:
     ]
     if "items" in reveal_fields and order.order.line_items:
         lines.extend(_line_item_line(item) for item in order.order.line_items)
+    if "tracking" in reveal_fields:
+        # Only fulfillments that actually carry tracking -- never fabricate a line for an
+        # unshipped order or a label-only fulfillment with no tracking yet.
+        lines.extend(
+            _tracking_line(f) for f in order.order.fulfillments if f.has_tracking()
+        )
     return "\n".join(lines)
 
 

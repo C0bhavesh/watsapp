@@ -6,7 +6,14 @@ from datetime import datetime
 import asyncpg
 
 from app.core.phone import normalize_phone
-from app.shopify.models import Customer, LineItem, Money, Order, normalize_order_name
+from app.shopify.models import (
+    Customer,
+    Fulfillment,
+    LineItem,
+    Money,
+    Order,
+    normalize_order_name,
+)
 from app.store.base import (
     DeletionResult,
     IngestResult,
@@ -53,7 +60,11 @@ _MIRROR_ORDER_SELECT = (
 )
 
 
-def _order_from_row(row: asyncpg.Record, items: list[LineItem]) -> Order:
+def _order_from_row(
+    row: asyncpg.Record,
+    items: list[LineItem],
+    fulfillments: list[Fulfillment] | None = None,
+) -> Order:
     customer = None
     if row["c_gid"] is not None:
         customer = Customer(
@@ -76,7 +87,36 @@ def _order_from_row(row: asyncpg.Record, items: list[LineItem]) -> Order:
         total=total, customer_locale=row["customer_locale"],
         line_items=tuple(items), customer=customer,
         updated_at=row["updated_at"].isoformat() if row["updated_at"] else None,
+        fulfillments=tuple(fulfillments or ()),
     )
+
+
+_FULFILLMENT_COLUMNS = (
+    "gid, status, tracking_company, tracking_number, tracking_url, created_at"
+)
+
+
+def _fulfillment_from_row(r: asyncpg.Record) -> Fulfillment:
+    # Single builder shared by the per-order and batched (`= ANY`) fulfillment reads so they
+    # cannot silently diverge (same discipline as _line_item_from_row).
+    return Fulfillment(
+        gid=str(r["gid"]),
+        status=r["status"],
+        tracking_company=r["tracking_company"],
+        tracking_number=r["tracking_number"],
+        tracking_url=r["tracking_url"],
+        created_at=r["created_at"].isoformat() if r["created_at"] else None,
+    )
+
+
+async def _fetch_mirror_fulfillments(
+    conn: asyncpg.Connection, order_gid: str
+) -> list[Fulfillment]:
+    rows = await conn.fetch(
+        f"SELECT {_FULFILLMENT_COLUMNS} FROM fulfillments WHERE order_gid = $1",
+        order_gid,
+    )
+    return [_fulfillment_from_row(r) for r in rows]
 
 
 def _line_item_from_row(r: asyncpg.Record) -> LineItem:
@@ -310,7 +350,8 @@ class PostgresIngestStore:
             if row is None:
                 return None
             items = await _fetch_mirror_line_items(conn, gid)
-        return _order_from_row(row, items)
+            fulfillments = await _fetch_mirror_fulfillments(conn, gid)
+        return _order_from_row(row, items, fulfillments)
 
     async def find_mirrored_order_by_name(self, raw_name: str) -> Order | None:
         name = normalize_order_name(raw_name)
@@ -322,8 +363,10 @@ class PostgresIngestStore:
             row = await conn.fetchrow(_MIRROR_ORDER_SELECT + "WHERE o.name = $1", name)
             if row is None:
                 return None
-            items = await _fetch_mirror_line_items(conn, str(row["gid"]))
-        return _order_from_row(row, items)
+            gid = str(row["gid"])
+            items = await _fetch_mirror_line_items(conn, gid)
+            fulfillments = await _fetch_mirror_fulfillments(conn, gid)
+        return _order_from_row(row, items, fulfillments)
 
     async def find_mirrored_orders_by_phone(self, phone_e164: str) -> list[Order]:
         # Backfilled history never writes order_mappings, so resolve_by_phone's fast path is
@@ -358,10 +401,27 @@ class PostgresIngestStore:
                 "price_currency FROM order_items WHERE order_gid = ANY($1)",
                 gids,
             )
+            fulfillment_rows = await conn.fetch(
+                f"SELECT order_gid, {_FULFILLMENT_COLUMNS} FROM fulfillments "
+                "WHERE order_gid = ANY($1)",
+                gids,
+            )
         items_by_gid: dict[str, list[LineItem]] = {}
         for r in item_rows:
             items_by_gid.setdefault(str(r["order_gid"]), []).append(_line_item_from_row(r))
-        return [_order_from_row(row, items_by_gid.get(str(row["gid"]), [])) for row in rows]
+        fulfillments_by_gid: dict[str, list[Fulfillment]] = {}
+        for r in fulfillment_rows:
+            fulfillments_by_gid.setdefault(str(r["order_gid"]), []).append(
+                _fulfillment_from_row(r)
+            )
+        return [
+            _order_from_row(
+                row,
+                items_by_gid.get(str(row["gid"]), []),
+                fulfillments_by_gid.get(str(row["gid"]), []),
+            )
+            for row in rows
+        ]
 
     async def upsert_order_mirror(self, order: Order) -> None:
         # LOCK ORDER: customers, then orders. `delete_by_phone` takes them the other way round
@@ -440,6 +500,35 @@ class PostgresIngestStore:
                         "($1, $2, $3, $4, $5, $6, $7)",
                         rows,
                     )
+
+    async def upsert_fulfillment(self, order_gid: str, fulfillment: Fulfillment) -> None:
+        # Guard on order existence FIRST, rather than relying on the FK to raise: the caller is a
+        # signed webhook whose soft-fail path logs an exception, and a fulfillment can legitimately
+        # arrive for an order not (yet) in the mirror (a stale order predating mirroring, or an
+        # orders/create sync that failed). Skipping quietly mirrors the customers/update
+        # "known only" decision and keeps a scary FK-violation traceback off the hot path.
+        async with self._pool.acquire() as conn:
+            exists = await conn.fetchval("SELECT 1 FROM orders WHERE gid = $1", order_gid)
+            if exists is None:
+                logger.info(
+                    "fulfillment mirror skipped, order not mirrored: order_gid=%s", order_gid
+                )
+                return
+            await conn.execute(
+                "INSERT INTO fulfillments (gid, order_gid, status, tracking_company, "
+                "tracking_number, tracking_url, created_at, updated_at) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, now()) "
+                "ON CONFLICT (gid) DO UPDATE SET order_gid = $2, status = $3, "
+                "tracking_company = $4, tracking_number = $5, tracking_url = $6, "
+                "created_at = $7, updated_at = now()",
+                fulfillment.gid,
+                order_gid,
+                fulfillment.status,
+                fulfillment.tracking_company,
+                fulfillment.tracking_number,
+                fulfillment.tracking_url,
+                _parse_timestamp(fulfillment.created_at),
+            )
 
     async def recent_mappings(self, limit: int) -> list[MappingView]:
         async with self._pool.acquire() as conn:

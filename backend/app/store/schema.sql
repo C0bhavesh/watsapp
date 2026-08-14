@@ -173,6 +173,24 @@ CREATE TABLE IF NOT EXISTS order_items (
 CREATE INDEX IF NOT EXISTS idx_order_items_order_gid ON order_items (order_gid);
 CREATE INDEX IF NOT EXISTS idx_order_items_sku ON order_items (sku);
 
+-- Courier/tracking details Shopify sends after an order is fulfilled (FULFILLMENTS_CREATE /
+-- FULFILLMENTS_UPDATE webhooks). One row per fulfillment; an order can have several (split
+-- shipments), so this is a child table keyed by order_gid, mirroring order_items exactly
+-- (FK to orders(gid) ON DELETE CASCADE, indexed by order_gid for the batched `= ANY` read).
+-- Read-only Q&A enrichment: the order-tracking agent surfaces the tracking link when asked
+-- (Q10). Additive + idempotent, applied the same way every other table here is.
+CREATE TABLE IF NOT EXISTS fulfillments (
+    gid              text PRIMARY KEY,
+    order_gid        text NOT NULL REFERENCES orders(gid) ON DELETE CASCADE,
+    status           text,
+    tracking_company text,
+    tracking_number  text,
+    tracking_url     text,
+    created_at       timestamptz,
+    updated_at       timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_fulfillments_order_gid ON fulfillments (order_gid);
+
 -- Shopify's own last-modified stamp for the mirrored resource (distinct from synced_at, which
 -- is when WE wrote the row). Shopify does not guarantee webhook delivery order, so the mirror
 -- upserts compare this value and refuse a write that is older than the stored one — otherwise a

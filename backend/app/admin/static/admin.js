@@ -265,6 +265,7 @@ async function loadControls() {
   el("c-rv-email").checked = c.reveal_fields.includes("email");
   el("c-rv-status").checked = c.reveal_fields.includes("status");
   el("c-rv-items").checked = c.reveal_fields.includes("items");
+  el("c-rv-tracking").checked = c.reveal_fields.includes("tracking");
   el("c-tags-pending").value = c.tags.pending.join(", ");
   el("c-tags-confirmed").value = c.tags.confirmed.join(", ");
   el("c-tags-cancelled").value = c.tags.cancelled.join(", ");
@@ -276,6 +277,7 @@ el("c-save").addEventListener("click", async () => {
   if (el("c-rv-email").checked) reveal.push("email");
   if (el("c-rv-status").checked) reveal.push("status");
   if (el("c-rv-items").checked) reveal.push("items");
+  if (el("c-rv-tracking").checked) reveal.push("tracking");
   const body = {
     send_mode: el("c-send-mode").value,
     allowlist_phones: csv(el("c-allowlist").value),

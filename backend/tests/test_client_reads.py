@@ -72,6 +72,69 @@ async def test_get_order_parses_full_node(settings, master_key) -> None:
     assert order.total is not None and order.total.currency == "INR"
 
 
+_FULFILLED_NODE = dict(
+    ORDER_NODE,
+    displayFulfillmentStatus="FULFILLED",
+    fulfillments=[
+        {
+            "id": "gid://shopify/Fulfillment/111",
+            "status": "SUCCESS",
+            "trackingInfo": [
+                {
+                    "company": "Delhivery",
+                    "number": "AWB0099887766",
+                    "url": "https://www.delhivery.com/track/AWB0099887766",
+                },
+            ],
+            "createdAt": "2026-08-14T03:14:46Z",
+        },
+    ],
+)
+
+
+async def test_order_fields_query_selects_fulfillments(settings, master_key) -> None:
+    captured: dict[str, str] = {}
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        captured["query"] = json.loads(request.content)["query"]
+        return httpx.Response(200, json={"data": {"node": ORDER_NODE}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    await client.get_order("gid://shopify/Order/12187547894128")
+    # The live-fallback read path must fetch the same tracking data the mirror path does.
+    assert "fulfillments(first: 5)" in captured["query"]
+    assert "trackingInfo(first: 3)" in captured["query"]
+
+
+async def test_get_order_parses_fulfillment_tracking(settings, master_key) -> None:
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"node": _FULFILLED_NODE}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    order = await client.get_order("gid://shopify/Order/12187547894128")
+    assert order is not None
+    assert len(order.fulfillments) == 1
+    f = order.fulfillments[0]
+    assert f.gid == "gid://shopify/Fulfillment/111"
+    assert f.status == "SUCCESS"
+    assert f.tracking_company == "Delhivery"
+    assert f.tracking_number == "AWB0099887766"
+    assert f.tracking_url == "https://www.delhivery.com/track/AWB0099887766"
+
+
+async def test_get_order_without_fulfillments_has_empty_tuple(settings, master_key) -> None:
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"node": ORDER_NODE}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    order = await client.get_order("gid://shopify/Order/12187547894128")
+    assert order is not None
+    assert order.fulfillments == ()
+
+
 async def test_get_order_parses_line_items(settings, master_key) -> None:
     def gql(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": {"node": ORDER_NODE}})

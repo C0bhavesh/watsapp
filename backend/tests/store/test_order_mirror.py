@@ -4,7 +4,7 @@ from datetime import datetime
 
 import pytest
 
-from app.shopify.models import Customer, LineItem, Money, Order
+from app.shopify.models import Customer, Fulfillment, LineItem, Money, Order
 from app.store.memory import InMemoryIngestStore
 from app.store.pg_factory import LazyPool
 from app.store.postgres import (
@@ -68,6 +68,80 @@ def _order(gid: str = "gid://shopify/Order/1", **overrides: object) -> Order:
     )
     base.update(overrides)
     return Order(**base)  # type: ignore[arg-type]
+
+
+def _fulfillment(gid: str = "gid://shopify/Fulfillment/1", **overrides: object) -> Fulfillment:
+    base = dict(
+        gid=gid, status="success", tracking_company="Delhivery",
+        tracking_number="AWB123", tracking_url="https://track/AWB123",
+        created_at="2026-08-14T00:00:00+00:00",
+    )
+    base.update(overrides)
+    return Fulfillment(**base)  # type: ignore[arg-type]
+
+
+async def test_upsert_fulfillment_attaches_to_get_mirrored_order() -> None:
+    store = InMemoryIngestStore()
+    await store.upsert_order_mirror(_order())
+    await store.upsert_fulfillment("gid://shopify/Order/1", _fulfillment())
+    result = await store.get_mirrored_order("gid://shopify/Order/1")
+    assert result is not None
+    assert len(result.fulfillments) == 1
+    assert result.fulfillments[0].tracking_number == "AWB123"
+
+
+async def test_upsert_fulfillment_replaces_by_fulfillment_gid() -> None:
+    store = InMemoryIngestStore()
+    await store.upsert_order_mirror(_order())
+    await store.upsert_fulfillment("gid://shopify/Order/1", _fulfillment(tracking_number="OLD"))
+    await store.upsert_fulfillment("gid://shopify/Order/1", _fulfillment(tracking_number="NEW"))
+    result = await store.get_mirrored_order("gid://shopify/Order/1")
+    assert result is not None
+    assert len(result.fulfillments) == 1
+    assert result.fulfillments[0].tracking_number == "NEW"
+
+
+async def test_upsert_fulfillment_supports_split_shipments() -> None:
+    # A single order can have MULTIPLE fulfillments (split shipments) -- modelled as a list.
+    store = InMemoryIngestStore()
+    await store.upsert_order_mirror(_order())
+    await store.upsert_fulfillment(
+        "gid://shopify/Order/1", _fulfillment(gid="gid://f/1", tracking_number="AWB1")
+    )
+    await store.upsert_fulfillment(
+        "gid://shopify/Order/1", _fulfillment(gid="gid://f/2", tracking_number="AWB2")
+    )
+    result = await store.get_mirrored_order("gid://shopify/Order/1")
+    assert result is not None
+    assert {f.tracking_number for f in result.fulfillments} == {"AWB1", "AWB2"}
+
+
+async def test_upsert_fulfillment_skips_when_order_not_mirrored() -> None:
+    # Parity with the Postgres FK (order_gid REFERENCES orders(gid)): a fulfillment for an order
+    # we have not mirrored is skipped, not stored, and never raises.
+    store = InMemoryIngestStore()
+    await store.upsert_fulfillment("gid://shopify/Order/unknown", _fulfillment())
+    assert await store.get_mirrored_order("gid://shopify/Order/unknown") is None
+
+
+async def test_get_mirrored_order_without_fulfillments_returns_empty_tuple() -> None:
+    store = InMemoryIngestStore()
+    await store.upsert_order_mirror(_order())
+    result = await store.get_mirrored_order("gid://shopify/Order/1")
+    assert result is not None
+    assert result.fulfillments == ()
+
+
+async def test_find_mirrored_orders_by_phone_attaches_fulfillments() -> None:
+    store = InMemoryIngestStore()
+    phone = "+919876500000"
+    await store.upsert_order_mirror(
+        _order(gid="gid://o1", phone=phone, shipping_phone=None, billing_phone=None, customer=None)
+    )
+    await store.upsert_fulfillment("gid://o1", _fulfillment(tracking_number="AWB-O1"))
+    results = await store.find_mirrored_orders_by_phone(phone)
+    assert len(results) == 1
+    assert results[0].fulfillments[0].tracking_number == "AWB-O1"
 
 
 async def test_upsert_customer_stores_a_new_row() -> None:
@@ -407,19 +481,25 @@ def _fake_order_row(gid: str, name: str = "tavas1") -> dict[str, object]:
 
 
 class _FakeReadConn:
-    """Serves the two reads `find_mirrored_orders_by_phone` makes, recording every SQL sent."""
+    """Serves the reads `find_mirrored_orders_by_phone` makes, recording every SQL sent."""
 
     def __init__(
-        self, order_rows: list[dict[str, object]], item_rows: list[dict[str, object]]
+        self,
+        order_rows: list[dict[str, object]],
+        item_rows: list[dict[str, object]],
+        fulfillment_rows: list[dict[str, object]] | None = None,
     ) -> None:
         self._order_rows = order_rows
         self._item_rows = item_rows
+        self._fulfillment_rows = fulfillment_rows or []
         self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
 
     async def fetch(self, sql: str, *args: object) -> list[dict[str, object]]:
         self.fetch_calls.append((" ".join(sql.split()), args))
         if "order_items" in sql:
             return self._item_rows
+        if "fulfillments" in sql:
+            return self._fulfillment_rows
         return self._order_rows
 
 
@@ -442,8 +522,8 @@ async def test_find_mirrored_orders_by_phone_pg_caps_and_orders_the_query() -> N
 
 
 async def test_find_mirrored_orders_by_phone_pg_batch_fetches_items_without_n_plus_one() -> None:
-    # One SELECT for the orders, then ONE batched SELECT for every order's items via
-    # `= ANY($1)` -- not one round-trip per order (the N+1 the review flagged).
+    # One SELECT for the orders, then ONE batched SELECT each for every order's items and
+    # fulfillments via `= ANY($1)` -- not one round-trip per order (the N+1 the review flagged).
     order_rows = [_fake_order_row("gid://a"), _fake_order_row("gid://b")]
     item_rows = [
         {"order_gid": "gid://a", "title": "A-item", "sku": None, "quantity": 1,
@@ -451,27 +531,36 @@ async def test_find_mirrored_orders_by_phone_pg_batch_fetches_items_without_n_pl
         {"order_gid": "gid://b", "title": "B-item", "sku": None, "quantity": 2,
          "variant_title": None, "price_amount": "10.00", "price_currency": "INR"},
     ]
-    conn = _FakeReadConn(order_rows, item_rows)
+    fulfillment_rows = [
+        {"order_gid": "gid://a", "gid": "gid://f/a", "status": "success",
+         "tracking_company": "Delhivery", "tracking_number": "AWB-A",
+         "tracking_url": "https://track/AWB-A", "created_at": None},
+    ]
+    conn = _FakeReadConn(order_rows, item_rows, fulfillment_rows)
     store = PostgresIngestStore(_FakePool(conn))  # type: ignore[arg-type]
 
     results = await store.find_mirrored_orders_by_phone("+919876500000")
 
-    assert len(conn.fetch_calls) == 2  # orders + ONE batched items query, not 1 + N
-    assert "= ANY($1)" in conn.fetch_calls[1][0]
+    # orders + ONE batched items query + ONE batched fulfillments query, not 1 + N
+    assert len(conn.fetch_calls) == 3
+    assert "order_items" in conn.fetch_calls[1][0] and "= ANY($1)" in conn.fetch_calls[1][0]
+    assert "fulfillments" in conn.fetch_calls[2][0] and "= ANY($1)" in conn.fetch_calls[2][0]
     by_gid = {o.gid: o for o in results}
-    # Items land on the right order -- no cross-contamination between orders.
+    # Items + fulfillments land on the right order -- no cross-contamination between orders.
     assert [li.title for li in by_gid["gid://a"].line_items] == ["A-item"]
     assert [li.title for li in by_gid["gid://b"].line_items] == ["B-item"]
+    assert [f.tracking_number for f in by_gid["gid://a"].fulfillments] == ["AWB-A"]
+    assert by_gid["gid://b"].fulfillments == ()
 
 
-async def test_find_mirrored_orders_by_phone_pg_skips_item_query_when_no_orders() -> None:
+async def test_find_mirrored_orders_by_phone_pg_skips_child_queries_when_no_orders() -> None:
     conn = _FakeReadConn([], [])
     store = PostgresIngestStore(_FakePool(conn))  # type: ignore[arg-type]
 
     results = await store.find_mirrored_orders_by_phone("+919000000000")
 
     assert results == []
-    assert len(conn.fetch_calls) == 1  # no orders => no wasted batch items round-trip
+    assert len(conn.fetch_calls) == 1  # no orders => no wasted batch child round-trips
 
 
 async def test_find_mirrored_order_by_name_pg_rejects_invalid_name_without_querying() -> None:
@@ -485,11 +574,62 @@ async def test_find_mirrored_order_by_name_pg_rejects_invalid_name_without_query
     assert await store.find_mirrored_order_by_name("bad name!") is None
 
 
+async def test_upsert_fulfillment_pg_checks_order_exists_then_upserts() -> None:
+    conn = _RecordingConn()  # fetchval returns "gid" => order exists
+    await _pg(conn).upsert_fulfillment("gid://shopify/Order/1", _fulfillment())
+
+    # First: the order-existence guard (mirrors the customers/update "known only" decision and
+    # avoids a bare FK-violation exception on a signed delivery); then the fulfillment upsert.
+    assert conn.executed[0][0].startswith("SELECT 1 FROM orders WHERE gid")
+    insert_sql = [sql for sql, _ in conn.executed if sql.startswith("INSERT INTO fulfillments")]
+    assert len(insert_sql) == 1
+    assert "ON CONFLICT (gid) DO UPDATE" in insert_sql[0]
+
+
+async def test_upsert_fulfillment_pg_skips_when_order_not_mirrored() -> None:
+    conn = _RecordingConn(order_upsert_applied=False)  # fetchval returns None => order absent
+    await _pg(conn).upsert_fulfillment("gid://shopify/Order/missing", _fulfillment())
+
+    assert "INSERT INTO fulfillments" not in conn.sql
+
+
 @pytest.fixture
 async def pool():
     p = LazyPool(DSN)
     yield p
     await p.close()
+
+
+@pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")
+async def test_upsert_fulfillment_pg_round_trips_onto_get_mirrored_order(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    gid = f"gid://shopify/Order/{uuid.uuid4()}"
+    await store.upsert_order_mirror(_order(gid=gid, customer=None))
+    await store.upsert_fulfillment(gid, _fulfillment(gid=f"gid://f/{uuid.uuid4()}"))
+
+    result = await store.get_mirrored_order(gid)
+
+    assert result is not None
+    assert len(result.fulfillments) == 1
+    assert result.fulfillments[0].tracking_number == "AWB123"
+    assert result.fulfillments[0].tracking_company == "Delhivery"
+
+
+@pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")
+async def test_upsert_fulfillment_pg_cascade_deletes_with_order(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    gid = f"gid://shopify/Order/{uuid.uuid4()}"
+    phone = f"+9198{uuid.uuid4().int % 100000000:08d}"
+    await store.upsert_order_mirror(
+        _order(gid=gid, phone=phone, shipping_phone=None, billing_phone=None, customer=None)
+    )
+    await store.upsert_fulfillment(gid, _fulfillment(gid=f"gid://f/{uuid.uuid4()}"))
+    await store.delete_by_phone(phone)
+    async with pool.acquire() as conn:
+        remaining = await conn.fetchval(
+            "SELECT count(*) FROM fulfillments WHERE order_gid = $1", gid
+        )
+    assert remaining == 0
 
 
 @pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")

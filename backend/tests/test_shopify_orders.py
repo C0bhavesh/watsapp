@@ -5,6 +5,7 @@ from app.channels.shopify_orders import (
     IncomingOrder,
     choose_language,
     customer_from_webhook_payload,
+    fulfillment_from_webhook_payload,
     is_eligible_for_push,
     order_from_webhook_payload,
     parse_order_created,
@@ -49,6 +50,104 @@ def test_parse_tolerates_missing_optional_fields() -> None:
     order = parse_order_created({"admin_graphql_api_id": "gid://shopify/Order/2", "name": "tavas9"})
     assert order is not None
     assert order.phone_e164 is None and order.tags == () and order.created_at is None
+
+
+FULFILLMENT_PAYLOAD = {
+    "id": 5551234567890,
+    "admin_graphql_api_id": "gid://shopify/Fulfillment/5551234567890",
+    "order_id": 12187547894128,
+    "status": "success",
+    "tracking_company": "Delhivery",
+    "tracking_number": "AWB0099887766",
+    "tracking_numbers": ["AWB0099887766"],
+    "tracking_url": "https://www.delhivery.com/track/AWB0099887766",
+    "tracking_urls": ["https://www.delhivery.com/track/AWB0099887766"],
+    "created_at": "2026-08-14T03:14:46-04:00",
+    "updated_at": "2026-08-14T03:20:00-04:00",
+}
+
+
+def test_fulfillment_parse_full_payload() -> None:
+    parsed = fulfillment_from_webhook_payload(FULFILLMENT_PAYLOAD)
+    assert parsed is not None
+    order_gid, fulfillment = parsed
+    # order_id is numeric in the REST payload -- the order gid is CONSTRUCTED from it.
+    assert order_gid == "gid://shopify/Order/12187547894128"
+    assert fulfillment.gid == "gid://shopify/Fulfillment/5551234567890"
+    assert fulfillment.status == "success"
+    assert fulfillment.tracking_company == "Delhivery"
+    assert fulfillment.tracking_number == "AWB0099887766"
+    assert fulfillment.tracking_url == "https://www.delhivery.com/track/AWB0099887766"
+    assert fulfillment.created_at == "2026-08-14T03:14:46-04:00"
+
+
+def test_fulfillment_falls_back_to_array_tracking_when_singular_absent() -> None:
+    payload = dict(FULFILLMENT_PAYLOAD)
+    del payload["tracking_number"]
+    del payload["tracking_url"]
+    payload["tracking_numbers"] = ["FIRST123", "SECOND456"]
+    payload["tracking_urls"] = ["https://track/FIRST123", "https://track/SECOND456"]
+    parsed = fulfillment_from_webhook_payload(payload)
+    assert parsed is not None
+    _, fulfillment = parsed
+    # A single fulfillment can carry multiple tracking numbers (rare) -- keep the first, matching
+    # the one-tracking-per-row mirror schema.
+    assert fulfillment.tracking_number == "FIRST123"
+    assert fulfillment.tracking_url == "https://track/FIRST123"
+
+
+def test_fulfillment_missing_own_gid_returns_none() -> None:
+    payload = dict(FULFILLMENT_PAYLOAD)
+    del payload["admin_graphql_api_id"]
+    assert fulfillment_from_webhook_payload(payload) is None
+
+
+def test_fulfillment_missing_or_bad_order_id_returns_none() -> None:
+    no_order = dict(FULFILLMENT_PAYLOAD)
+    del no_order["order_id"]
+    assert fulfillment_from_webhook_payload(no_order) is None
+    bad_order = dict(FULFILLMENT_PAYLOAD, order_id="not-a-number")
+    assert fulfillment_from_webhook_payload(bad_order) is None
+    # bool is an int subclass -- must not construct gid://shopify/Order/True
+    assert fulfillment_from_webhook_payload(dict(FULFILLMENT_PAYLOAD, order_id=True)) is None
+
+
+def test_fulfillment_accepts_string_order_id() -> None:
+    parsed = fulfillment_from_webhook_payload(dict(FULFILLMENT_PAYLOAD, order_id="98765"))
+    assert parsed is not None
+    order_gid, _ = parsed
+    assert order_gid == "gid://shopify/Order/98765"
+
+
+def test_fulfillment_without_tracking_keeps_none_fields() -> None:
+    # A fulfillment can exist with no tracking yet (label created, not scanned) -- parse it, do
+    # not fabricate a tracking number.
+    payload = {
+        "admin_graphql_api_id": "gid://shopify/Fulfillment/1",
+        "order_id": 42,
+        "status": "pending",
+    }
+    parsed = fulfillment_from_webhook_payload(payload)
+    assert parsed is not None
+    _, fulfillment = parsed
+    assert fulfillment.status == "pending"
+    assert fulfillment.tracking_number is None
+    assert fulfillment.tracking_url is None
+    assert fulfillment.tracking_company is None
+    assert fulfillment.has_tracking() is False
+
+
+def test_fulfillment_ignores_non_string_array_entries() -> None:
+    payload = {
+        "admin_graphql_api_id": "gid://shopify/Fulfillment/1",
+        "order_id": 42,
+        "tracking_numbers": [123, "GOOD"],
+    }
+    parsed = fulfillment_from_webhook_payload(payload)
+    assert parsed is not None
+    _, fulfillment = parsed
+    # first entry is not a str -> skip it, take the first usable string
+    assert fulfillment.tracking_number == "GOOD"
 
 
 def test_choose_language() -> None:

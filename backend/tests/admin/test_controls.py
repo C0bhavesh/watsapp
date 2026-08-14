@@ -18,7 +18,7 @@ def test_defaults(client: TestClient) -> None:
     body = r.json()
     assert body["send_mode"] == "off"
     assert body["push_policy"] == "cod_only"
-    assert body["reveal_fields"] == ["order_number", "email", "status", "items"]
+    assert body["reveal_fields"] == ["order_number", "email", "status", "items", "tracking"]
     assert body["default_language"] == "en"
     assert body["push_staleness_hours"] == 6
     # DPDP retention defaults to 0 = disabled (no policy invented until the client confirms Q15).
@@ -129,7 +129,7 @@ def test_schema_invalid_stored_value_returns_defaults_not_500(client: TestClient
     asyncio.run(_seed_bad())
     r = client.get("/admin/controls")
     assert r.status_code == 200
-    assert r.json()["reveal_fields"] == ["order_number", "email", "status", "items"]
+    assert r.json()["reveal_fields"] == ["order_number", "email", "status", "items", "tracking"]
 
 
 def test_unicode_digit_int_value_falls_back_to_safe_default(client: TestClient) -> None:
@@ -207,6 +207,16 @@ def test_default_reveal_fields_includes_items() -> None:
     from app.admin.controls import AdminControls
 
     assert "items" in AdminControls().reveal_fields
+
+
+def test_tracking_is_an_accepted_reveal_field_and_default_enabled() -> None:
+    # Q10 (already answered): the bot may share the Shopify tracking link when asked --
+    # pre-approved, so "tracking" is a valid reveal field, default-enabled, admin-toggleable.
+    from app.admin.controls import REVEAL_ALLOWED, AdminControls
+
+    assert "tracking" in REVEAL_ALLOWED
+    assert "tracking" in AdminControls().reveal_fields
+    assert AdminControls(reveal_fields=["tracking"]).reveal_fields == ["tracking"]
 
 
 async def test_vip_threshold_roundtrip(master_key: str) -> None:

@@ -45,7 +45,7 @@ VIP_HINT = (
 # never depends on the admin adapter (fastapi-layering.md: dependencies point inward); the two
 # are pinned together by a test. Production always passes the admin's own configured value --
 # this default only covers callers that do not care about disclosure gating.
-DEFAULT_REVEAL_FIELDS: tuple[str, ...] = ("order_number", "email", "status", "items")
+DEFAULT_REVEAL_FIELDS: tuple[str, ...] = ("order_number", "email", "status", "items", "tracking")
 
 # The reply contract each specialist appends to its own system prompt. ``handoff`` is the ONLY
 # thing that actually pauses the AI and brings a human into the chat (core/conversation.py) --

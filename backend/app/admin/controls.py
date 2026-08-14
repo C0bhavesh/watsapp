@@ -21,7 +21,9 @@ _E164_RE = re.compile(r"^\+[0-9]{7,15}\Z")
 # "items" reverses the earlier client decision that order items/amounts stay hidden (recorded
 # in docs/superpowers/specs/2026-08-10-order-item-details-design.md) -- default-enabled per
 # that decision, still independently admin-toggleable like every other value here.
-REVEAL_ALLOWED: tuple[str, ...] = ("order_number", "email", "status", "items")
+# "tracking" surfaces the Shopify courier/tracking link when the order is shipped (Q10, already
+# answered) -- pre-approved, default-enabled, still admin-toggleable.
+REVEAL_ALLOWED: tuple[str, ...] = ("order_number", "email", "status", "items", "tracking")
 
 # Per-tag cap: Shopify tags max out at 255 chars, so an over-long tag would fail at runtime
 # inside tagsAdd — reject it at the edge instead.
@@ -45,7 +47,8 @@ class AdminControls(BaseModel):
     allowlist_phones: list[str] = Field(default_factory=list, max_length=50)
     push_policy: Literal["cod_only", "all", "all_prepaid_no_buttons"] = "cod_only"
     reveal_fields: list[str] = Field(
-        default_factory=lambda: ["order_number", "email", "status", "items"], max_length=4
+        default_factory=lambda: ["order_number", "email", "status", "items", "tracking"],
+        max_length=5,
     )
     tags: TagLists = Field(
         default_factory=lambda: TagLists(

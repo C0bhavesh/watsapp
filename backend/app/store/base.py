@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
-from app.shopify.models import Customer, Order
+from app.shopify.models import Customer, Fulfillment, Order
 
 
 class ConfigRepo(Protocol):
@@ -176,6 +176,8 @@ class IngestStore(Protocol):
     async def upsert_customer(self, customer: Customer) -> None: ...
 
     async def upsert_order_mirror(self, order: Order) -> None: ...
+
+    async def upsert_fulfillment(self, order_gid: str, fulfillment: Fulfillment) -> None: ...
 
     async def customer_exists(self, gid: str) -> bool: ...
 

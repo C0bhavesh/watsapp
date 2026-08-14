@@ -1,6 +1,13 @@
 import pytest
 
-from app.shopify.models import AuthorizedOrder, Customer, Money, Order, normalize_order_name
+from app.shopify.models import (
+    AuthorizedOrder,
+    Customer,
+    Fulfillment,
+    Money,
+    Order,
+    normalize_order_name,
+)
 
 
 def make_order(**overrides) -> Order:
@@ -127,3 +134,33 @@ def test_order_accepts_a_customer() -> None:
     order = make_order(customer=cust)
     assert order.customer is cust
     assert order.customer.city == "Bengaluru"
+
+
+def test_order_fulfillments_default_to_empty_tuple() -> None:
+    assert make_order().fulfillments == ()
+
+
+def test_order_accepts_fulfillments() -> None:
+    f = Fulfillment(
+        gid="gid://shopify/Fulfillment/1",
+        status="SUCCESS",
+        tracking_company="Delhivery",
+        tracking_number="AWB123",
+        tracking_url="https://track.example/AWB123",
+        created_at="2026-08-14T00:00:00+00:00",
+    )
+    order = make_order(fulfillments=(f,))
+    assert order.fulfillments == (f,)
+    assert order.fulfillments[0].tracking_number == "AWB123"
+
+
+def test_fulfillment_tracking_fields_default_to_none() -> None:
+    f = Fulfillment(
+        gid="gid://shopify/Fulfillment/2",
+        status=None,
+        tracking_company=None,
+        tracking_number=None,
+        tracking_url=None,
+    )
+    assert f.created_at is None
+    assert f.tracking_number is None

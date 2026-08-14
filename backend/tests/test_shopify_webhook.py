@@ -143,7 +143,13 @@ def test_handled_topics_stay_in_sync_with_the_subscribed_topics() -> None:
     from app.channels.shopify_webhook import HANDLED_TOPICS
     from app.shopify.subscriptions import REQUIRED_TOPICS
 
-    assert HANDLED_TOPICS == {"orders/create", "orders/updated", "customers/update"}
+    assert HANDLED_TOPICS == {
+        "orders/create",
+        "orders/updated",
+        "customers/update",
+        "fulfillments/create",
+        "fulfillments/update",
+    }
     assert len(HANDLED_TOPICS) == len(REQUIRED_TOPICS)
 
 
@@ -194,6 +200,72 @@ async def test_a_newly_subscribed_topic_does_not_fall_through_to_orders_create(
     assert not store.mappings  # type: ignore[attr-defined]
     assert not store.outbound  # type: ignore[attr-defined]
     assert store.orders == {}  # type: ignore[attr-defined]
+
+
+def fulfillment_payload(
+    order_gid: str = "gid://shopify/Order/1",
+    fulfillment_gid: str = "gid://shopify/Fulfillment/1",
+) -> dict:
+    order_id = order_gid.rsplit("/", 1)[-1]
+    return {
+        "id": int(order_id) * 10 + 1,
+        "admin_graphql_api_id": fulfillment_gid,
+        "order_id": int(order_id),
+        "status": "success",
+        "tracking_company": "Delhivery",
+        "tracking_number": "AWB0099887766",
+        "tracking_url": "https://www.delhivery.com/track/AWB0099887766",
+        "created_at": datetime.now(UTC).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+
+
+@pytest.mark.parametrize("topic", ["fulfillments/create", "fulfillments/update"])
+async def test_fulfillments_topic_populates_the_mirror(topic: str) -> None:
+    # The order must be mirrored first (the FK / in-memory parity skips a fulfillment for an
+    # unknown order) -- an order is always created before it is fulfilled.
+    order_gid = f"gid://shopify/Order/{100 + hash(topic) % 100}"
+    body = json.dumps(payload(order_gid)).encode()
+    await post(body, headers(body, webhook_id=f"wh-o-{topic}"))
+
+    fbody = json.dumps(fulfillment_payload(order_gid)).encode()
+    resp = await post(fbody, headers(fbody, topic=topic, webhook_id=f"wh-f-{topic}"))
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "ignored": False}
+    order = await get_container().ingest.get_mirrored_order(order_gid)
+    assert order is not None
+    assert len(order.fulfillments) == 1
+    assert order.fulfillments[0].tracking_number == "AWB0099887766"
+    assert order.fulfillments[0].tracking_company == "Delhivery"
+    # The fulfillment delivery itself must NOT queue an outbound (only the original orders/create
+    # push exists). A second queued row here would re-send the confirmation template.
+    store = get_container().ingest
+    assert list(store.outbound) == [f"order_created:{order_gid}"]  # type: ignore[attr-defined]
+
+
+async def test_fulfillments_malformed_payload_ignored() -> None:
+    # No order_id -> unlinkable -> ignored, never a 500 on a signed delivery.
+    body = json.dumps({"admin_graphql_api_id": "gid://shopify/Fulfillment/x"}).encode()
+    resp = await post(body, headers(body, topic="fulfillments/create", webhook_id="wh-f-bad"))
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "ignored": True}
+
+
+async def test_fulfillments_still_acks_200_when_the_mirror_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = get_container().ingest
+
+    async def boom(order_gid: object, fulfillment: object) -> None:
+        raise RuntimeError("mirror unavailable")
+
+    monkeypatch.setattr(store, "upsert_fulfillment", boom)
+    body = json.dumps(fulfillment_payload()).encode()
+    resp = await post(body, headers(body, topic="fulfillments/create", webhook_id="wh-f-down"))
+    # A 500 here would burn Shopify's 19-failure retry budget; degrade to "logged and acked".
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "ignored": True}
 
 
 async def test_orders_updated_malformed_payload_ignored() -> None:

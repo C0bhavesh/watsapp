@@ -17,6 +17,7 @@ from app.shopify.models import (
     AuthorizedOrder,
     CancelRequested,
     Customer,
+    Fulfillment,
     LineItem,
     Money,
     Order,
@@ -38,6 +39,13 @@ ORDER_FIELDS = (
     "shippingAddress { phone address1 address2 city province zip country } "
     "billingAddress { phone } "
     "customer { id firstName lastName email updatedAt } "
+    # Courier/tracking for the order-tracking Q&A (Q10). Order.fulfillments is a plain LIST (not
+    # an edges/node connection), and an order can have several (split shipments). trackingInfo is
+    # itself a list (a fulfillment can rarely carry more than one number) -- we keep the first,
+    # matching the one-tracking-per-row mirror schema. `id` is selected so the live-path
+    # Fulfillment carries its real gid, consistent with the mirror path.
+    "fulfillments(first: 5) { id status trackingInfo(first: 3) { company number url } "
+    "createdAt } "
     # first: 50 is a query-time ceiling far above any realistic order size -- the display side
     # (order_tracking) shows every item with no further cap, by design (owner's explicit
     # choice: show all, don't summarize/truncate a customer's own order).
@@ -93,6 +101,30 @@ def _customer_from_node(node: dict[str, Any]) -> Customer | None:
     )
 
 
+def _fulfillments_from_node(node: dict[str, Any]) -> tuple[Fulfillment, ...]:
+    # Order.fulfillments is a plain list ([Fulfillment!]!), not an edges/node connection.
+    raw = node.get("fulfillments") or []
+    result: list[Fulfillment] = []
+    for f in raw:
+        if not isinstance(f, dict):
+            continue
+        info_list = f.get("trackingInfo") or []
+        # Keep the first tracking entry (a fulfillment rarely has more than one), matching the
+        # single-tracking-per-row mirror schema.
+        info = info_list[0] if info_list and isinstance(info_list[0], dict) else {}
+        result.append(
+            Fulfillment(
+                gid=str(f.get("id") or ""),
+                status=f.get("status"),
+                tracking_company=info.get("company"),
+                tracking_number=info.get("number"),
+                tracking_url=info.get("url"),
+                created_at=f.get("createdAt"),
+            )
+        )
+    return tuple(result)
+
+
 def _order_from_node(node: dict[str, Any]) -> Order:
     total_node = (node.get("totalPriceSet") or {}).get("shopMoney")
     return Order(
@@ -114,6 +146,7 @@ def _order_from_node(node: dict[str, Any]) -> Order:
         line_items=_line_items_from_node(node),
         customer=_customer_from_node(node),
         updated_at=node.get("updatedAt"),  # selected by ORDER_FIELDS; see the note there
+        fulfillments=_fulfillments_from_node(node),
     )
 
 

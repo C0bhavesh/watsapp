@@ -1,7 +1,7 @@
 from app.agents.base import DEFAULT_REVEAL_FIELDS, AgentContext
 from app.agents.order_tracking import _format_money, run
 from app.providers.base import CompletionResult, Message, ProviderError, ProviderErrorKind
-from app.shopify.models import AuthorizedOrder, LineItem, Money, Order
+from app.shopify.models import AuthorizedOrder, Fulfillment, LineItem, Money, Order
 
 
 def _order(
@@ -12,14 +12,21 @@ def _order(
     line_items: tuple[LineItem, ...] = (),
     payment_gateway_names: tuple[str, ...] = (),
     tags: tuple[str, ...] = (),
+    fulfillments: tuple[Fulfillment, ...] = (),
 ) -> Order:
     return Order(
         gid=f"gid://{name}", name=name, email="c@example.com", phone=phone,
         shipping_phone=None, billing_phone=None, financial_status="paid",
         fulfillment_status=fulfillment_status, cancelled_at=cancelled_at, tags=tags,
         payment_gateway_names=payment_gateway_names, total=None, customer_locale=None,
-        line_items=line_items,
+        line_items=line_items, fulfillments=fulfillments,
     )
+
+
+_TRACKED = Fulfillment(
+    gid="gid://f/1", status="SUCCESS", tracking_company="Delhivery",
+    tracking_number="AWB0099887766", tracking_url="https://track/AWB0099887766",
+)
 
 
 class _FixedProvider:
@@ -183,6 +190,56 @@ async def test_reveal_fields_without_order_number_withholds_the_order_name() -> 
     prompt = _system_prompt(provider)
     assert "tavas1" not in prompt
     assert "cancel eligible: True" in prompt  # status IS approved
+
+
+async def test_tracking_rendered_when_reveal_includes_tracking_and_order_shipped() -> None:
+    # Q10: when the order is shipped and tracking exists, the agent should be able to share the
+    # Shopify tracking link/company/number -- so it must reach the prompt.
+    provider = _CapturingProvider(text='{"reply": "Here is your tracking."}')
+    order = AuthorizedOrder(
+        order=_order(
+            "tavas1", "+919999999999", fulfillment_status="FULFILLED", fulfillments=(_TRACKED,)
+        ),
+        verified_phone="+919999999999",
+    )
+    await run(_context(provider, "where is my order", [order]))  # default reveal has tracking
+
+    prompt = _system_prompt(provider)
+    assert "AWB0099887766" in prompt
+    assert "Delhivery" in prompt
+    assert "https://track/AWB0099887766" in prompt
+
+
+async def test_tracking_withheld_when_not_in_reveal_fields() -> None:
+    provider = _CapturingProvider(text='{"reply": "Let me check."}')
+    order = AuthorizedOrder(
+        order=_order(
+            "tavas1", "+919999999999", fulfillment_status="FULFILLED", fulfillments=(_TRACKED,)
+        ),
+        verified_phone="+919999999999",
+    )
+    # status approved but tracking NOT approved -> tracking details never reach the model.
+    reveal = ("order_number", "status")
+    await run(_context(provider, "where is my order", [order], reveal_fields=reveal))
+
+    prompt = _system_prompt(provider)
+    assert "AWB0099887766" not in prompt
+    assert "https://track/AWB0099887766" not in prompt
+
+
+async def test_no_tracking_fabricated_when_order_not_shipped() -> None:
+    # An order with no fulfillments has no tracking -- the prompt must not invent a tracking line
+    # even though "tracking" is in reveal_fields.
+    provider = _CapturingProvider(text='{"reply": "Not shipped yet."}')
+    order = AuthorizedOrder(
+        order=_order("tavas1", "+919999999999", fulfillment_status="UNFULFILLED"),
+        verified_phone="+919999999999",
+    )
+    await run(_context(provider, "where is my order", [order]))
+
+    prompt = _system_prompt(provider)
+    assert "Tracking" not in prompt or "AWB" not in prompt
+    assert "https://track" not in prompt
 
 
 async def test_reveal_fields_empty_withholds_every_order_detail() -> None:

@@ -37,6 +37,28 @@ class Customer:
 
 
 @dataclass(frozen=True)
+class Fulfillment:
+    """One Shopify fulfillment (shipment) of an order, carrying its courier/tracking details.
+
+    A single Order can have MULTIPLE fulfillments (split shipments), so orders hold these as a
+    tuple. A single fulfillment can itself carry more than one tracking number (rare) -- we keep
+    the first, matching the one-tracking-per-row mirror schema. Read-only Q&A enrichment for the
+    order-tracking agent (Q10: share the Shopify tracking link when asked); never on a mutation
+    path.
+    """
+
+    gid: str
+    status: str | None
+    tracking_company: str | None
+    tracking_number: str | None
+    tracking_url: str | None
+    created_at: str | None = None
+
+    def has_tracking(self) -> bool:
+        return bool(self.tracking_number or self.tracking_url)
+
+
+@dataclass(frozen=True)
 class Order:
     gid: str
     name: str
@@ -55,6 +77,9 @@ class Order:
     customer: Customer | None = None
     # See Customer.updated_at — the mirror's out-of-order-delivery guard.
     updated_at: str | None = None
+    # Split shipments: an order can have several fulfillments, each with its own tracking. Empty
+    # until the order is fulfilled. Populated on both read paths (live Shopify query + DB mirror).
+    fulfillments: tuple[Fulfillment, ...] = ()
 
     def best_phone(self) -> str | None:
         return self.phone or self.shipping_phone or self.billing_phone

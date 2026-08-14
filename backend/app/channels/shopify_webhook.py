@@ -10,6 +10,7 @@ from app.channels.shopify_orders import (
     choose_language,
     clip,
     customer_from_webhook_payload,
+    fulfillment_from_webhook_payload,
     is_eligible_for_push,
     order_from_webhook_payload,
     parse_order_created,
@@ -17,7 +18,7 @@ from app.channels.shopify_orders import (
 from app.channels.shopify_signature import verify_shopify_hmac
 from app.config.crypto import VaultError
 from app.deps import Container, get_container
-from app.shopify.models import Customer, Order
+from app.shopify.models import Customer, Fulfillment, Order
 from app.shopify.subscriptions import REQUIRED_TOPICS
 from app.store.base import MappingUpsert, OutboundDraft
 
@@ -79,6 +80,24 @@ async def _mirror_customer(c: Container, customer: Customer) -> bool:
         await c.ingest.upsert_customer(customer)
     except Exception:
         logger.exception("customer mirror sync failed: gid=%s", customer.gid)
+        return False
+    return True
+
+
+async def _mirror_fulfillment(
+    c: Container, order_gid: str, fulfillment: Fulfillment
+) -> bool:
+    """Sync one fulfillment's tracking into the mirror. Never fatal to the ack (see
+    ``_mirror_order`` on why a signed-delivery 500 must be avoided).
+
+    ``upsert_fulfillment`` itself skips a fulfillment whose order is not mirrored (the FK would
+    otherwise reject it), so a fulfillment arriving for an unknown order degrades to a logged
+    skip, not an error.
+    """
+    try:
+        await c.ingest.upsert_fulfillment(order_gid, fulfillment)
+    except Exception:
+        logger.exception("fulfillment mirror sync failed: gid=%s", fulfillment.gid)
         return False
     return True
 
@@ -162,6 +181,15 @@ async def shopify_webhook(request: Request) -> Response:
         if order is None:
             return JSONResponse({"ok": True, "ignored": True})
         return JSONResponse({"ok": True, "ignored": not await _mirror_order(c, order)})
+
+    if topic in ("fulfillments/create", "fulfillments/update"):
+        parsed = fulfillment_from_webhook_payload(payload)
+        if parsed is None:
+            return JSONResponse({"ok": True, "ignored": True})
+        order_gid, fulfillment = parsed
+        return JSONResponse(
+            {"ok": True, "ignored": not await _mirror_fulfillment(c, order_gid, fulfillment)}
+        )
 
     # Explicit, not an implicit else: HANDLED_TOPICS is DERIVED from REQUIRED_TOPICS, so a
     # future subscription topic passes the gate above automatically. Falling through would run

@@ -2,16 +2,32 @@ import asyncpg
 import pytest
 
 from app.core.mirror_order_source import MirrorOrderSource
-from app.shopify.models import Order
+from app.shopify.models import Fulfillment, Order
 
 
-def _order(gid: str, name: str) -> Order:
+def _order(gid: str, name: str, fulfillments: tuple[Fulfillment, ...] = ()) -> Order:
     return Order(
         gid=gid, name=name, email=None, phone=None, shipping_phone=None,
         billing_phone=None, financial_status=None, fulfillment_status=None,
         cancelled_at=None, tags=(), payment_gateway_names=(), total=None,
-        customer_locale=None,
+        customer_locale=None, fulfillments=fulfillments,
     )
+
+
+async def test_get_order_passes_fulfillments_through_transparently() -> None:
+    # The adapter does not touch Order.fulfillments -- a tracked mirror order keeps its tracking
+    # data through the OrderSource boundary (both paths populate it; the adapter just forwards).
+    f = Fulfillment(
+        gid="gid://f/1", status="SUCCESS", tracking_company="Delhivery",
+        tracking_number="AWB1", tracking_url="https://track/AWB1",
+    )
+    ingest = _FakeMirrorIngest(order_by_gid=_order("gid://1", "tavas1", fulfillments=(f,)))
+    source = MirrorOrderSource(ingest, _FakeShopify())
+
+    result = await source.get_order("gid://1")
+
+    assert result is not None
+    assert result.fulfillments == (f,)
 
 
 class _FakeMirrorIngest:

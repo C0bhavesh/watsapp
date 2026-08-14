@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from app.core.phone import normalize_phone
-from app.shopify.models import Customer, LineItem, Money, Order
+from app.shopify.models import Customer, Fulfillment, LineItem, Money, Order
 
 SUPPORTED_LANGUAGES = frozenset({"en", "hi", "gu"})
 
@@ -201,6 +201,72 @@ def order_from_webhook_payload(payload: dict) -> Order | None:  # type: ignore[t
         customer=_customer_from_order_payload(payload),
         updated_at=_c(payload.get("updated_at")),
     )
+
+
+def _order_gid_from_id(raw: object) -> str | None:
+    """Build the order gid from a fulfillment payload's numeric ``order_id``.
+
+    Unlike every other parser here, the order gid CANNOT be taken from an ``admin_graphql_api_id``
+    field -- a fulfillment payload's own ``admin_graphql_api_id`` is the FULFILLMENT's gid, and the
+    only reference to its order is the numeric ``order_id``. So the order gid is reconstructed here
+    (the one place F20's "never reconstruct a gid" rule cannot apply, because Shopify gives us no
+    order gid to copy). ``bool`` is an ``int`` subclass, so it is rejected explicitly; a string
+    id must be ASCII digits only, so nothing path-like is interpolated into the gid.
+    """
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return f"gid://shopify/Order/{raw}"
+    if isinstance(raw, str) and raw.isascii() and raw.isdigit():
+        return f"gid://shopify/Order/{raw}"
+    return None
+
+
+def _first_tracking(singular: object, plural: object) -> str | None:
+    """The tracking value: the singular field if present, else the first array entry.
+
+    Shopify sends ``tracking_number``/``tracking_url`` (singular) plus ``tracking_numbers``/
+    ``tracking_urls`` (arrays). A single fulfillment can carry more than one tracking number
+    (rare) -- we keep the first usable one, matching the one-tracking-per-row mirror schema.
+    """
+    value = _c(singular)
+    if value is not None:
+        return value
+    for entry in _seq(plural):
+        clipped = _c(entry)
+        if clipped is not None:
+            return clipped
+    return None
+
+
+def fulfillment_from_webhook_payload(
+    payload: dict,  # type: ignore[type-arg]
+) -> tuple[str, Fulfillment] | None:
+    """Parse a Shopify ``fulfillments/create``/``fulfillments/update`` REST payload into
+    ``(order_gid, Fulfillment)``.
+
+    Returns ``None`` when the fulfillment's own gid or its order reference is missing/unusable --
+    a fulfillment we cannot link to an order is not storable. Every field is treated as
+    attacker-typed (the delivery is signed but the body is untrusted), so tracking fields degrade
+    to ``None`` rather than raising.
+    """
+    gid = payload.get("admin_graphql_api_id")
+    if not isinstance(gid, str) or not gid:
+        return None
+    order_gid = _order_gid_from_id(payload.get("order_id"))
+    if order_gid is None:
+        return None
+    fulfillment = Fulfillment(
+        gid=gid[:MAX_FIELD_LEN],
+        status=_c(payload.get("status")),
+        tracking_company=_c(payload.get("tracking_company")),
+        tracking_number=_first_tracking(
+            payload.get("tracking_number"), payload.get("tracking_numbers")
+        ),
+        tracking_url=_first_tracking(payload.get("tracking_url"), payload.get("tracking_urls")),
+        created_at=_c(payload.get("created_at")),
+    )
+    return order_gid, fulfillment
 
 
 def customer_from_webhook_payload(payload: dict) -> Customer | None:  # type: ignore[type-arg]

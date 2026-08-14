@@ -11,6 +11,9 @@ from app.deps import get_container, reset_container
 from app.shopify.models import Customer
 
 SECRET = "csec-webhook"
+# The per-store "webhook signing secret" shown on Admin -> Settings -> Notifications, used to
+# sign webhooks the owner creates there (distinct from the app's own client_secret above).
+WEBHOOK_SIGNING_SECRET = "wss-admin-created"
 
 
 @pytest.fixture(autouse=True)
@@ -41,6 +44,12 @@ def payload(gid: str = "gid://shopify/Order/1") -> dict:
 
 def sign(body: bytes) -> str:
     return base64.b64encode(hmac_lib.new(SECRET.encode(), body, hashlib.sha256).digest()).decode()
+
+
+def sign_with(secret: str, body: bytes) -> str:
+    return base64.b64encode(
+        hmac_lib.new(secret.encode(), body, hashlib.sha256).digest()
+    ).decode()
 
 
 async def post(body: bytes, headers: dict) -> httpx.Response:
@@ -496,6 +505,79 @@ async def test_corrupt_secret_fails_closed_403() -> None:
     body = json.dumps(payload()).encode()
     resp = await post(body, headers(body))
     assert resp.status_code == 403
+
+
+async def test_webhook_signing_secret_also_verifies() -> None:
+    # Transition period: a webhook the owner creates in Admin -> Settings -> Notifications is
+    # signed with the per-store webhook signing secret, NOT the app's client_secret. Once that
+    # secret is configured, such a delivery must verify.
+    await get_container().config.set_secret(
+        "shopify:webhook_signing_secret", WEBHOOK_SIGNING_SECRET
+    )
+    body = json.dumps(payload("gid://shopify/Order/adminwh")).encode()
+    hdrs = headers(body, webhook_id="wh-admin")
+    hdrs["X-Shopify-Hmac-Sha256"] = sign_with(WEBHOOK_SIGNING_SECRET, body)
+    resp = await post(body, hdrs)
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "duplicate": False, "queued": True}
+
+
+async def test_client_secret_still_verifies_when_signing_secret_also_configured() -> None:
+    # Regression: the currently-live app-created path (signed with client_secret) must keep
+    # verifying even after the second secret is added — both delivery sources coexist.
+    await get_container().config.set_secret(
+        "shopify:webhook_signing_secret", WEBHOOK_SIGNING_SECRET
+    )
+    body = json.dumps(payload("gid://shopify/Order/appwh")).encode()
+    resp = await post(body, headers(body, webhook_id="wh-app"))
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "duplicate": False, "queued": True}
+
+
+async def test_neither_secret_verifies_rejected_403() -> None:
+    # A garbage signature is still rejected even with both secrets configured.
+    await get_container().config.set_secret(
+        "shopify:webhook_signing_secret", WEBHOOK_SIGNING_SECRET
+    )
+    body = json.dumps(payload()).encode()
+    hdrs = headers(body)
+    hdrs["X-Shopify-Hmac-Sha256"] = sign_with("some-other-secret", body)
+    resp = await post(body, hdrs)
+    assert resp.status_code == 403
+    assert not get_container().ingest.webhooks  # type: ignore[attr-defined]
+
+
+async def test_signing_secret_signed_delivery_rejected_when_unconfigured() -> None:
+    # The second secret is only honored once configured. With it unset (autouse fixture seeds
+    # only client_secret), a delivery signed with it must NOT verify — behaves exactly as today.
+    body = json.dumps(payload()).encode()
+    hdrs = headers(body)
+    hdrs["X-Shopify-Hmac-Sha256"] = sign_with(WEBHOOK_SIGNING_SECRET, body)
+    resp = await post(body, hdrs)
+    assert resp.status_code == 403
+
+
+async def test_corrupt_signing_secret_does_not_break_client_secret_path() -> None:
+    # A VaultError reading the SECONDARY secret must fail that check closed — never crash the
+    # request nor block a valid client_secret-signed (app-created) delivery.
+    await get_container().config_repo.set("shopify:webhook_signing_secret", "gAAAAAcorrupt")
+    body = json.dumps(payload("gid://shopify/Order/appok")).encode()
+    resp = await post(body, headers(body, webhook_id="wh-appok"))
+    assert resp.status_code == 200
+
+
+async def test_corrupt_client_secret_falls_through_to_signing_secret() -> None:
+    # A VaultError reading the PRIMARY secret fails that check closed but must NOT reject the
+    # request when the secondary (Admin-created) signing secret validates it.
+    await get_container().config_repo.set("shopify:client_secret", "gAAAAAcorrupt")
+    await get_container().config.set_secret(
+        "shopify:webhook_signing_secret", WEBHOOK_SIGNING_SECRET
+    )
+    body = json.dumps(payload("gid://shopify/Order/adminok")).encode()
+    hdrs = headers(body, webhook_id="wh-adminok")
+    hdrs["X-Shopify-Hmac-Sha256"] = sign_with(WEBHOOK_SIGNING_SECRET, body)
+    resp = await post(body, hdrs)
+    assert resp.status_code == 200
 
 
 async def test_foreign_shop_domain_403_and_nothing_ingested() -> None:

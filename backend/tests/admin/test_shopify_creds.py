@@ -16,7 +16,10 @@ def test_requires_auth(client: TestClient) -> None:
 
 def test_first_time_requires_both(client: TestClient) -> None:
     login(client)
-    assert client.get("/admin/shopify").json() == {"configured": False}
+    assert client.get("/admin/shopify").json() == {
+        "configured": False,
+        "webhook_signing_secret_configured": False,
+    }
     assert client.post("/admin/shopify", json={"client_id": "abc"}).status_code == 422
 
 
@@ -24,7 +27,10 @@ def test_save_then_partial_update(client: TestClient) -> None:
     login(client)
     r = client.post("/admin/shopify", json={"client_id": "id1", "client_secret": "sec1"})
     assert r.status_code == 200 and r.json() == {"ok": True}
-    assert client.get("/admin/shopify").json() == {"configured": True}
+    assert client.get("/admin/shopify").json() == {
+        "configured": True,
+        "webhook_signing_secret_configured": False,
+    }
     # partial update: change only the secret; id must survive
     assert client.post("/admin/shopify", json={"client_secret": "sec2"}).status_code == 200
 
@@ -51,3 +57,34 @@ def test_over_long_client_secret_not_echoed(client: TestClient) -> None:
     r = client.post("/admin/shopify", json={"client_id": "x", "client_secret": secret})
     assert r.status_code == 422
     assert secret not in r.text  # validation handler must not echo the submitted secret
+
+
+def test_set_webhook_signing_secret_leaves_client_creds(client: TestClient) -> None:
+    login(client)
+    client.post("/admin/shopify", json={"client_id": "id1", "client_secret": "sec1"})
+    # Add the webhook signing secret alone; the client creds must survive (blank = keep).
+    r = client.post("/admin/shopify", json={"webhook_signing_secret": "wss1"})
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert client.get("/admin/shopify").json() == {
+        "configured": True,
+        "webhook_signing_secret_configured": True,
+    }
+
+    async def _read() -> tuple[str | None, str | None, str | None]:
+        cfg = get_container().config
+        return (
+            await cfg.get_secret("shopify:client_id"),
+            await cfg.get_secret("shopify:client_secret"),
+            await cfg.get_secret("shopify:webhook_signing_secret"),
+        )
+
+    cid, csec, wss = asyncio.run(_read())
+    assert (cid, csec, wss) == ("id1", "sec1", "wss1")
+
+
+def test_webhook_signing_secret_never_echoed(client: TestClient) -> None:
+    login(client)
+    client.post("/admin/shopify", json={"client_id": "id1", "client_secret": "sec1"})
+    client.post("/admin/shopify", json={"webhook_signing_secret": "wss-secret-value"})
+    body = client.get("/admin/shopify").text
+    assert "wss-secret-value" not in body

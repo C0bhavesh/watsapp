@@ -48,7 +48,8 @@ el("password").addEventListener("keydown", (ev) => {
 async function loadShopify() {
   const s = await api("GET", "/admin/shopify");
   const b = el("shopify-badge");
-  b.textContent = s.configured ? "configured" : "not configured";
+  const wss = s.webhook_signing_secret_configured ? " + webhook secret" : "";
+  b.textContent = s.configured ? "configured" + wss : "not configured";
   b.className = "badge" + (s.configured ? " on" : "");
 }
 el("sh-save").addEventListener("click", async () => {
@@ -56,8 +57,10 @@ el("sh-save").addEventListener("click", async () => {
     await api("POST", "/admin/shopify", {
       client_id: el("sh-client-id").value || null,
       client_secret: el("sh-client-secret").value || null,
+      webhook_signing_secret: el("sh-webhook-signing-secret").value || null,
     });
     el("sh-client-id").value = ""; el("sh-client-secret").value = "";
+    el("sh-webhook-signing-secret").value = "";
     setStatus("sh-status", "Saved.", "ok");
     loadShopify();
   } catch (e) { setStatus("sh-status", e.message, "err"); }

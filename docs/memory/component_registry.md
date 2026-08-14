@@ -180,7 +180,7 @@
 - **Purpose:** plain + encrypted config access over a ConfigRepo + SecretVault.
 - **Public API:** `ConfigService(repo: ConfigRepo, vault: SecretVault)`; async `get_plain/set_plain(key[, value])`, `get_secret/set_secret(key[, value])` (secrets encrypted at rest).
 - **Used in:** TokenManager, deps.Container, scripts/smoke_shopify.
-- **Notes:** secret keys in use: `shopify:client_id`, `shopify:client_secret`, `shopify:access_token`. Plain key: `shopify:token_expires_at`.
+- **Notes:** secret keys in use: `shopify:client_id`, `shopify:client_secret`, `shopify:webhook_signing_secret` (the per-store Admin→Notifications webhook signing secret; 2nd accepted secret in the `/webhooks/shopify` HMAC check — added 2026-08-14), `shopify:access_token`. Plain key: `shopify:token_expires_at`.
 
 ## Shopify models + normalize_order_name
 - **File:** backend/app/shopify/models.py

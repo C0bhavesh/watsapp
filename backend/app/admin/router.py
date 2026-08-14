@@ -277,10 +277,16 @@ async def put_knowledge(kind: str, payload: dict[str, object]) -> dict[str, bool
 
 
 class ShopifyCredsRequest(BaseModel):
-    """Blank/omitted field = keep the stored value (first-time setup requires both)."""
+    """Blank/omitted field = keep the stored value (first-time setup requires client id+secret).
+
+    ``webhook_signing_secret`` is the per-store secret shown on Admin -> Settings ->
+    Notifications, used to sign webhooks the owner creates there. It is INDEPENDENT of the
+    app's client_id/client_secret and additive — omitting it never affects first-time setup.
+    """
 
     client_id: str | None = Field(default=None, max_length=256)
     client_secret: str | None = Field(default=None, max_length=256)
+    webhook_signing_secret: str | None = Field(default=None, max_length=256)
 
 
 def _clean(v: str | None) -> str | None:
@@ -295,13 +301,18 @@ async def shopify_status() -> dict[str, bool]:
     cfg = get_container().config
     has_id = await cfg.get_secret("shopify:client_id") is not None
     has_secret = await cfg.get_secret("shopify:client_secret") is not None
-    return {"configured": has_id and has_secret}
+    has_webhook_secret = await cfg.get_secret("shopify:webhook_signing_secret") is not None
+    return {
+        "configured": has_id and has_secret,
+        "webhook_signing_secret_configured": has_webhook_secret,
+    }
 
 
 @admin_router.post("/shopify", dependencies=[Depends(require_admin)])
 async def set_shopify(req: ShopifyCredsRequest) -> dict[str, bool]:
     cfg = get_container().config
     client_id, client_secret = _clean(req.client_id), _clean(req.client_secret)
+    webhook_signing_secret = _clean(req.webhook_signing_secret)
     existing_id = await cfg.get_secret("shopify:client_id")
     existing_secret = await cfg.get_secret("shopify:client_secret")
     if (existing_id is None and client_id is None) or (
@@ -314,6 +325,9 @@ async def set_shopify(req: ShopifyCredsRequest) -> dict[str, bool]:
         await cfg.set_secret("shopify:client_id", client_id)
     if client_secret is not None:
         await cfg.set_secret("shopify:client_secret", client_secret)
+    # Additive transition secret: written only when supplied, independent of the client creds.
+    if webhook_signing_secret is not None:
+        await cfg.set_secret("shopify:webhook_signing_secret", webhook_signing_secret)
     _audit("credential_set", "success", resource="shopify")
     return {"ok": True}
 

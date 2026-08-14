@@ -134,6 +134,23 @@ def _staleness_hours(raw: str | None) -> float:
     return value
 
 
+async def _hmac_verifies(c: Container, key: str, raw: bytes, header: str | None) -> bool:
+    """True iff the secret stored under ``key`` exists and validates the body's Shopify HMAC.
+
+    Fails CLOSED on every failure mode — an unset key (``get_secret`` returns None), an
+    unreadable/corrupt secret (``VaultError`` from a rotated/corrupt master key), or a genuine
+    signature mismatch — so a caller can OR several secrets together and a broken/absent one
+    never crashes the request nor short-circuits the others.
+    """
+    try:
+        secret = await c.config.get_secret(key)
+    except VaultError:
+        return False
+    if not secret:
+        return False
+    return verify_shopify_hmac(raw, header, secret)
+
+
 @router.post("/webhooks/shopify")
 async def shopify_webhook(request: Request) -> Response:
     # Reject oversized bodies pre-auth: declared Content-Length first, then actual bytes.
@@ -150,13 +167,18 @@ async def shopify_webhook(request: Request) -> Response:
         return PlainTextResponse("payload too large", status_code=413)
 
     c = get_container()
-    # Fail closed if the secret can't be read/decrypted (rotated/corrupt master key).
-    try:
-        secret = await c.config.get_secret("shopify:client_secret")
-    except VaultError:
-        return PlainTextResponse("forbidden", status_code=403)
-    if not secret or not verify_shopify_hmac(
-        raw, request.headers.get("X-Shopify-Hmac-Sha256"), secret
+    # Transition period: accept EITHER signing secret. App-created subscriptions
+    # (webhookSubscriptionCreate) are signed with our app's `shopify:client_secret`; webhooks the
+    # owner configures in Admin -> Settings -> Notifications are signed with the per-store
+    # `shopify:webhook_signing_secret`. Both must verify during the cutover, without an atomic
+    # switch. Try the live app secret first (the current real-order path); fall through to the
+    # signing secret only if configured. Each check fails CLOSED independently — an unset key
+    # (get_secret None) or an unreadable/corrupt one (VaultError) just doesn't verify, and never
+    # crashes the request nor blocks the other secret. If NEITHER verifies -> 403, as today.
+    header = request.headers.get("X-Shopify-Hmac-Sha256")
+    if not (
+        await _hmac_verifies(c, "shopify:client_secret", raw, header)
+        or await _hmac_verifies(c, "shopify:webhook_signing_secret", raw, header)
     ):
         return PlainTextResponse("forbidden", status_code=403)
 

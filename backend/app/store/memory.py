@@ -70,6 +70,10 @@ class InMemoryIngestStore:
         self._outbound_by_id: dict[int, str] = {}
         self._outbound_next_id = 1
         self._mapping_status: dict[str, str] = {}
+        # Creation timestamp per mapping — the in-memory analogue of order_mappings.created_at,
+        # stamped once on first ingest (Postgres never resets it on ON CONFLICT DO UPDATE). Used
+        # only by find_stale_template_sent's age filter; tests backdate it to simulate an old order.
+        self._mapping_created_at: dict[str, datetime] = {}
         self.order_actions: list[dict[str, str | None]] = []
         self.customers: dict[str, Customer] = {}
         self.orders: dict[str, Order] = {}
@@ -87,22 +91,31 @@ class InMemoryIngestStore:
             return IngestResult(duplicate=True, queued=False)
         self.webhooks.add(key)
         self.mappings[mapping.order_gid] = mapping
-        queued = False
-        if outbound is not None and outbound.dedupe_key not in self.outbound:
-            self.outbound[outbound.dedupe_key] = outbound
-            row = _OutboundRow(
-                id=self._outbound_next_id,
-                state="queued",
-                attempts=0,
-                last_error_code=None,
-                template_wamid=None,
-                updated_at=datetime.now(UTC),
-            )
-            self._outbound_meta[outbound.dedupe_key] = row
-            self._outbound_by_id[row.id] = outbound.dedupe_key
-            self._outbound_next_id += 1
-            queued = True
+        self._mapping_created_at.setdefault(mapping.order_gid, datetime.now(UTC))
+        queued = self._enqueue(outbound) if outbound is not None else False
         return IngestResult(duplicate=False, queued=queued)
+
+    def _enqueue(self, outbound: OutboundDraft) -> bool:
+        """Queue one draft, idempotent on dedupe_key (mirrors Postgres ON CONFLICT DO NOTHING).
+
+        Shared by ingest_order_created (original push) and enqueue_outbound (reminder re-queue) so
+        the outbox bookkeeping (id, state, updated_at, id index) is created identically for both.
+        """
+        if outbound.dedupe_key in self.outbound:
+            return False
+        self.outbound[outbound.dedupe_key] = outbound
+        row = _OutboundRow(
+            id=self._outbound_next_id,
+            state="queued",
+            attempts=0,
+            last_error_code=None,
+            template_wamid=None,
+            updated_at=datetime.now(UTC),
+        )
+        self._outbound_meta[outbound.dedupe_key] = row
+        self._outbound_by_id[row.id] = outbound.dedupe_key
+        self._outbound_next_id += 1
+        return True
 
     async def upsert_customer(self, customer: Customer) -> None:
         self.customers[customer.gid] = customer
@@ -199,12 +212,44 @@ class InMemoryIngestStore:
         ]
         return list(reversed(views))[:limit]
 
+    async def find_stale_template_sent(self, older_than_minutes: int) -> list[MappingView]:
+        # Q17: a mapping still at status 'template_sent' whose order was created more than
+        # `older_than_minutes` ago = the customer never tapped Confirm/Cancel within the window.
+        # A button tap moves the status off 'template_sent' (order_actions), so a tapped order is
+        # excluded automatically — no separate cancellation flag needed.
+        cutoff = datetime.now(UTC) - timedelta(minutes=older_than_minutes)
+        views: list[MappingView] = []
+        for gid, m in self.mappings.items():
+            if self._mapping_status.get(gid, "pending") != "template_sent":
+                continue
+            created = self._mapping_created_at.get(gid)
+            if created is None or created > cutoff:
+                continue
+            views.append(
+                MappingView(
+                    order_gid=m.order_gid,
+                    order_name=m.order_name,
+                    phone_e164=m.phone_e164,
+                    status="template_sent",
+                    is_cod=m.is_cod,
+                    created_at=created.isoformat(),
+                )
+            )
+        return views
+
+    async def find_outbound_by_dedupe_key(self, dedupe_key: str) -> OutboundDraft | None:
+        return self.outbound.get(dedupe_key)
+
+    async def enqueue_outbound(self, outbound: OutboundDraft) -> bool:
+        return self._enqueue(outbound)
+
     async def delete_by_phone(self, phone_e164: str) -> DeletionResult:
         removed_mappings = [
             gid for gid, m in self.mappings.items() if m.phone_e164 == phone_e164
         ]
         for gid in removed_mappings:
             del self.mappings[gid]
+            self._mapping_created_at.pop(gid, None)
         removed_outbound = [
             key for key, o in self.outbound.items() if o.phone_e164 == phone_e164
         ]

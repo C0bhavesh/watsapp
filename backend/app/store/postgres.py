@@ -502,6 +502,69 @@ class PostgresIngestStore:
             for r in rows
         ]
 
+    async def find_stale_template_sent(self, older_than_minutes: int) -> list[MappingView]:
+        # Q17 reminder sweep: mappings still at status 'template_sent' whose order was created more
+        # than `older_than_minutes` ago (customer never tapped Confirm/Cancel in the window). A tap
+        # moves status off 'template_sent' (order_actions), so a tapped order is excluded here
+        # automatically. make_interval(mins => $1) parameterizes the window (int, injection-safe) so
+        # the same query is testable with a small interval, never a hardcoded 60 in SQL.
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT order_gid, order_name, phone_e164, status, is_cod, created_at"
+                " FROM order_mappings"
+                " WHERE status = 'template_sent'"
+                " AND created_at <= now() - make_interval(mins => $1)"
+                " ORDER BY created_at",
+                older_than_minutes,
+            )
+        return [
+            MappingView(
+                order_gid=str(r["order_gid"]),
+                order_name=str(r["order_name"]),
+                phone_e164=None if r["phone_e164"] is None else str(r["phone_e164"]),
+                status=str(r["status"]),
+                is_cod=bool(r["is_cod"]),
+                created_at=r["created_at"].isoformat() if r["created_at"] else None,
+            )
+            for r in rows
+        ]
+
+    async def find_outbound_by_dedupe_key(self, dedupe_key: str) -> OutboundDraft | None:
+        # Narrow lookup for the reminder sweep: fetch the ORIGINAL push's queued payload so the
+        # reminder reuses it verbatim (never re-fetches from Shopify). Returns an OutboundDraft
+        # because that is exactly the {dedupe_key, kind, phone_e164, payload_json} shape the
+        # reminder needs to re-enqueue under a new dedupe_key.
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT dedupe_key, kind, phone_e164, payload_json FROM outbound_messages"
+                " WHERE dedupe_key = $1",
+                dedupe_key,
+            )
+        if row is None:
+            return None
+        return OutboundDraft(
+            dedupe_key=str(row["dedupe_key"]),
+            kind=str(row["kind"]),
+            phone_e164=str(row["phone_e164"]),
+            payload_json=str(row["payload_json"]),
+        )
+
+    async def enqueue_outbound(self, outbound: OutboundDraft) -> bool:
+        # Same ON CONFLICT (dedupe_key) DO NOTHING idempotency ingest_order_created uses: the UNIQUE
+        # dedupe_key constraint IS the exactly-once guarantee, so the reminder sweep can run every
+        # tick (or overlap) and still queue at most one reminder row per order. Returns whether a
+        # fresh row was inserted.
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "INSERT INTO outbound_messages (dedupe_key, kind, phone_e164, payload_json)"
+                " VALUES ($1, $2, $3, $4) ON CONFLICT (dedupe_key) DO NOTHING",
+                outbound.dedupe_key,
+                outbound.kind,
+                outbound.phone_e164,
+                outbound.payload_json,
+            )
+        return _rows_affected(result) > 0
+
     async def delete_by_phone(self, phone_e164: str) -> DeletionResult:
         """DPDP right-to-erasure: purge every row keyed to one phone number, atomically.
 

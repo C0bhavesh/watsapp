@@ -213,6 +213,22 @@ running in the WhatsApp Business phone app. A number cannot do both at once; if 
 phone app today, moving it to the API will disconnect it from the app (we'll guide you through
 this). Also please confirm you have access to the Meta Business Manager account that owns it.
 
+## Part 6 — New question (2026-08-13)
+
+**17. One-time reminder for an un-answered COD confirmation.** If a customer receives the
+order-confirmation WhatsApp message and does not tap Confirm or Cancel within 1 hour, should we
+resend the same message once as a reminder (and never again after that)?
+
+- A (owner-directed, being built now): yes, exactly one reminder at the 1-hour mark, same
+  template, same Confirm/Cancel buttons. Note: this is a second UTILITY-category template send
+  (billed the same as the first) for any order that goes unanswered that long.
+- B: no reminder — an unanswered order simply stays pending until the customer replies on their
+  own or contacts support.
+
+Being built as an owner-directed decision pending your confirmation; fully gated behind the
+same send-mode kill switch as every other outbound message, so it has no live effect until
+explicitly enabled.
+
 ## ✅ ANSWERED (2026-08-12)
 
 **16. Whose phone number should unlock an order in WhatsApp chat?** When a customer messages

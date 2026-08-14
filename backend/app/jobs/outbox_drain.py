@@ -31,7 +31,12 @@ from app.store.base import OutboundClaim
 
 logger = logging.getLogger("app.jobs.outbox_drain")
 
-_DEDUPE_PREFIX = "order_created:"
+# Both an original push (order_created:{gid}) and its 1-hour reminder (order_reminder:{gid}, queued
+# by jobs.reminders) carry the SAME order gid and send the SAME template with the SAME
+# order:confirm/cancel:{gid} buttons — so the drain treats them identically; only the dedupe_key
+# prefix differs (that distinct key is the reminder's exactly-once guarantee). The gid is recovered
+# by stripping whichever prefix is present.
+_DEDUPE_PREFIXES = ("order_created:", "order_reminder:")
 # Rows claimed per cron tick. Kept small so a run comfortably fits inside any reasonable
 # per-invocation time budget: send_template's per-call timeout is 20s, and Vercel's platform
 # timeout on this legacy-`builds` config may be as low as the ~10-15s default (maxDuration unset).
@@ -63,12 +68,14 @@ class _TemplatePayload:
 def _gid_from_dedupe_key(dedupe_key: str) -> str | None:
     """'order_created:gid://shopify/Order/1' -> 'gid://shopify/Order/1'; else None.
 
-    The gid itself contains ':' so the prefix is stripped whole rather than split on ':'.
+    Accepts the reminder prefix too ('order_reminder:...'). The gid itself contains ':' so the
+    prefix is stripped whole rather than split on ':'.
     """
-    if not dedupe_key.startswith(_DEDUPE_PREFIX):
-        return None
-    gid = dedupe_key[len(_DEDUPE_PREFIX):]
-    return gid if gid.startswith("gid://") else None
+    for prefix in _DEDUPE_PREFIXES:
+        if dedupe_key.startswith(prefix):
+            gid = dedupe_key[len(prefix):]
+            return gid if gid.startswith("gid://") else None
+    return None
 
 
 def _parse_payload(payload_json: str) -> _TemplatePayload | None:

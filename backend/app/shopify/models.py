@@ -53,6 +53,11 @@ class Fulfillment:
     tracking_number: str | None
     tracking_url: str | None
     created_at: str | None = None
+    # Shopify's own last-modified stamp (raw ISO-8601). The mirror's out-of-order-delivery guard:
+    # a replayed fulfillments/create (label made, tracking empty) arriving AFTER a
+    # fulfillments/update (tracking populated) must not revert good tracking. NULL = unknown,
+    # which is always writable. Distinct from the mirror's own sync timestamp.
+    updated_at: str | None = None
 
     def has_tracking(self) -> bool:
         return bool(self.tracking_number or self.tracking_url)

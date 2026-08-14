@@ -96,8 +96,15 @@ async def _mirror_fulfillment(
     """
     try:
         await c.ingest.upsert_fulfillment(order_gid, fulfillment)
-    except Exception:
-        logger.exception("fulfillment mirror sync failed: gid=%s", fulfillment.gid)
+    except Exception as exc:
+        # Log only the exception TYPE, never the rendered exception/traceback (2026-08-13
+        # error_learning): asyncpg's error text can echo the row's tracking number/URL, which
+        # must not reach the logs.
+        logger.error(
+            "fulfillment mirror sync failed: gid=%s type=%s",
+            fulfillment.gid,
+            type(exc).__name__,
+        )
         return False
     return True
 

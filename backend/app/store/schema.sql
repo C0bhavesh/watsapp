@@ -180,16 +180,24 @@ CREATE INDEX IF NOT EXISTS idx_order_items_sku ON order_items (sku);
 -- Read-only Q&A enrichment: the order-tracking agent surfaces the tracking link when asked
 -- (Q10). Additive + idempotent, applied the same way every other table here is.
 CREATE TABLE IF NOT EXISTS fulfillments (
-    gid              text PRIMARY KEY,
-    order_gid        text NOT NULL REFERENCES orders(gid) ON DELETE CASCADE,
-    status           text,
-    tracking_company text,
-    tracking_number  text,
-    tracking_url     text,
-    created_at       timestamptz,
-    updated_at       timestamptz NOT NULL DEFAULT now()
+    gid                text PRIMARY KEY,
+    order_gid          text NOT NULL REFERENCES orders(gid) ON DELETE CASCADE,
+    status             text,
+    tracking_company   text,
+    tracking_number    text,
+    tracking_url       text,
+    created_at         timestamptz,
+    -- Shopify's OWN last-modified stamp (distinct from updated_at below, which is when WE synced).
+    -- The out-of-order-delivery guard: a replayed fulfillments/create (label made, tracking empty)
+    -- arriving after a fulfillments/update (tracking populated) must not revert good tracking.
+    -- NULL = unknown, always writable (backfill / payloads without the field).
+    shopify_updated_at timestamptz,
+    updated_at         timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_fulfillments_order_gid ON fulfillments (order_gid);
+-- Idempotent add for any install that created the table before this column existed (mirrors the
+-- orders/customers updated_at ALTERs below).
+ALTER TABLE fulfillments ADD COLUMN IF NOT EXISTS shopify_updated_at timestamptz;
 
 -- Shopify's own last-modified stamp for the mirrored resource (distinct from synced_at, which
 -- is when WE wrote the row). Shopify does not guarantee webhook delivery order, so the mirror

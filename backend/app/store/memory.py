@@ -12,7 +12,29 @@ from app.store.base import (
     OutboundView,
     StoredMessage,
 )
-from app.store.postgres import _e164
+from app.store.postgres import MAX_MIRROR_FULFILLMENTS, _e164
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _fulfillment_update_wins(existing: Fulfillment, incoming: Fulfillment) -> bool:
+    """Mirror the Postgres shopify_updated_at guard: a NULL stored stamp is always overwritable;
+    otherwise the incoming write must carry a stamp >= the stored one (an incoming NULL loses),
+    so a replayed older fulfillments/create can't revert good tracking."""
+    stored = _parse_iso(existing.updated_at)
+    if stored is None:
+        return True
+    incoming_ts = _parse_iso(incoming.updated_at)
+    if incoming_ts is None:
+        return False
+    return incoming_ts >= stored
 
 # A 'processing' row older than this is treated as abandoned by a dead invocation and re-claimed
 # (mirrors the Postgres claim's `interval '10 minutes'`). There is no real concurrency in the
@@ -156,11 +178,20 @@ class InMemoryIngestStore:
             await self.upsert_customer(order.customer)
         self.orders[order.gid] = order
         self.order_items[order.gid] = order.line_items
+        # Persist any fulfillments the order carries (the backfill attaches them from the separate
+        # live fetch); webhook-mirrored orders carry none so this is a no-op. The order row now
+        # exists, so upsert_fulfillment's existence check passes and its guard applies.
+        for fulfillment in order.fulfillments[:MAX_MIRROR_FULFILLMENTS]:
+            await self.upsert_fulfillment(order.gid, fulfillment)
 
     async def upsert_fulfillment(self, order_gid: str, fulfillment: Fulfillment) -> None:
         # Skip a fulfillment for an order we have not mirrored -- parity with the Postgres FK
         # (fulfillments.order_gid REFERENCES orders(gid)), which would reject it. Never raises.
         if order_gid not in self.orders:
+            return
+        existing = self.fulfillments.get(order_gid, {}).get(fulfillment.gid)
+        # Out-of-order-delivery guard, mirroring the Postgres shopify_updated_at WHERE clause.
+        if existing is not None and not _fulfillment_update_wins(existing, fulfillment):
             return
         self.fulfillments.setdefault(order_gid, {})[fulfillment.gid] = fulfillment
 
@@ -326,6 +357,9 @@ class InMemoryIngestStore:
         for gid in removed_orders:
             del self.orders[gid]
             self.order_items.pop(gid, None)
+            # Courier/AWB tracking for an erased customer must not survive (Postgres cascades
+            # via the FK; the in-memory store has to pop it explicitly).
+            self.fulfillments.pop(gid, None)
         removed_customers = [
             gid
             for gid, cust in self.customers.items()

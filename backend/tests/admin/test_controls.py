@@ -119,7 +119,9 @@ def test_unicode_digits_rejected_in_e164_fields(client: TestClient) -> None:
     )
 
 
-def test_schema_invalid_stored_value_returns_defaults_not_500(client: TestClient) -> None:
+def test_corrupt_reveal_fields_fails_closed_to_minimal_not_full_default(
+    client: TestClient,
+) -> None:
     login(client)
 
     async def _seed_bad() -> None:
@@ -129,7 +131,10 @@ def test_schema_invalid_stored_value_returns_defaults_not_500(client: TestClient
     asyncio.run(_seed_bad())
     r = client.get("/admin/controls")
     assert r.status_code == 200
-    assert r.json()["reveal_fields"] == ["order_number", "email", "status", "items", "tracking"]
+    # reveal_fields is a PII-disclosure control: a CORRUPT stored value must fail CLOSED to the
+    # single least-sensitive field, NOT the full model default (which now includes "tracking") --
+    # otherwise corruption silently re-widens disclosure.
+    assert r.json()["reveal_fields"] == ["order_number"]
 
 
 def test_unicode_digit_int_value_falls_back_to_safe_default(client: TestClient) -> None:

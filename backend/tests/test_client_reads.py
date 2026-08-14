@@ -72,46 +72,72 @@ async def test_get_order_parses_full_node(settings, master_key) -> None:
     assert order.total is not None and order.total.currency == "INR"
 
 
-_FULFILLED_NODE = dict(
-    ORDER_NODE,
-    displayFulfillmentStatus="FULFILLED",
-    fulfillments=[
-        {
-            "id": "gid://shopify/Fulfillment/111",
-            "status": "SUCCESS",
-            "trackingInfo": [
-                {
-                    "company": "Delhivery",
-                    "number": "AWB0099887766",
-                    "url": "https://www.delhivery.com/track/AWB0099887766",
-                },
-            ],
-            "createdAt": "2026-08-14T03:14:46Z",
-        },
-    ],
-)
+_FULFILLMENTS_PAYLOAD = [
+    {
+        "id": "gid://shopify/Fulfillment/111",
+        "status": "SUCCESS",
+        "trackingInfo": [
+            {
+                "company": "Delhivery",
+                "number": "AWB0099887766",
+                "url": "https://www.delhivery.com/track/AWB0099887766",
+            },
+        ],
+        "createdAt": "2026-08-14T03:14:46Z",
+        "updatedAt": "2026-08-14T03:20:00Z",
+    },
+]
+
+_ACCESS_DENIED = {
+    "errors": [{"message": "Access denied", "extensions": {"code": "ACCESS_DENIED"}}],
+    "data": None,
+}
 
 
-async def test_order_fields_query_selects_fulfillments(settings, master_key) -> None:
-    captured: dict[str, str] = {}
+def _split_order_handler(fulfillments_response: dict[str, object]):
+    """Serve the CORE order query (node/orders) and the SEPARATE fulfillments query distinctly.
+
+    The core order lookup must never carry the fulfillments sub-tree (a missing read_fulfillments
+    scope would ACCESS_DENIED the whole query); tracking is fetched by an isolated follow-up call,
+    so tests drive each branch on its own.
+    """
 
     def gql(request: httpx.Request) -> httpx.Response:
-        captured["query"] = json.loads(request.content)["query"]
+        query = json.loads(request.content)["query"]
+        if "fulfillments(first: 5)" in query:
+            return httpx.Response(200, json=fulfillments_response)
+        return httpx.Response(200, json={"data": {"node": ORDER_NODE}})
+
+    return gql
+
+
+async def test_core_order_query_does_not_select_fulfillments(settings, master_key) -> None:
+    queries: list[str] = []
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        query = json.loads(request.content)["query"]
+        queries.append(query)
+        if "fulfillments(first: 5)" in query:
+            return httpx.Response(200, json={"data": {"order": {"fulfillments": []}}})
         return httpx.Response(200, json={"data": {"node": ORDER_NODE}})
 
     client, config = make_client(settings, master_key, grant_or(gql))
     await seed(config)
     await client.get_order("gid://shopify/Order/12187547894128")
-    # The live-fallback read path must fetch the same tracking data the mirror path does.
-    assert "fulfillments(first: 5)" in captured["query"]
-    assert "trackingInfo(first: 3)" in captured["query"]
+    # HIGH: the CORE order query (node ... on Order) must NOT carry fulfillments -- without the
+    # read_fulfillments scope Shopify returns ACCESS_DENIED for the WHOLE query, which would take
+    # down get_order/find_order_by_name and every Confirm/Cancel tap.
+    core = next(q for q in queries if "... on Order" in q)
+    assert "fulfillments" not in core
+    # ...tracking is fetched by a SEPARATE, isolated query instead.
+    assert any(
+        "fulfillments(first: 5)" in q and "trackingInfo(first: 3)" in q for q in queries
+    )
 
 
 async def test_get_order_parses_fulfillment_tracking(settings, master_key) -> None:
-    def gql(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"data": {"node": _FULFILLED_NODE}})
-
-    client, config = make_client(settings, master_key, grant_or(gql))
+    handler = _split_order_handler({"data": {"order": {"fulfillments": _FULFILLMENTS_PAYLOAD}}})
+    client, config = make_client(settings, master_key, grant_or(handler))
     await seed(config)
     order = await client.get_order("gid://shopify/Order/12187547894128")
     assert order is not None
@@ -122,17 +148,61 @@ async def test_get_order_parses_fulfillment_tracking(settings, master_key) -> No
     assert f.tracking_company == "Delhivery"
     assert f.tracking_number == "AWB0099887766"
     assert f.tracking_url == "https://www.delhivery.com/track/AWB0099887766"
+    assert f.updated_at == "2026-08-14T03:20:00Z"
 
 
 async def test_get_order_without_fulfillments_has_empty_tuple(settings, master_key) -> None:
-    def gql(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"data": {"node": ORDER_NODE}})
-
-    client, config = make_client(settings, master_key, grant_or(gql))
+    handler = _split_order_handler({"data": {"order": {"fulfillments": []}}})
+    client, config = make_client(settings, master_key, grant_or(handler))
     await seed(config)
     order = await client.get_order("gid://shopify/Order/12187547894128")
     assert order is not None
     assert order.fulfillments == ()
+
+
+async def test_get_order_survives_fulfillments_access_denied(settings, master_key) -> None:
+    """THE critical invariant of the whole fulfillment feature.
+
+    With no read_fulfillments scope the isolated fulfillments sub-query ACCESS_DENIEDs
+    (ShopifyGraphQLError). That must NEVER propagate: get_order still returns a valid Order (so
+    Confirm/Cancel, reconcile, and live Q&A keep working today), only silently withholding
+    tracking. Simulated exactly as it occurs against the live API.
+    """
+    handler = _split_order_handler(_ACCESS_DENIED)
+    client, config = make_client(settings, master_key, grant_or(handler))
+    await seed(config)
+    order = await client.get_order("gid://shopify/Order/12187547894128")
+    assert order is not None
+    assert order.name == "tavas3733"
+    assert order.best_phone() == "+919999999999"
+    assert order.fulfillments == ()
+
+
+async def test_find_order_by_name_survives_fulfillments_access_denied(
+    settings, master_key
+) -> None:
+    def gql(request: httpx.Request) -> httpx.Response:
+        query = json.loads(request.content)["query"]
+        if "fulfillments(first: 5)" in query:
+            return httpx.Response(200, json=_ACCESS_DENIED)
+        return httpx.Response(200, json={"data": {"orders": {"edges": [{"node": ORDER_NODE}]}}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    order = await client.find_order_by_name("tavas3733")
+    assert order is not None
+    assert order.name == "tavas3733"
+    assert order.fulfillments == ()
+
+
+async def test_get_order_fulfillments_degrades_to_empty_on_shopify_error(
+    settings, master_key
+) -> None:
+    # The isolated method itself swallows any ShopifyError -> () (never raises to the caller).
+    handler = _split_order_handler(_ACCESS_DENIED)
+    client, config = make_client(settings, master_key, grant_or(handler))
+    await seed(config)
+    assert await client.get_order_fulfillments("gid://shopify/Order/12187547894128") == ()
 
 
 async def test_get_order_parses_line_items(settings, master_key) -> None:
@@ -252,8 +322,9 @@ async def test_get_order_populates_updated_at_for_the_mirrors_staleness_guard(
     assert order.updated_at == "2026-08-11T12:00:00Z"
     assert order.customer is not None
     assert order.customer.updated_at == "2026-08-10T08:00:00Z"
-    # ...and the field is actually requested, so a real Shopify response would carry it.
-    query = captured[-1]
+    # ...and the field is actually requested, so a real Shopify response would carry it. Assert on
+    # the CORE order query (not the separate fulfillments follow-up, which carries neither field).
+    query = next(q for q in captured if "... on Order" in q)
     assert "updatedAt" in query
     assert "customer { id firstName lastName email updatedAt }" in query
 
@@ -297,7 +368,10 @@ async def test_find_order_by_name_normalizes_and_queries(settings, master_key) -
     captured: dict = {}
 
     def gql(request: httpx.Request) -> httpx.Response:
-        captured.update(json.loads(request.content))
+        body = json.loads(request.content)
+        if "fulfillments(first: 5)" in body["query"]:  # the separate tracking follow-up
+            return httpx.Response(200, json={"data": {"order": {"fulfillments": []}}})
+        captured.update(body)
         return httpx.Response(200, json={"data": {"orders": {"edges": [{"node": ORDER_NODE}]}}})
 
     client, config = make_client(settings, master_key, grant_or(gql))

@@ -152,6 +152,26 @@ async def test_one_topics_user_error_does_not_block_the_other_topics(
     assert result["CUSTOMERS_UPDATE"] == "created"  # attempted despite the earlier failure
 
 
+async def test_topic_http_error_is_isolated_not_raised(settings, master_key) -> None:
+    """An ACCESS_DENIED that surfaces as a non-200 HTTP response raises ShopifyUnavailable/
+    ShopifyAuthError (NOT ShopifyGraphQLError). That must stay isolated to the one topic's
+    "error" entry -- otherwise it escapes the per-topic guard and 500s the whole job."""
+    def gql(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        topic = body["variables"].get("topics", ["ORDERS_CREATE"])[0]
+        if topic == "FULFILLMENTS_CREATE":
+            return httpx.Response(500, json={})  # -> ShopifyUnavailable, not a userError
+        return httpx.Response(200, json={"data": {"webhookSubscriptions": {"edges": [
+            sub_edge("https://x.example/webhooks/shopify", topic=topic)]}}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    result = await ensure_subscription(client, "https://x.example/webhooks/shopify")
+    assert set(result) == set(REQUIRED_TOPICS)
+    assert result["FULFILLMENTS_CREATE"] == "error"
+    assert result["ORDERS_CREATE"] == "ok"  # other topics still processed
+
+
 async def test_topic_error_result_does_not_echo_shopifys_message(settings, master_key) -> None:
     def gql(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)

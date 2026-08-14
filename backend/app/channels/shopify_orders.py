@@ -257,7 +257,10 @@ def fulfillment_from_webhook_payload(
     if order_gid is None:
         return None
     fulfillment = Fulfillment(
-        gid=gid[:MAX_FIELD_LEN],
+        # The fulfillment gid is the mirror's PRIMARY KEY and is deliberately NOT clipped:
+        # truncating it could collapse two distinct fulfillments onto one row. The 1 MiB body cap
+        # bounds its length (same reasoning as the order gid in order_from_webhook_payload).
+        gid=gid,
         status=_c(payload.get("status")),
         tracking_company=_c(payload.get("tracking_company")),
         tracking_number=_first_tracking(
@@ -265,6 +268,7 @@ def fulfillment_from_webhook_payload(
         ),
         tracking_url=_first_tracking(payload.get("tracking_url"), payload.get("tracking_urls")),
         created_at=_c(payload.get("created_at")),
+        updated_at=_c(payload.get("updated_at")),
     )
     return order_gid, fulfillment
 

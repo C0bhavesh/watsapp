@@ -7,6 +7,7 @@ DATABASE_URL connection.
 """
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from app.config.settings import Settings
@@ -25,7 +26,11 @@ async def main() -> None:
     since = (datetime.now(UTC) - timedelta(days=BACKFILL_WINDOW_DAYS)).strftime("%Y-%m-%d")
     count = 0
     async for order in c.shopify.list_orders_created_since(since):
-        await c.ingest.upsert_order_mirror(order)
+        # Fulfillments are fetched separately from the core order (they need the read_fulfillments
+        # scope; a missing scope degrades to () rather than failing the backfill) and attached so
+        # upsert_order_mirror persists tracking for already-shipped historical orders too.
+        fulfillments = await c.shopify.get_order_fulfillments(order.gid)
+        await c.ingest.upsert_order_mirror(replace(order, fulfillments=fulfillments))
         count += 1
         if count % 50 == 0:
             print(f"backfilled {count} orders so far...")

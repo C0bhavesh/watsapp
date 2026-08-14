@@ -79,6 +79,20 @@ def test_fulfillment_parse_full_payload() -> None:
     assert fulfillment.tracking_number == "AWB0099887766"
     assert fulfillment.tracking_url == "https://www.delhivery.com/track/AWB0099887766"
     assert fulfillment.created_at == "2026-08-14T03:14:46-04:00"
+    # Shopify's own last-modified stamp drives the out-of-order-delivery guard on write.
+    assert fulfillment.updated_at == "2026-08-14T03:20:00-04:00"
+
+
+def test_fulfillment_gid_is_not_clipped() -> None:
+    # A fulfillment gid is a PRIMARY KEY (like the order gid): truncating it could collapse two
+    # distinct fulfillments onto one row. The 1 MiB body cap already bounds its length, so it is
+    # deliberately NOT clipped -- same reasoning as order_from_webhook_payload's gid.
+    long_gid = "gid://shopify/Fulfillment/" + "9" * (MAX_FIELD_LEN + 50)
+    payload = dict(FULFILLMENT_PAYLOAD, admin_graphql_api_id=long_gid)
+    parsed = fulfillment_from_webhook_payload(payload)
+    assert parsed is not None
+    _, fulfillment = parsed
+    assert fulfillment.gid == long_gid
 
 
 def test_fulfillment_falls_back_to_array_tracking_when_singular_absent() -> None:

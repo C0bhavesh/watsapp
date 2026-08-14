@@ -227,6 +227,23 @@ async def test_tracking_withheld_when_not_in_reveal_fields() -> None:
     assert "https://track/AWB0099887766" not in prompt
 
 
+async def test_prompt_does_not_infer_not_shipped_from_absent_tracking() -> None:
+    # A shipped (FULFILLED) order whose tracking row was never captured (scope not granted /
+    # historical order not backfilled / admin excluded "tracking") must NOT be described as
+    # "not shipped": that contradicts the fulfillment_status line and mis-informs the customer.
+    provider = _CapturingProvider(text='{"reply": "Let me check."}')
+    order = AuthorizedOrder(
+        order=_order("tavas1", "+919999999999", fulfillment_status="FULFILLED"),
+        verified_phone="+919999999999",
+    )
+    await run(_context(provider, "where is my order", [order]))
+
+    prompt = _system_prompt(provider)
+    # The false inference must be gone; the model is told to go by fulfillment status instead.
+    assert "has not shipped yet" not in prompt
+    assert "fulfillment status" in prompt.lower()
+
+
 async def test_no_tracking_fabricated_when_order_not_shipped() -> None:
     # An order with no fulfillments has no tracking -- the prompt must not invent a tracking line
     # even though "tracking" is in reveal_fields.

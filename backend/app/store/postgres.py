@@ -45,6 +45,12 @@ _MAX_ORDER_NUMBER_DIGITS = 9
 # line-items selection already uses.
 MAX_MIRROR_LINE_ITEMS = 50
 
+# Cap on fulfillments stored per order (parity with MAX_MIRROR_LINE_ITEMS and the live GraphQL
+# fetch's `first: 5`). Bounds a pathological order and keeps the mirror read/prompt render bounded
+# without an explicit read-side LIMIT. An order having more than this many split shipments is not
+# realistic for this store.
+MAX_MIRROR_FULFILLMENTS = 10
+
 
 _MIRROR_ORDER_SELECT = (
     "SELECT o.gid, o.name, o.email, o.phone, o.shipping_phone, o.billing_phone, "
@@ -117,6 +123,38 @@ async def _fetch_mirror_fulfillments(
         order_gid,
     )
     return [_fulfillment_from_row(r) for r in rows]
+
+
+async def _upsert_fulfillment_on_conn(
+    conn: asyncpg.Connection, order_gid: str, fulfillment: Fulfillment
+) -> None:
+    """One fulfillment upsert on an already-acquired connection (shared by the standalone
+    upsert_fulfillment and the order-mirror write, so their SQL cannot diverge).
+
+    The DO UPDATE is guarded on the fulfillment's OWN Shopify updated_at (shopify_updated_at):
+    Shopify does not guarantee webhook delivery order, so a replayed fulfillments/create
+    (label made, tracking often empty) arriving after a fulfillments/update (tracking populated)
+    must not silently revert good tracking to stale/NULL. NULL on either side still writes
+    (backfill / payloads without the field), matching the orders/customers guards.
+    """
+    await conn.execute(
+        "INSERT INTO fulfillments (gid, order_gid, status, tracking_company, "
+        "tracking_number, tracking_url, created_at, shopify_updated_at, updated_at) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now()) "
+        "ON CONFLICT (gid) DO UPDATE SET order_gid = $2, status = $3, "
+        "tracking_company = $4, tracking_number = $5, tracking_url = $6, "
+        "created_at = $7, shopify_updated_at = $8, updated_at = now() "
+        "WHERE fulfillments.shopify_updated_at IS NULL "
+        "OR EXCLUDED.shopify_updated_at >= fulfillments.shopify_updated_at",
+        fulfillment.gid,
+        order_gid,
+        fulfillment.status,
+        fulfillment.tracking_company,
+        fulfillment.tracking_number,
+        fulfillment.tracking_url,
+        _parse_timestamp(fulfillment.created_at),
+        _parse_timestamp(fulfillment.updated_at),
+    )
 
 
 def _line_item_from_row(r: asyncpg.Record) -> LineItem:
@@ -500,6 +538,13 @@ class PostgresIngestStore:
                         "($1, $2, $3, $4, $5, $6, $7)",
                         rows,
                     )
+                # Persist any fulfillments the order carries (the backfill attaches them from the
+                # separate live fetch; webhook-mirrored orders carry none and this is a no-op).
+                # Written in this SAME transaction, AFTER the order row exists, so the child FK is
+                # satisfied without needing the standalone existence guard. The per-row
+                # shopify_updated_at guard still protects tracking that a later webhook set.
+                for fulfillment in order.fulfillments[:MAX_MIRROR_FULFILLMENTS]:
+                    await _upsert_fulfillment_on_conn(conn, order.gid, fulfillment)
 
     async def upsert_fulfillment(self, order_gid: str, fulfillment: Fulfillment) -> None:
         # Guard on order existence FIRST, rather than relying on the FK to raise: the caller is a
@@ -514,21 +559,7 @@ class PostgresIngestStore:
                     "fulfillment mirror skipped, order not mirrored: order_gid=%s", order_gid
                 )
                 return
-            await conn.execute(
-                "INSERT INTO fulfillments (gid, order_gid, status, tracking_company, "
-                "tracking_number, tracking_url, created_at, updated_at) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, now()) "
-                "ON CONFLICT (gid) DO UPDATE SET order_gid = $2, status = $3, "
-                "tracking_company = $4, tracking_number = $5, tracking_url = $6, "
-                "created_at = $7, updated_at = now()",
-                fulfillment.gid,
-                order_gid,
-                fulfillment.status,
-                fulfillment.tracking_company,
-                fulfillment.tracking_number,
-                fulfillment.tracking_url,
-                _parse_timestamp(fulfillment.created_at),
-            )
+            await _upsert_fulfillment_on_conn(conn, order_gid, fulfillment)
 
     async def recent_mappings(self, limit: int) -> list[MappingView]:
         async with self._pool.acquire() as conn:

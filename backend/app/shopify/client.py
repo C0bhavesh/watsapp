@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -9,6 +10,7 @@ import httpx
 from app.config.settings import Settings
 from app.shopify.errors import (
     ShopifyAuthError,
+    ShopifyError,
     ShopifyGraphQLError,
     ShopifyThrottled,
     ShopifyUnavailable,
@@ -39,18 +41,25 @@ ORDER_FIELDS = (
     "shippingAddress { phone address1 address2 city province zip country } "
     "billingAddress { phone } "
     "customer { id firstName lastName email updatedAt } "
-    # Courier/tracking for the order-tracking Q&A (Q10). Order.fulfillments is a plain LIST (not
-    # an edges/node connection), and an order can have several (split shipments). trackingInfo is
-    # itself a list (a fulfillment can rarely carry more than one number) -- we keep the first,
-    # matching the one-tracking-per-row mirror schema. `id` is selected so the live-path
-    # Fulfillment carries its real gid, consistent with the mirror path.
-    "fulfillments(first: 5) { id status trackingInfo(first: 3) { company number url } "
-    "createdAt } "
     # first: 50 is a query-time ceiling far above any realistic order size -- the display side
     # (order_tracking) shows every item with no further cap, by design (owner's explicit
     # choice: show all, don't summarize/truncate a customer's own order).
     "lineItems(first: 50) { edges { node { title quantity variant { title } sku "
     "originalUnitPriceSet { shopMoney { amount currencyCode } } } } }"
+)
+
+# Courier/tracking for the order-tracking Q&A (Q10), fetched by a SEPARATE, isolated query
+# (get_order_fulfillments) rather than inline in ORDER_FIELDS. This decoupling is a hard safety
+# requirement: reading fulfillments needs the read_fulfillments scope, and if that scope is
+# missing/revoked Shopify returns ACCESS_DENIED for the WHOLE query it appears in -- inlining it
+# would take down get_order/find_order_by_name (and every Confirm/Cancel tap + reconcile).
+# Order.fulfillments is a plain LIST (not an edges/node connection); an order can have several
+# (split shipments); trackingInfo is itself a list (rarely >1 number) -- keep the first, matching
+# the one-tracking-per-row mirror schema. `id` is selected so the live-path Fulfillment carries
+# its real gid; `updatedAt` drives the mirror's out-of-order-delivery guard.
+FULFILLMENT_FIELDS = (
+    "fulfillments(first: 5) { id status trackingInfo(first: 3) { company number url } "
+    "createdAt updatedAt }"
 )
 
 
@@ -120,6 +129,7 @@ def _fulfillments_from_node(node: dict[str, Any]) -> tuple[Fulfillment, ...]:
                 tracking_number=info.get("number"),
                 tracking_url=info.get("url"),
                 created_at=f.get("createdAt"),
+                updated_at=f.get("updatedAt"),
             )
         )
     return tuple(result)
@@ -146,7 +156,8 @@ def _order_from_node(node: dict[str, Any]) -> Order:
         line_items=_line_items_from_node(node),
         customer=_customer_from_node(node),
         updated_at=node.get("updatedAt"),  # selected by ORDER_FIELDS; see the note there
-        fulfillments=_fulfillments_from_node(node),
+        # fulfillments are fetched separately (get_order_fulfillments) and attached by the caller,
+        # so a missing read_fulfillments scope can never fail the core order query.
     )
 
 
@@ -260,11 +271,38 @@ class ShopifyClient:
             return dict(data)
         raise ShopifyAuthError("unreachable")  # pragma: no cover
 
+    async def get_order_fulfillments(self, gid: str) -> tuple[Fulfillment, ...]:
+        """Fetch ONLY an order's fulfillments (courier/tracking), fully isolated from the core
+        order query.
+
+        Reading fulfillments requires the ``read_fulfillments`` scope; when it is missing/revoked
+        Shopify returns ACCESS_DENIED for the whole query. This method queries the fulfillments
+        sub-tree on its own and swallows any ``ShopifyError`` (ACCESS_DENIED, throttle, outage)
+        into an empty tuple, so a missing scope can NEVER take down order lookups -- it only
+        silently withholds tracking. Deliberately best-effort: callers attach the result to an
+        already-fetched Order.
+        """
+        query = f"query($id: ID!) {{ order(id: $id) {{ {FULFILLMENT_FIELDS} }} }}"
+        try:
+            data = await self._graphql(query, {"id": gid})
+        except ShopifyError:
+            return ()
+        node = data.get("order")
+        if not isinstance(node, dict):
+            return ()
+        return _fulfillments_from_node(node)
+
+    async def _with_fulfillments(self, order: Order) -> Order:
+        """Best-effort attach live tracking AFTER the core order fetch already succeeded."""
+        return replace(order, fulfillments=await self.get_order_fulfillments(order.gid))
+
     async def get_order(self, gid: str) -> Order | None:
         query = f"query($id: ID!) {{ node(id: $id) {{ ... on Order {{ {ORDER_FIELDS} }} }} }}"
         data = await self._graphql(query, {"id": gid})
         node = data.get("node")
-        return _order_from_node(node) if node else None
+        if not node:
+            return None
+        return await self._with_fulfillments(_order_from_node(node))
 
     async def find_order_by_name(self, raw_name: str) -> Order | None:
         name = normalize_order_name(raw_name)
@@ -276,7 +314,9 @@ class ShopifyClient:
         )
         data = await self._graphql(query, {"q": f"name:{name}"})
         edges = (data.get("orders") or {}).get("edges") or []
-        return _order_from_node(edges[0]["node"]) if edges else None
+        if not edges:
+            return None
+        return await self._with_fulfillments(_order_from_node(edges[0]["node"]))
 
     async def _page_with_backoff(
         self, query: str, variables: dict[str, Any]
@@ -300,8 +340,10 @@ class ShopifyClient:
 
         ``first: 10`` (not 50) because ORDER_FIELDS selects ``lineItems(first: 50)``: the two
         multiply, and Shopify rejects any single query over 1000 cost points with
-        MAX_COST_EXCEEDED (50 x 51 = ~2550 could never run; 10 x 51 = ~510 is safe). Every
-        other ORDER_FIELDS caller uses first: 1/10, so this pager is the only one at risk.
+        MAX_COST_EXCEEDED (50 x 51 = ~2550 could never run; 10 x 51 = ~510 is safe). Fulfillments
+        are NOT part of ORDER_FIELDS (they are fetched by a separate isolated query), so they add
+        nothing to this page's cost -- the backfill script attaches them per order afterwards.
+        Every other ORDER_FIELDS caller uses first: 1/10, so this pager is the only one at risk.
         """
         query = (
             "query($q: String!, $cursor: String) { orders(first: 10, after: $cursor, "
@@ -346,7 +388,12 @@ class ShopifyClient:
             f"reverse: true) {{ edges {{ node {{ {ORDER_FIELDS} }} }} }} }}",
             {"q": f"customer_id:{customer_id}"},
         )
-        return [_order_from_node(e["node"]) for e in (data.get("orders") or {}).get("edges") or []]
+        orders = [
+            _order_from_node(e["node"]) for e in (data.get("orders") or {}).get("edges") or []
+        ]
+        # Attach tracking best-effort AFTER the core orders resolved -- get_order_fulfillments
+        # swallows a missing-scope ACCESS_DENIED, so this never fails the phone lookup.
+        return [await self._with_fulfillments(o) for o in orders]
 
     async def search_products(self, query: str, limit: int = 5) -> list[Product] | None:
         """Search the live catalog. ``None`` = the query had no searchable term (never

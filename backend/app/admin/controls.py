@@ -149,6 +149,13 @@ def _validate_per_field(data: dict[str, object]) -> AdminControls:
     except ValidationError as exc:
         bad_keys = {loc[0] for loc in (e["loc"] for e in exc.errors()) if loc}
         clean = {k: v for k, v in data.items() if k not in bad_keys}
+        # reveal_fields is a PII-disclosure control: on CORRUPTION fail CLOSED to the single
+        # least-sensitive field rather than dropping it to the full model default (which now
+        # includes "tracking"), so a corrupt stored value can never silently re-widen what the bot
+        # may reveal. A valid, deliberately-narrowed reveal_fields is not in bad_keys and is
+        # preserved untouched; a normal unset install still gets the full shipped default.
+        if "reveal_fields" in bad_keys:
+            clean["reveal_fields"] = ["order_number"]
         try:
             return AdminControls.model_validate(clean)
         except ValidationError:

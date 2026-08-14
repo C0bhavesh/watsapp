@@ -124,6 +124,62 @@ async def test_upsert_fulfillment_skips_when_order_not_mirrored() -> None:
     assert await store.get_mirrored_order("gid://shopify/Order/unknown") is None
 
 
+async def test_upsert_fulfillment_memory_rejects_stale_shopify_update() -> None:
+    # Newer tracking arrives first; a replayed OLDER fulfillments/create with empty tracking must
+    # NOT revert it (mirrors the Postgres shopify_updated_at guard).
+    store = InMemoryIngestStore()
+    await store.upsert_order_mirror(_order())
+    await store.upsert_fulfillment(
+        "gid://shopify/Order/1",
+        _fulfillment(tracking_number="GOOD", updated_at="2026-08-14T05:00:00+00:00"),
+    )
+    await store.upsert_fulfillment(
+        "gid://shopify/Order/1",
+        _fulfillment(tracking_number=None, updated_at="2026-08-14T04:00:00+00:00"),
+    )
+    result = await store.get_mirrored_order("gid://shopify/Order/1")
+    assert result is not None
+    assert result.fulfillments[0].tracking_number == "GOOD"
+
+
+async def test_upsert_fulfillment_memory_newer_shopify_update_wins() -> None:
+    store = InMemoryIngestStore()
+    await store.upsert_order_mirror(_order())
+    await store.upsert_fulfillment(
+        "gid://shopify/Order/1",
+        _fulfillment(tracking_number="OLD", updated_at="2026-08-14T04:00:00+00:00"),
+    )
+    await store.upsert_fulfillment(
+        "gid://shopify/Order/1",
+        _fulfillment(tracking_number="NEW", updated_at="2026-08-14T05:00:00+00:00"),
+    )
+    result = await store.get_mirrored_order("gid://shopify/Order/1")
+    assert result is not None
+    assert result.fulfillments[0].tracking_number == "NEW"
+
+
+async def test_upsert_order_mirror_memory_persists_carried_fulfillments() -> None:
+    store = InMemoryIngestStore()
+    order = _order(fulfillments=(_fulfillment(gid="gid://f/1", tracking_number="AWB-BF"),))
+    await store.upsert_order_mirror(order)
+    result = await store.get_mirrored_order("gid://shopify/Order/1")
+    assert result is not None
+    assert [f.tracking_number for f in result.fulfillments] == ["AWB-BF"]
+
+
+async def test_delete_by_phone_memory_clears_fulfillments() -> None:
+    # DPDP erasure must not leave courier/AWB data for an "erased" customer in the in-memory store
+    # (Postgres is safe via ON DELETE CASCADE).
+    store = InMemoryIngestStore()
+    phone = "+919876500000"
+    await store.upsert_order_mirror(
+        _order(gid="gid://o1", phone=phone, shipping_phone=None, billing_phone=None, customer=None)
+    )
+    await store.upsert_fulfillment("gid://o1", _fulfillment(tracking_number="AWB-SECRET"))
+    await store.delete_by_phone(phone)
+    assert store.fulfillments == {}  # type: ignore[attr-defined]
+
+
 async def test_get_mirrored_order_without_fulfillments_returns_empty_tuple() -> None:
     store = InMemoryIngestStore()
     await store.upsert_order_mirror(_order())
@@ -591,6 +647,38 @@ async def test_upsert_fulfillment_pg_skips_when_order_not_mirrored() -> None:
     await _pg(conn).upsert_fulfillment("gid://shopify/Order/missing", _fulfillment())
 
     assert "INSERT INTO fulfillments" not in conn.sql
+
+
+async def test_upsert_fulfillment_pg_carries_out_of_order_delivery_guard() -> None:
+    # A replayed fulfillments/create (empty tracking) arriving after a fulfillments/update
+    # (tracking populated) must not revert good tracking -- the DO UPDATE is guarded on the
+    # fulfillment's OWN Shopify updated_at (shopify_updated_at), like the orders/customers guards.
+    conn = _RecordingConn()
+    await _pg(conn).upsert_fulfillment("gid://shopify/Order/1", _fulfillment())
+
+    insert_sql = [sql for sql, _ in conn.executed if sql.startswith("INSERT INTO fulfillments")]
+    assert len(insert_sql) == 1
+    assert "shopify_updated_at" in insert_sql[0]
+    assert (
+        "WHERE fulfillments.shopify_updated_at IS NULL "
+        "OR EXCLUDED.shopify_updated_at >= fulfillments.shopify_updated_at"
+    ) in insert_sql[0]
+
+
+async def test_upsert_order_mirror_pg_persists_carried_fulfillments() -> None:
+    # A backfilled Order carries its fulfillments (attached from the separate live fetch); the
+    # mirror write must persist them in the SAME transaction, not silently drop them -- otherwise
+    # an already-shipped historical order keeps empty tracking forever.
+    conn = _RecordingConn()
+    order = _order(fulfillments=(_fulfillment(gid="gid://f/1", tracking_number="AWB-BF"),))
+    await _pg(conn).upsert_order_mirror(order)
+
+    fulfillment_inserts = [
+        (sql, args) for sql, args in conn.executed
+        if sql.startswith("INSERT INTO fulfillments")
+    ]
+    assert len(fulfillment_inserts) == 1
+    assert "AWB-BF" in fulfillment_inserts[0][1]
 
 
 @pytest.fixture

@@ -114,7 +114,7 @@
 
 ## [external] Shopify webhook subscription management (per-topic self-heal)
 - **Caller:** backend/app/shopify/subscriptions.py (`ensure_subscription`)
-- **Topics (`REQUIRED_TOPICS`, 2026-08-14):** `ORDERS_CREATE, ORDERS_UPDATED, CUSTOMERS_UPDATE, FULFILLMENTS_CREATE, FULFILLMENTS_UPDATE` — each subscribed independently; a userError on one (e.g. `read_fulfillments` scope not granted → the two FULFILLMENTS_* topics) is isolated to that topic's `"error"` result, the rest still succeed.
+- **Topics (`REQUIRED_TOPICS`, 2026-08-14):** `ORDERS_CREATE, ORDERS_UPDATED, CUSTOMERS_UPDATE, FULFILLMENTS_CREATE, FULFILLMENTS_UPDATE` — each subscribed independently; a failure on one (e.g. `read_fulfillments` scope not granted → the two FULFILLMENTS_* topics) is isolated to that topic's `"error"` result, the rest still succeed. **Correction pass:** `_ensure_one_topic` now catches the broad `ShopifyError` base (not only `ShopifyGraphQLError`) — an ACCESS_DENIED can surface as a non-200 HTTP response (`ShopifyUnavailable`/`ShopifyAuthError`), which would otherwise escape the per-topic guard and 500 the whole job.
 - **Endpoint:** Admin GraphQL — `webhookSubscriptions(first:20, topics:[<TOPIC>])` (list), `webhookSubscriptionCreate` (format JSON), `webhookSubscriptionUpdate` (on URL/version drift).
 - **Request/Response:** create/update take `$callbackUrl: URL!` (update also `$id: ID!`); return `{webhookSubscription{id}, userErrors{message}}`.
 - **Notes:** invoked via the `ensure_subscription` job (`GET|POST /internal/jobs/ensure_subscription`). callbackUrl = `{public_base_url}/webhooks/shopify`. userErrors → `ShopifyGraphQLError`.

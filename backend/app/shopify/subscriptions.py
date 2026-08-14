@@ -1,5 +1,5 @@
 from app.shopify.client import ShopifyClient
-from app.shopify.errors import ShopifyGraphQLError
+from app.shopify.errors import ShopifyError, ShopifyGraphQLError
 
 # FULFILLMENTS_CREATE/UPDATE deliver courier/tracking data (needs the read_fulfillments scope).
 # Each topic is subscribed independently and a userError on one (e.g. the scope not yet granted)
@@ -48,15 +48,18 @@ async def _ensure_one_topic(
 ) -> str:
     """Result for ONE topic: "ok" | "updated" | "created" | "error".
 
-    A mutation's userErrors are converted to the flat "error" string rather than raised, so one
-    topic's failure cannot abort the topics after it (CUSTOMERS_UPDATE is both the likeliest to
-    fail -- protected-customer-data approval -- and the last in REQUIRED_TOPICS). The Shopify
-    message is deliberately NOT interpolated into the result: this dict is returned by the
-    /internal/jobs endpoint, and a fixed token cannot leak whatever an error string carries.
+    ANY ShopifyError for this topic is converted to the flat "error" string rather than raised, so
+    one topic's failure cannot abort the topics after it (CUSTOMERS_UPDATE / FULFILLMENTS_* are the
+    likeliest to fail -- protected-customer-data / read_fulfillments scope not yet granted). Catch
+    the broad ShopifyError base, not only ShopifyGraphQLError: an ACCESS_DENIED can surface as a
+    non-200 HTTP response (ShopifyUnavailable/ShopifyAuthError), which would otherwise escape this
+    guard and 500 the whole ensure_subscription job. The Shopify message is deliberately NOT
+    interpolated into the result: this dict is returned by the /internal/jobs endpoint, and a fixed
+    token cannot leak whatever an error string carries.
     """
     try:
         return await _ensure_one_topic_or_raise(client, topic, callback_url)
-    except ShopifyGraphQLError:
+    except ShopifyError:
         return "error"
 
 

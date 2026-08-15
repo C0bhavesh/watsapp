@@ -1,3 +1,5 @@
+import logging
+import sys
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -18,6 +20,32 @@ from app.channels.whatsapp import router as whatsapp_router
 from app.config.settings import Settings
 from app.jobs.router import router as jobs_router
 from app.ratelimit import limiter
+
+
+def _configure_logging() -> None:
+    """Route the app's own INFO+ logs to stderr (which Vercel captures) at import time.
+
+    Vercel invokes this module as the ASGI entrypoint (`api/index.py` -> `from app.main import
+    app`), so configuring here runs on every cold start - NOT gated behind `if __name__ ==
+    "__main__"`, which a serverless invocation never hits. Without this the root logger sits at
+    WARNING with zero handlers, so every `logger.info(...)` in app code (including the
+    owner-approved Shopify webhook debug lines) is silently discarded by `logging.lastResort`.
+
+    Scope is deliberately the `app` namespace only, not a global `logging.basicConfig`: attaching
+    the handler to the root logger would also promote third-party libraries (httpx, litellm,
+    asyncpg, ...) to INFO verbosity. Idempotent - guarded so a re-import never stacks handlers.
+    """
+    app_logger = logging.getLogger("app")
+    app_logger.setLevel(logging.INFO)
+    if not any(isinstance(h, logging.StreamHandler) for h in app_logger.handlers):
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        )
+        app_logger.addHandler(handler)
+
+
+_configure_logging()
 
 
 def _docs_enabled() -> bool:

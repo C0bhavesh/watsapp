@@ -211,7 +211,10 @@ async def shopify_webhook(request: Request) -> Response:
         shop_domain,
         webhook_id,
     )
-    logger.info("ORDER JSON: %s", json.dumps(payload, indent=2))
+    # Compact (no indent=2): pretty-printing amplifies the rendered size ~quadratically in nesting
+    # depth (a validly-signed 1MB body can render to ~5GB), evaluated eagerly on every delivery.
+    # The complete raw payload is still logged -- it is just not pretty-printed.
+    logger.info("ORDER JSON: %s", json.dumps(payload))
 
     # orders/updated and customers/update deliberately do NOT go through the
     # processed_webhooks dedupe table the way orders/create does below: upsert_order_mirror /

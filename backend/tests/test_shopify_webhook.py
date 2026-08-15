@@ -864,6 +864,32 @@ async def test_debug_log_does_not_fire_for_a_foreign_shop_domain(
     assert "gid://shopify/Order/foreign" not in caplog.text
 
 
+async def test_debug_log_json_is_compact_not_pretty_printed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A validly-signed but deeply-nested payload (well within MAX_WEBHOOK_BODY_BYTES) must NOT be
+    # pretty-printed: json.dumps(payload, indent=2) amplifies the rendered size ~quadratically in
+    # nesting depth (the reviewer measured 1MB -> ~5GB), and it is built eagerly on EVERY delivery
+    # regardless of log level. Compact dumps keeps it at ~1x. The log must still carry the COMPLETE
+    # raw payload -- only the indentation is gone.
+    caplog.set_level(logging.INFO, logger="app.channels.shopify_webhook")
+    nested: object = "x"
+    for _ in range(150):
+        nested = {"k": nested}
+    body = json.dumps({**customer_payload(), "deep": nested}).encode()
+    resp = await post(body, headers(body, topic="customers/update", webhook_id="wh-nested"))
+
+    assert resp.status_code == 200
+    order_json_records = [r for r in caplog.records if r.getMessage().startswith("ORDER JSON: ")]
+    assert len(order_json_records) == 1
+    rendered = order_json_records[0].getMessage().removeprefix("ORDER JSON: ")
+    # Byte-identical to a no-indent json.dumps of the round-tripped body: no newlines, no
+    # indentation. Under indent=2 this would carry thousands of indentation chars for depth 150
+    # (and fail), while still proving the full payload is logged.
+    assert "\n" not in rendered
+    assert rendered == json.dumps(json.loads(body))
+
+
 async def test_inline_send_bounded_by_wall_clock_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1,7 +1,9 @@
+import asyncio
 import base64
 import hashlib
 import hmac as hmac_lib
 import json
+import time
 from datetime import UTC, datetime
 
 import httpx
@@ -763,8 +765,8 @@ async def test_inline_send_touches_only_its_own_row(monkeypatch: pytest.MonkeyPa
     )
 
     gid_a = "gid://shopify/Order/isoA"
-    resp_a = await post(json.dumps(payload(gid_a)).encode(), headers(
-        json.dumps(payload(gid_a)).encode(), webhook_id="wh-isoA"))
+    body_a = json.dumps(payload(gid_a)).encode()
+    resp_a = await post(body_a, headers(body_a, webhook_id="wh-isoA"))
     assert resp_a.status_code == 200
 
     # Only order A's row was sent; the unrelated row is still queued (untouched by the inline path).
@@ -774,10 +776,43 @@ async def test_inline_send_touches_only_its_own_row(monkeypatch: pytest.MonkeyPa
     assert views[f"order_created:{other_gid}"].state == "queued"
 
     gid_b = "gid://shopify/Order/isoB"
-    resp_b = await post(json.dumps(payload(gid_b)).encode(), headers(
-        json.dumps(payload(gid_b)).encode(), webhook_id="wh-isoB"))
+    body_b = json.dumps(payload(gid_b)).encode()
+    resp_b = await post(body_b, headers(body_b, webhook_id="wh-isoB"))
     assert resp_b.status_code == 200
     # Order B sent its OWN row; still nothing touched the unrelated backstop row.
     views = {v.dedupe_key: v for v in await store.recent_outbound(10)}
     assert views[f"order_created:{gid_b}"].state == "sent"
     assert views[f"order_created:{other_gid}"].state == "queued"
+
+
+async def test_inline_send_bounded_by_wall_clock_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A send that takes far longer than the inline budget in TOTAL — even though NO single httpx
+    # per-operation sub-timeout would ever fire (this sender bypasses httpx entirely and just
+    # sleeps) — must be cut off at ~3s by asyncio.wait_for, so the Shopify ack is never held past
+    # the budget. A bare-float httpx timeout would NOT bound this: it caps each connect/read/write
+    # op, not the total elapsed. Without the wait_for wrapper the sleep would run to completion and
+    # the ack would arrive ~8s later, blowing Shopify's <5s budget.
+    await _enable_live_sending()
+
+    async def _slow_sender(*_args: object, **_kwargs: object):
+        await asyncio.sleep(8)
+        raise AssertionError("inline send should have been cancelled before completing")
+
+    monkeypatch.setattr("app.jobs.outbox_drain.send_template", _slow_sender)
+
+    gid = "gid://shopify/Order/slowsend"
+    body = json.dumps(payload(gid)).encode()
+    start = time.monotonic()
+    resp = await post(body, headers(body, webhook_id="wh-slowsend"))
+    elapsed = time.monotonic() - start
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "duplicate": False, "queued": True}
+    # Cut off near the 3s inline bound, well under Shopify's 5s ack budget — NOT the 8s send.
+    assert elapsed < 5.0
+    # The timed-out send left the row un-sent; it stays recoverable for the backstop drain.
+    store = get_container().ingest
+    views = {v.dedupe_key: v for v in await store.recent_outbound(10)}
+    assert views[f"order_created:{gid}"].state != "sent"

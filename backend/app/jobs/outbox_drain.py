@@ -1,12 +1,17 @@
 """Outbox drain job (Flow A) — send the queued order-confirmation templates.
 
-The 1-minute Vercel Cron calls this via ``GET /internal/jobs/outbox_drain`` (a manual/admin
-``POST`` with ``X-Cron-Secret`` also works). It is the ONLY sender: the ``orders/create`` webhook
-merely queues a row and acks Shopify — it never sends inline or via a background task (ADR-001;
-Vercel's Python runtime has no reliable process-after-response). Each run atomically claims queued
-``outbound_messages`` rows (``queued -> processing``) and sends each ``order_confirmation_cod``
-template with the deterministic ``order:confirm:{gid}`` / ``order:cancel:{gid}`` quick-reply button
-payloads.
+Since the ADR-001 amendment (2026-08-15), the PRIMARY sender is ``send_inline_outbound`` (defined
+below): the ``orders/create`` webhook queues a row and then sends THAT row inline — a bounded,
+single-row ``await`` before the ack — because the external scheduler that used to drive the drain
+stopped working. ``run_outbox_drain`` remains as a manual/backstop tool: it is invoked via
+``GET /internal/jobs/outbox_drain`` (a manual/admin ``POST`` with ``X-Cron-Secret`` also works) and
+picks up anything the inline path could not complete (a shadow/off row left queued, a timed-out or
+retryable send bumped back to ``queued``, or a row stranded ``processing`` by a killed inline
+invocation). It is currently WITHOUT a working scheduler, so treat it as a manual backstop, not an
+automatic safety net. Each run atomically claims queued ``outbound_messages`` rows
+(``queued -> processing``) and sends each ``order_confirmation_cod`` template with the deterministic
+``order:confirm:{gid}`` / ``order:cancel:{gid}`` quick-reply button payloads — byte-for-byte the
+same per-row state machine (``send_one_outbound``) the inline path uses.
 
 Safety:
 - The ``send_mode`` kill switch (ADR-002) is enforced here in ONE place. ``off`` returns before
@@ -17,6 +22,7 @@ Safety:
   deterministic button tap (``core.order_actions``).
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -50,7 +56,11 @@ _CLAIM_LIMIT = 5
 # deliberately far below send_template's 20s default (used by the cron drain, which has no ack
 # constraint): the whole webhook handler — DB writes + this bounded send + overhead — must stay
 # safely under Shopify's <5s ack requirement even in the worst case (a slow/unresponsive Meta
-# endpoint). A send that does not finish in this window is bumped for the backstop drain to retry.
+# endpoint). Enforced as a REAL total-elapsed bound via asyncio.wait_for around the whole send (a
+# bare-float httpx timeout only caps each connect/read/write op, not the total, so a slow-but-not-
+# hung endpoint could still exceed the budget). A send that does not finish in this window is cut
+# off; its row is left recoverable by the backstop drain (bumped to queued on a retryable failure,
+# or reclaimed from stale 'processing' by claim_queued_outbound's staleness predicate on timeout).
 _INLINE_SEND_TIMEOUT_SECONDS = 3.0
 
 # Meta send-error codes that mean "will never be delivered" (recipient not reachable / not on
@@ -270,9 +280,17 @@ async def send_inline_outbound(c: Container, outbound_id: int | None) -> str | N
         claim = await c.ingest.claim_outbound_by_id(outbound_id)
         if claim is None:
             return None
-        return await send_one_outbound(
-            c, cfg, controls, claim, timeout=_INLINE_SEND_TIMEOUT_SECONDS
+        # asyncio.wait_for gives a REAL total-elapsed bound, independent of how httpx internally
+        # splits connect/read/write timeouts — a slow-but-not-hung Meta endpoint can never hold
+        # the ack past the budget. A timeout raises TimeoutError, caught below like any other
+        # failure (row stays recoverable for the backstop drain; never propagates past the ack).
+        return await asyncio.wait_for(
+            send_one_outbound(c, cfg, controls, claim, timeout=_INLINE_SEND_TIMEOUT_SECONDS),
+            timeout=_INLINE_SEND_TIMEOUT_SECONDS,
         )
-    except Exception:
-        logger.warning("inline outbox send failed for row %s (ack unaffected)", outbound_id)
+    except Exception as exc:
+        logger.warning(
+            "inline outbox send failed for row %s: %s (ack unaffected)",
+            outbound_id, type(exc).__name__,
+        )
         return None

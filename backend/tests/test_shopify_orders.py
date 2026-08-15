@@ -81,6 +81,9 @@ def test_fulfillment_parse_full_payload() -> None:
     assert fulfillment.created_at == "2026-08-14T03:14:46-04:00"
     # Shopify's own last-modified stamp drives the out-of-order-delivery guard on write.
     assert fulfillment.updated_at == "2026-08-14T03:20:00-04:00"
+    # The REST fulfillment webhook payload has NO delivery-date field, so the webhook path never
+    # populates delivered_at -- it stays None (only the live GraphQL read can supply it).
+    assert fulfillment.delivered_at is None
 
 
 def test_fulfillment_gid_is_not_clipped() -> None:

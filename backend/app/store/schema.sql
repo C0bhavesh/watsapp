@@ -192,12 +192,20 @@ CREATE TABLE IF NOT EXISTS fulfillments (
     -- arriving after a fulfillments/update (tracking populated) must not revert good tracking.
     -- NULL = unknown, always writable (backfill / payloads without the field).
     shopify_updated_at timestamptz,
+    -- Shopify's OWN delivery timestamp (Admin GraphQL Fulfillment.deliveredAt): the date the
+    -- shipment was actually delivered. NULL until delivered (the common case) AND for every
+    -- webhook-pushed row -- the REST fulfillment webhook payload has no delivery-date field, so
+    -- this is populated only via the live GraphQL read path (get_order_fulfillments / backfill).
+    -- Capture-and-store only; no deletion/retention logic is wired to it (that is gated behind a
+    -- pending client decision, Q18).
+    delivered_at       timestamptz,
     updated_at         timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_fulfillments_order_gid ON fulfillments (order_gid);
--- Idempotent add for any install that created the table before this column existed (mirrors the
--- orders/customers updated_at ALTERs below).
+-- Idempotent adds for any install that created the table before these columns existed (mirrors
+-- the orders/customers updated_at ALTERs below).
 ALTER TABLE fulfillments ADD COLUMN IF NOT EXISTS shopify_updated_at timestamptz;
+ALTER TABLE fulfillments ADD COLUMN IF NOT EXISTS delivered_at timestamptz;
 
 -- Shopify's own last-modified stamp for the mirrored resource (distinct from synced_at, which
 -- is when WE wrote the row). Shopify does not guarantee webhook delivery order, so the mirror

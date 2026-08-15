@@ -196,6 +196,16 @@ class InMemoryIngestStore:
         # Out-of-order-delivery guard, mirroring the Postgres shopify_updated_at WHERE clause.
         if existing is not None and not _fulfillment_update_wins(existing, fulfillment):
             return
+        # delivered_at parity with the Postgres COALESCE: it is supplied ONLY by the live GraphQL
+        # read (the REST webhook payload has no delivery date), so a winning webhook update carries
+        # delivered_at=None. A delivery date is monotonic, so keep a previously captured one rather
+        # than let the newer (webhook) write wipe it.
+        if (
+            existing is not None
+            and fulfillment.delivered_at is None
+            and existing.delivered_at is not None
+        ):
+            fulfillment = replace(fulfillment, delivered_at=existing.delivered_at)
         self.fulfillments.setdefault(order_gid, {})[fulfillment.gid] = fulfillment
 
     def _with_fulfillments(self, order: Order | None) -> Order | None:

@@ -90,6 +90,21 @@ _FULFILLMENTS_PAYLOAD = [
         ],
         "createdAt": "2026-08-14T03:14:46Z",
         "updatedAt": "2026-08-14T03:20:00Z",
+        "deliveredAt": "2026-08-15T11:30:00Z",
+    },
+]
+
+# A fulfillment shipped but not yet delivered: Shopify returns deliveredAt: null. The common case.
+_UNDELIVERED_FULFILLMENTS_PAYLOAD = [
+    {
+        "id": "gid://shopify/Fulfillment/222",
+        "status": "SUCCESS",
+        "trackingInfo": [
+            {"company": "Delhivery", "number": "AWB1122", "url": "https://track/AWB1122"},
+        ],
+        "createdAt": "2026-08-14T03:14:46Z",
+        "updatedAt": "2026-08-14T03:20:00Z",
+        "deliveredAt": None,
     },
 ]
 
@@ -154,6 +169,25 @@ async def test_get_order_parses_fulfillment_tracking(settings, master_key) -> No
     assert f.tracking_number == "AWB0099887766"
     assert f.tracking_url == "https://www.delhivery.com/track/AWB0099887766"
     assert f.updated_at == "2026-08-14T03:20:00Z"
+    # Shopify's deliveredAt is captured onto Fulfillment.delivered_at (capture-and-store only).
+    assert f.delivered_at == "2026-08-15T11:30:00Z"
+
+
+async def test_get_order_fulfillment_delivered_at_is_none_until_delivered(
+    settings, master_key
+) -> None:
+    # The common case: a shipped-but-not-delivered fulfillment returns deliveredAt: null, which
+    # must parse to None (never a crash, never a fabricated date).
+    handler = _split_order_handler(
+        {"data": {"order": {"fulfillments": _UNDELIVERED_FULFILLMENTS_PAYLOAD}}}
+    )
+    client, config = make_client(settings, master_key, grant_or(handler))
+    await seed(config)
+    order = await client.get_order("gid://shopify/Order/12187547894128")
+    assert order is not None
+    assert len(order.fulfillments) == 1
+    assert order.fulfillments[0].tracking_number == "AWB1122"
+    assert order.fulfillments[0].delivered_at is None
 
 
 async def test_get_order_without_fulfillments_has_empty_tuple(settings, master_key) -> None:

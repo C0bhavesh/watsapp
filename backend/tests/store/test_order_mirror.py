@@ -142,6 +142,27 @@ async def test_upsert_fulfillment_memory_rejects_stale_shopify_update() -> None:
     assert result.fulfillments[0].tracking_number == "GOOD"
 
 
+async def test_upsert_fulfillment_memory_keeps_delivered_at_when_later_update_lacks_it() -> None:
+    # delivered_at is supplied ONLY by the live GraphQL read; a later fulfillments/update webhook
+    # (newer stamp, but REST carries no delivery date) legitimately wins the freshness guard yet
+    # must NOT wipe the captured delivery date -- parity with the Postgres COALESCE.
+    store = InMemoryIngestStore()
+    await store.upsert_order_mirror(_order())
+    await store.upsert_fulfillment(
+        "gid://shopify/Order/1",
+        _fulfillment(
+            delivered_at="2026-08-15T11:30:00+00:00", updated_at="2026-08-14T05:00:00+00:00"
+        ),
+    )
+    await store.upsert_fulfillment(
+        "gid://shopify/Order/1",
+        _fulfillment(delivered_at=None, updated_at="2026-08-14T06:00:00+00:00"),
+    )
+    result = await store.get_mirrored_order("gid://shopify/Order/1")
+    assert result is not None
+    assert result.fulfillments[0].delivered_at == "2026-08-15T11:30:00+00:00"
+
+
 async def test_upsert_fulfillment_memory_newer_shopify_update_wins() -> None:
     store = InMemoryIngestStore()
     await store.upsert_order_mirror(_order())
@@ -591,7 +612,8 @@ async def test_find_mirrored_orders_by_phone_pg_batch_fetches_items_without_n_pl
         {"order_gid": "gid://a", "gid": "gid://f/a", "status": "success",
          "tracking_company": "Delhivery", "tracking_number": "AWB-A",
          "tracking_url": "https://track/AWB-A", "created_at": None,
-         "shopify_updated_at": datetime(2026, 8, 14, 3, 20, tzinfo=UTC)},
+         "shopify_updated_at": datetime(2026, 8, 14, 3, 20, tzinfo=UTC),
+         "delivered_at": datetime(2026, 8, 15, 11, 30, tzinfo=UTC)},
     ]
     conn = _FakeReadConn(order_rows, item_rows, fulfillment_rows)
     store = PostgresIngestStore(_FakePool(conn))  # type: ignore[arg-type]
@@ -610,6 +632,8 @@ async def test_find_mirrored_orders_by_phone_pg_batch_fetches_items_without_n_pl
     # shopify_updated_at is selected and round-trips onto Fulfillment.updated_at (a mirror read no
     # longer drops the freshness stamp the in-memory store returns).
     assert by_gid["gid://a"].fulfillments[0].updated_at == "2026-08-14T03:20:00+00:00"
+    # delivered_at round-trips through the batched read too (capture-and-store).
+    assert by_gid["gid://a"].fulfillments[0].delivered_at == "2026-08-15T11:30:00+00:00"
     assert by_gid["gid://b"].fulfillments == ()
 
 
@@ -666,6 +690,23 @@ async def test_upsert_fulfillment_pg_carries_out_of_order_delivery_guard() -> No
     assert (
         "WHERE fulfillments.shopify_updated_at IS NULL "
         "OR EXCLUDED.shopify_updated_at >= fulfillments.shopify_updated_at"
+    ) in insert_sql[0]
+
+
+async def test_upsert_fulfillment_pg_persists_delivered_at_stickily() -> None:
+    # Shopify's deliveredAt (live GraphQL only) is written; and the DO UPDATE COALESCEs it so a
+    # later fulfillments/update webhook -- which under REST carries NO delivery date -- cannot wipe
+    # a delivery date already captured. delivered_at is monotonic: once known it never reverts.
+    conn = _RecordingConn()
+    await _pg(conn).upsert_fulfillment(
+        "gid://shopify/Order/1", _fulfillment(delivered_at="2026-08-15T11:30:00+00:00")
+    )
+
+    insert_sql = [sql for sql, _ in conn.executed if sql.startswith("INSERT INTO fulfillments")]
+    assert len(insert_sql) == 1
+    assert "delivered_at" in insert_sql[0]
+    assert (
+        "delivered_at = COALESCE(EXCLUDED.delivered_at, fulfillments.delivered_at)"
     ) in insert_sql[0]
 
 

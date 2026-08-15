@@ -101,7 +101,7 @@ def _order_from_row(
 
 _FULFILLMENT_COLUMNS = (
     "gid, status, tracking_company, tracking_number, tracking_url, created_at, "
-    "shopify_updated_at"
+    "shopify_updated_at, delivered_at"
 )
 
 
@@ -120,6 +120,7 @@ def _fulfillment_from_row(r: asyncpg.Record) -> Fulfillment:
         updated_at=(
             r["shopify_updated_at"].isoformat() if r["shopify_updated_at"] else None
         ),
+        delivered_at=r["delivered_at"].isoformat() if r["delivered_at"] else None,
     )
 
 
@@ -152,14 +153,25 @@ async def _upsert_fulfillment_on_conn(
     non-NULL one (it does not overwrite). That asymmetry is deliberate and fail-safe: it matches
     memory.py's documented direction -- an unstamped replay never clobbers a stamped row's
     tracking -- so the two IngestStore impls agree.
+
+    delivered_at is COALESCEd (EXCLUDED value, else the stored one) instead of overwritten: it is
+    supplied ONLY by the live GraphQL read (the REST fulfillments webhook payload has no
+    delivery-date field, so a webhook-sourced write always carries delivered_at = NULL). A later
+    fulfillments/update webhook legitimately wins the shopify_updated_at guard above, so without
+    the COALESCE it would wipe a delivery date a prior GraphQL/backfill write had captured. A
+    delivery date is monotonic (once delivered, never un-delivered), so keeping the known value is
+    the fail-safe direction -- matching memory.py's parity handling.
     """
     await conn.execute(
         "INSERT INTO fulfillments (gid, order_gid, status, tracking_company, "
-        "tracking_number, tracking_url, created_at, shopify_updated_at, updated_at) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now()) "
+        "tracking_number, tracking_url, created_at, shopify_updated_at, delivered_at, "
+        "updated_at) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now()) "
         "ON CONFLICT (gid) DO UPDATE SET order_gid = $2, status = $3, "
         "tracking_company = $4, tracking_number = $5, tracking_url = $6, "
-        "created_at = $7, shopify_updated_at = $8, updated_at = now() "
+        "created_at = $7, shopify_updated_at = $8, "
+        "delivered_at = COALESCE(EXCLUDED.delivered_at, fulfillments.delivered_at), "
+        "updated_at = now() "
         "WHERE fulfillments.shopify_updated_at IS NULL "
         "OR EXCLUDED.shopify_updated_at >= fulfillments.shopify_updated_at",
         fulfillment.gid,
@@ -170,6 +182,7 @@ async def _upsert_fulfillment_on_conn(
         fulfillment.tracking_url,
         _parse_timestamp(fulfillment.created_at),
         _parse_timestamp(fulfillment.updated_at),
+        _parse_timestamp(fulfillment.delivered_at),
     )
 
 

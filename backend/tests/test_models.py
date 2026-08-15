@@ -164,3 +164,20 @@ def test_fulfillment_tracking_fields_default_to_none() -> None:
     )
     assert f.created_at is None
     assert f.tracking_number is None
+    # delivered_at is None for the common case: a fulfillment that is not yet delivered.
+    assert f.delivered_at is None
+
+
+def test_fulfillment_carries_delivered_at() -> None:
+    # Shopify's Fulfillment.deliveredAt (Admin GraphQL) -- the date a shipment was actually
+    # delivered. Stored alongside the existing tracking data; parsed only from the live GraphQL
+    # path (the REST webhook payload carries no delivery-date field).
+    f = Fulfillment(
+        gid="gid://shopify/Fulfillment/3",
+        status="SUCCESS",
+        tracking_company="Delhivery",
+        tracking_number="AWB123",
+        tracking_url="https://track.example/AWB123",
+        delivered_at="2026-08-14T09:00:00+00:00",
+    )
+    assert f.delivered_at == "2026-08-14T09:00:00+00:00"

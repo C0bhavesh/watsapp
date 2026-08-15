@@ -269,6 +269,11 @@ def fulfillment_from_webhook_payload(
         tracking_url=_first_tracking(payload.get("tracking_url"), payload.get("tracking_urls")),
         created_at=_c(payload.get("created_at")),
         updated_at=_c(payload.get("updated_at")),
+        # delivered_at is intentionally left at its None default: the Shopify REST fulfillment
+        # webhook payload carries NO delivery-date field (only `shipment_status`, a string enum
+        # like "in_transit"/"delivered" -- not a timestamp). The actual delivery date is available
+        # only via the Admin GraphQL `Fulfillment.deliveredAt`, so it is populated on the live
+        # GraphQL read path (_fulfillments_from_node), never here. Do NOT invent a REST field.
     )
     return order_gid, fulfillment
 

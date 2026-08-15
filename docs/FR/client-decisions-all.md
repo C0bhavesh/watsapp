@@ -233,6 +233,19 @@ on the next send tick, not sit inert. In other words, once this ships it is acti
 right away; it is not silently disabled behind an off switch. (Orders older than 24 hours are never
 reminded, so turning it on does not blast historically-unanswered orders.)
 
+**18. Deleting courier/tracking detail after an order is delivered.** To save database storage,
+should we delete the courier name, AWB/tracking number, and tracking link 3 days after an order
+shows as delivered — while still keeping a record that it WAS delivered, and the date?
+
+- A (owner-directed, being built now): yes, delete the courier/tracking detail 3 days after
+  delivery; keep only a "delivered on [date]" record for that order going forward.
+- B: keep the full tracking detail indefinitely, same as the rest of the order record.
+
+Note: this is narrower than your earlier answer to Q15 (order data kept indefinitely) — it only
+touches the courier/tracking sub-detail, only after delivery, not the order itself. Being built
+as an owner-directed decision pending your confirmation; the deletion sweep itself will not run
+until this is answered, so no data is lost while we wait.
+
 ## ✅ ANSWERED (2026-08-12)
 
 **16. Whose phone number should unlock an order in WhatsApp chat?** When a customer messages

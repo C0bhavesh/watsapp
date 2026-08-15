@@ -58,6 +58,12 @@ class Fulfillment:
     # fulfillments/update (tracking populated) must not revert good tracking. NULL = unknown,
     # which is always writable. Distinct from the mirror's own sync timestamp.
     updated_at: str | None = None
+    # Shopify's own delivery timestamp (raw ISO-8601): the date the shipment was actually
+    # delivered (Admin GraphQL `Fulfillment.deliveredAt`). None until delivered -- the common
+    # case (most fulfillments are pending/in_transit). Populated ONLY on the live GraphQL read
+    # path; the REST webhook payload carries no delivery-date field, so a webhook-parsed
+    # Fulfillment always leaves this None. Capture-and-store only (no customer-facing use yet).
+    delivered_at: str | None = None
 
     def has_tracking(self) -> bool:
         return bool(self.tracking_number or self.tracking_url)

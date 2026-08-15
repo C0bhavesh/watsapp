@@ -57,9 +57,12 @@ ORDER_FIELDS = (
 # (split shipments); trackingInfo is itself a list (rarely >1 number) -- keep the first, matching
 # the one-tracking-per-row mirror schema. `id` is selected so the live-path Fulfillment carries
 # its real gid; `updatedAt` drives the mirror's out-of-order-delivery guard.
+# `deliveredAt` is the actual delivery timestamp (capture-and-store only -- the REST webhook
+# payload carries no equivalent field, so this GraphQL read is the ONLY path that can populate
+# Fulfillment.delivered_at).
 FULFILLMENT_FIELDS = (
     "fulfillments(first: 5) { id status trackingInfo(first: 3) { company number url } "
-    "createdAt updatedAt }"
+    "createdAt updatedAt deliveredAt }"
 )
 
 
@@ -130,6 +133,7 @@ def _fulfillments_from_node(node: dict[str, Any]) -> tuple[Fulfillment, ...]:
                 tracking_url=info.get("url"),
                 created_at=f.get("createdAt"),
                 updated_at=f.get("updatedAt"),
+                delivered_at=f.get("deliveredAt"),
             )
         )
     return tuple(result)

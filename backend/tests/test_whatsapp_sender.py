@@ -55,7 +55,7 @@ async def test_network_error_raises_whatsapp_send_error() -> None:
         await send_text(client_with(handler), CFG, "919999999999", "hi")
 
 
-async def test_send_template_builds_body_and_button_components() -> None:
+async def test_send_template_builds_named_body_and_button_components() -> None:
     captured = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -63,19 +63,71 @@ async def test_send_template_builds_body_and_button_components() -> None:
         return httpx.Response(200, json={"messages": [{"id": "wamid.T1"}]})
 
     await send_template(
-        client_with(handler), CFG, "919999999999", "order_confirmation_cod", "hi",
-        body_params=["Suman", "tavas3733", "949"],
+        client_with(handler), CFG, "919999999999", "cod_confirmation", "en",
+        body_params={"customer_name": "Suman", "order_id": "tavas3733", "product_amount": "949"},
         button_payloads=["order:confirm:gid://1", "order:cancel:gid://1"],
     )
     template = captured["body"]["template"]
-    assert template["name"] == "order_confirmation_cod"
-    assert template["language"] == {"code": "hi"}
+    assert template["name"] == "cod_confirmation"
+    assert template["language"] == {"code": "en"}
     body_component = next(c for c in template["components"] if c["type"] == "body")
-    assert [p["text"] for p in body_component["parameters"]] == ["Suman", "tavas3733", "949"]
+    # Named params: Meta requires parameter_name on each body parameter object for a named template.
+    assert body_component["parameters"] == [
+        {"type": "text", "parameter_name": "customer_name", "text": "Suman"},
+        {"type": "text", "parameter_name": "order_id", "text": "tavas3733"},
+        {"type": "text", "parameter_name": "product_amount", "text": "949"},
+    ]
     button_components = [c for c in template["components"] if c["type"] == "button"]
     assert button_components[0]["index"] == "0"
     assert button_components[0]["parameters"][0]["payload"] == "order:confirm:gid://1"
     assert button_components[1]["index"] == "1"
+    # No header image supplied -> no header component.
+    assert not any(c["type"] == "header" for c in template["components"])
+
+
+async def test_send_template_prepends_image_header_when_url_supplied() -> None:
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.read())
+        return httpx.Response(200, json={"messages": [{"id": "wamid.T2"}]})
+
+    await send_template(
+        client_with(handler), CFG, "919999999999", "cod_confirmation", "en",
+        body_params={"customer_name": "Suman"},
+        button_payloads=["order:confirm:gid://1"],
+        header_image_url="https://cdn.shopify.com/s/files/1/x.jpg",
+    )
+    components = captured["body"]["template"]["components"]
+    header = next(c for c in components if c["type"] == "header")
+    assert header["parameters"] == [
+        {"type": "image", "image": {"link": "https://cdn.shopify.com/s/files/1/x.jpg"}}
+    ]
+    # Header comes before body, which comes before the buttons (Meta component ordering).
+    assert [c["type"] for c in components] == ["header", "body", "button"]
+
+
+async def test_send_template_drops_non_https_header_image() -> None:
+    # Defense-in-depth: the shared low-level sender must not forward an unvalidated header URL to
+    # Meta. Callers already https-check upstream, but a future caller passing a non-https URL must
+    # degrade to "no header" (send stays valid), never raise, never reach Meta with a bad link.
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.read())
+        return httpx.Response(200, json={"messages": [{"id": "wamid.T3"}]})
+
+    result = await send_template(
+        client_with(handler), CFG, "919999999999", "cod_confirmation", "en",
+        body_params={"customer_name": "Suman"},
+        button_payloads=["order:confirm:gid://1"],
+        header_image_url="http://insecure.example/x.jpg",
+    )
+    assert result.ok is True
+    components = captured["body"]["template"]["components"]
+    # The non-https URL was dropped: no header component, body + button still present.
+    assert not any(c["type"] == "header" for c in components)
+    assert [c["type"] for c in components] == ["body", "button"]
 
 
 async def test_error_body_does_not_leak_bearer_token() -> None:

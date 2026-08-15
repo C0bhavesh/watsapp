@@ -46,6 +46,13 @@ class IncomingOrder:
     created_at: datetime | None
     locale: str | None
     financial_status: str | None
+    # First line item, summarized for the cod_confirmation WhatsApp template (Q19b: a multi-item
+    # order shows only its FIRST product). product_gid is built from the line item's numeric
+    # product_id so the product photo can be fetched live (the REST payload carries no image URL).
+    product_name: str | None = None
+    product_color: str | None = None
+    product_size: str | None = None
+    product_gid: str | None = None
 
     def is_cod(self) -> bool:
         if any("cash on delivery" in g.lower() for g in self.gateways):
@@ -86,6 +93,11 @@ def parse_order_created(payload: dict) -> IncomingOrder | None:  # type: ignore[
         tags = tuple(t.strip() for t in raw_tags.split(",") if t.strip())
     gateways = tuple(str(g) for g in _seq(payload.get("payment_gateway_names")))
     number = payload.get("order_number")
+    # First line item only (Q19b): its product name/colour/size + product gid feed the
+    # cod_confirmation template. Absent line items leave every product field None.
+    line_items = _seq(payload.get("line_items"))
+    first_item = _d(line_items[0]) if line_items else {}
+    product_color, product_size = _split_variant_options(_s(first_item.get("variant_title")))
     return IncomingOrder(
         gid=gid,
         name=name,
@@ -98,7 +110,46 @@ def parse_order_created(payload: dict) -> IncomingOrder | None:  # type: ignore[
         created_at=_parse_created_at(payload.get("created_at")),
         locale=_s(payload.get("customer_locale")),
         financial_status=_s(payload.get("financial_status")),
+        product_name=_c(first_item.get("title")),
+        product_color=product_color,
+        product_size=product_size,
+        product_gid=_product_gid_from_line_item(first_item),
     )
+
+
+def _split_variant_options(variant_title: str | None) -> tuple[str | None, str | None]:
+    """Split a Shopify variant title into (colour, size) for the cod_confirmation template.
+
+    Shopify joins a variant's option values with `` / `` (e.g. ``"Cream / M"`` = Color / Size), so
+    the first two joined values map to the template's ``product_color``/``product_size`` named
+    params (the store's variant convention: option 1 = colour, option 2 = size). A single-option
+    variant yields ``(colour, None)``; no variant yields ``(None, None)``. Both values are
+    length-capped like every other attacker-typed payload string.
+    """
+    if not variant_title:
+        return None, None
+    parts = [p.strip() for p in variant_title.split(" / ")]
+    color = clip(parts[0]) if parts and parts[0] else None
+    size = clip(parts[1]) if len(parts) > 1 and parts[1] else None
+    return color, size
+
+
+def _product_gid_from_line_item(item: dict[str, object]) -> str | None:
+    """Build the product gid from a line item's numeric ``product_id``.
+
+    The REST order webhook line item carries ``product_id``/``variant_id`` but NO image URL, so the
+    product's photo must be fetched live from the Admin API — which needs the product gid. ``bool``
+    is an ``int`` subclass, so it is rejected explicitly; a string id must be ASCII digits only, so
+    nothing path-like is interpolated into the gid (same guard as ``_order_gid_from_id``).
+    """
+    raw = item.get("product_id")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return f"gid://shopify/Product/{raw}"
+    if isinstance(raw, str) and raw.isascii() and raw.isdigit():
+        return f"gid://shopify/Product/{raw}"
+    return None
 
 
 def choose_language(locale: str | None, default: str = "en") -> str:

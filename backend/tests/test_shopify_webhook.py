@@ -87,9 +87,81 @@ async def test_orders_create_ingests_and_queues() -> None:
     store = get_container().ingest
     draft = store.outbound["order_created:gid://shopify/Order/1"]  # type: ignore[attr-defined]
     params = json.loads(draft.payload_json)
-    assert params["template"] == "order_confirmation_cod"
-    assert params["language"] == "hi"
+    assert params["template"] == "cod_confirmation"
+    # cod_confirmation is en-only on the WABA, so the template send is pinned to en even for a
+    # hi-IN customer locale (the free-form conversation still uses the customer's language).
+    assert params["language"] == "en"
+    assert params["customer_name"] == "Suman B"
+    assert params["order_id"] == "tavas3733"
+    assert params["product_amount"] == "949.00"
+    # This payload() carries no line_items, so the product fields degrade to the placeholder and
+    # no header image is resolved (no Shopify call made).
+    assert params["product_name"] == "-"
+    assert params["product_color"] == "-"
+    assert params["product_size"] == "-"
+    assert "image_url" not in params
     assert draft.phone_e164 == "+919664290413"
+
+
+def _payload_with_product(gid: str = "gid://shopify/Order/img1") -> dict:
+    p = payload(gid)
+    p["line_items"] = [
+        {
+            "title": "Chic Kurta Set", "product_id": 15061451407728,
+            "variant_title": "Cream / M", "quantity": 1, "price": "1299.00",
+        }
+    ]
+    return p
+
+
+async def test_orders_create_resolves_product_image_into_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Q19a: the product photo is fetched live at ingest and cached in payload_json (so the inline
+    # send + backstop drain + reminder all reuse it with no extra Shopify call).
+    c = get_container()
+    seen: dict = {}
+
+    async def fake_image(product_gid: str) -> str:
+        seen["gid"] = product_gid
+        return "https://cdn.shopify.com/s/files/1/kurta.jpg"
+
+    monkeypatch.setattr(c.shopify, "get_product_image_url", fake_image)
+
+    body = json.dumps(_payload_with_product()).encode()
+    resp = await post(body, headers(body, webhook_id="wh-img1"))
+
+    assert resp.status_code == 200
+    draft = c.ingest.outbound["order_created:gid://shopify/Order/img1"]  # type: ignore[attr-defined]
+    params = json.loads(draft.payload_json)
+    assert seen["gid"] == "gid://shopify/Product/15061451407728"
+    assert params["product_name"] == "Chic Kurta Set"
+    assert params["product_color"] == "Cream"
+    assert params["product_size"] == "M"
+    assert params["image_url"] == "https://cdn.shopify.com/s/files/1/kurta.jpg"
+
+
+async def test_orders_create_degrades_gracefully_when_image_fetch_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A Shopify hiccup during image resolution must NOT block the confirmation: still 200, still
+    # queued, just no image_url (the send goes out with no header).
+    c = get_container()
+
+    async def boom(product_gid: str) -> str:
+        raise RuntimeError("shopify down")
+
+    monkeypatch.setattr(c.shopify, "get_product_image_url", boom)
+
+    body = json.dumps(_payload_with_product("gid://shopify/Order/img2")).encode()
+    resp = await post(body, headers(body, webhook_id="wh-img2"))
+
+    assert resp.status_code == 200
+    assert resp.json()["queued"] is True
+    draft = c.ingest.outbound["order_created:gid://shopify/Order/img2"]  # type: ignore[attr-defined]
+    params = json.loads(draft.payload_json)
+    assert params["product_name"] == "Chic Kurta Set"
+    assert "image_url" not in params
 
 
 async def test_webhook_does_not_send_inline_when_send_mode_off(
@@ -626,11 +698,11 @@ class _RecordingSender:
 
     async def __call__(
         self, http, cfg, to, template_name, language, body_params,
-        button_payloads=(), timeout=20.0,
+        button_payloads=(), header_image_url=None, timeout=20.0,
     ):
         self.calls.append(
             {"to": to, "template": template_name, "button_payloads": list(button_payloads),
-             "timeout": timeout}
+             "header_image_url": header_image_url, "timeout": timeout}
         )
         if isinstance(self._result, Exception):
             raise self._result
@@ -919,5 +991,74 @@ async def test_inline_send_bounded_by_wall_clock_timeout(
     assert elapsed < 5.0
     # The timed-out send left the row un-sent; it stays recoverable for the backstop drain.
     store = get_container().ingest
+    views = {v.dedupe_key: v for v in await store.recent_outbound(10)}
+    assert views[f"order_created:{gid}"].state != "sent"
+
+
+async def test_slow_image_fetch_alone_stays_bounded_and_drops_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Item 2: exercise the ACTUAL asyncio.wait_for timeout branch for the image fetch (not just an
+    # exception). The mock sleeps far past _IMAGE_FETCH_TIMEOUT_SECONDS, so wait_for cancels it;
+    # the handler must still complete quickly, ack 200, and queue the row WITHOUT an image_url.
+    # send_mode is the default `off` here, so no inline send runs — this isolates the image bound.
+    c = get_container()
+
+    async def _slow_image(product_gid: str) -> str:
+        await asyncio.sleep(8)
+        raise AssertionError("image fetch should have been cancelled by the timeout")
+
+    monkeypatch.setattr(c.shopify, "get_product_image_url", _slow_image)
+
+    body = json.dumps(_payload_with_product("gid://shopify/Order/slowimg")).encode()
+    start = time.monotonic()
+    resp = await post(body, headers(body, webhook_id="wh-slowimg"))
+    elapsed = time.monotonic() - start
+
+    assert resp.status_code == 200
+    assert resp.json()["queued"] is True
+    # Cut off at the ~1s image bound, nowhere near the 8s sleep.
+    assert elapsed < 3.0
+    draft = c.ingest.outbound["order_created:gid://shopify/Order/slowimg"]  # type: ignore[attr-defined]
+    params = json.loads(draft.payload_json)
+    assert params["product_name"] == "Chic Kurta Set"
+    assert "image_url" not in params
+
+
+async def test_slow_image_fetch_and_slow_send_together_stay_under_ack_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Item 1 (MAJOR): the WHOLE inline path — the product-image fetch AND the WhatsApp send — must
+    # stay under Shopify's <5s ack budget even when BOTH are slow at once. The prior timing test
+    # only slowed the send against a payload with no line items, so the image-fetch delay never
+    # entered it. Here a product IS present (image fetch attempted) AND live sending is on, so both
+    # bounds stack: 1.0s image + 3.0s send = ~4.0s worst case, with real margin under 5s.
+    await _enable_live_sending()
+
+    async def _slow_image(product_gid: str) -> str:
+        await asyncio.sleep(8)
+        raise AssertionError("image fetch should have been cancelled by the timeout")
+
+    async def _slow_sender(*_args: object, **_kwargs: object):
+        await asyncio.sleep(8)
+        raise AssertionError("inline send should have been cancelled before completing")
+
+    monkeypatch.setattr(get_container().shopify, "get_product_image_url", _slow_image)
+    monkeypatch.setattr("app.jobs.outbox_drain.send_template", _slow_sender)
+
+    gid = "gid://shopify/Order/slowboth"
+    body = json.dumps(_payload_with_product(gid)).encode()
+    start = time.monotonic()
+    resp = await post(body, headers(body, webhook_id="wh-slowboth"))
+    elapsed = time.monotonic() - start
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "duplicate": False, "queued": True}
+    # Both bounds stacked (image ~1s + send ~3s) must still land safely under the 5s ack budget.
+    assert elapsed < 5.0
+    # The image never resolved (dropped), and the timed-out send left the row recoverable.
+    store = get_container().ingest
+    draft = store.outbound[f"order_created:{gid}"]  # type: ignore[attr-defined]
+    assert "image_url" not in json.loads(draft.payload_json)
     views = {v.dedupe_key: v for v in await store.recent_outbound(10)}
     assert views[f"order_created:{gid}"].state != "sent"

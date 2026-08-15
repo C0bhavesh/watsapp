@@ -167,6 +167,88 @@ def test_fulfillment_ignores_non_string_array_entries() -> None:
     assert fulfillment.tracking_number == "GOOD"
 
 
+_LINE_ITEM_PAYLOAD = {
+    **PAYLOAD,
+    "line_items": [
+        {
+            "title": "Chic Digital Print Mal Cotton Kurta Set",
+            "product_id": 15061451407728,
+            "variant_id": 53472318620016,
+            "variant_title": "Cream / M",
+            "sku": "tavas-124-02/Cream-M",
+            "quantity": 1,
+            "price": "1299.00",
+        },
+        {
+            "title": "Cotton Dupatta",
+            "product_id": 222,
+            "variant_title": "Red",
+            "quantity": 1,
+            "price": "150.00",
+        },
+    ],
+}
+
+
+def test_parse_order_created_extracts_first_line_item_product_fields() -> None:
+    # Q19: the cod_confirmation template shows one product's name/colour/size + a live photo.
+    # 19b: for a multi-item order, ONLY the first line item feeds the template.
+    order = parse_order_created(_LINE_ITEM_PAYLOAD)
+    assert order is not None
+    assert order.product_name == "Chic Digital Print Mal Cotton Kurta Set"
+    assert order.product_color == "Cream"
+    assert order.product_size == "M"
+    # The REST order webhook line item carries product_id but NO image URL, so the product gid is
+    # built from product_id and the photo is fetched live from that product.
+    assert order.product_gid == "gid://shopify/Product/15061451407728"
+
+
+def test_parse_order_created_single_option_variant_leaves_size_none() -> None:
+    p = {**PAYLOAD, "line_items": [{"title": "Scarf", "product_id": 5, "variant_title": "Red"}]}
+    order = parse_order_created(p)
+    assert order is not None
+    assert order.product_color == "Red"
+    assert order.product_size is None
+
+
+def test_parse_order_created_no_line_items_leaves_product_fields_none() -> None:
+    order = parse_order_created(PAYLOAD)  # PAYLOAD has no line_items
+    assert order is not None
+    assert order.product_name is None
+    assert order.product_color is None
+    assert order.product_size is None
+    assert order.product_gid is None
+
+
+def test_parse_order_created_rejects_bad_product_id() -> None:
+    # bool is an int subclass; a non-numeric/None/dict id must not build a product gid.
+    for bad in (True, "not-a-number", None, {"x": 1}):
+        p = {**PAYLOAD, "line_items": [{"title": "X", "product_id": bad, "variant_title": "A / B"}]}
+        order = parse_order_created(p)
+        assert order is not None
+        assert order.product_gid is None, bad
+
+
+def test_parse_order_created_accepts_string_product_id() -> None:
+    p = {**PAYLOAD, "line_items": [{"title": "X", "product_id": "98765", "variant_title": "A / B"}]}
+    order = parse_order_created(p)
+    assert order is not None
+    assert order.product_gid == "gid://shopify/Product/98765"
+
+
+def test_parse_order_created_clips_oversized_product_fields() -> None:
+    long = "z" * 5000
+    p = {
+        **PAYLOAD,
+        "line_items": [{"title": long, "product_id": 5, "variant_title": f"{long} / {long}"}],
+    }
+    order = parse_order_created(p)
+    assert order is not None
+    assert order.product_name is not None and len(order.product_name) == MAX_FIELD_LEN
+    assert order.product_color is not None and len(order.product_color) == MAX_FIELD_LEN
+    assert order.product_size is not None and len(order.product_size) == MAX_FIELD_LEN
+
+
 def test_choose_language() -> None:
     assert choose_language("en-IN") == "en"
     assert choose_language("hi") == "hi"

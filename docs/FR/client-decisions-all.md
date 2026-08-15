@@ -249,6 +249,40 @@ itself, so we have something to measure "3 days after" from) — **no deletion e
 will be built until you answer this question.** The deletion sweep is entirely gated on your
 confirmation; nothing is at risk of being removed in the meantime.
 
+## Part 7 — New question (2026-08-15)
+
+**19. New WhatsApp number + redesigned COD confirmation template.** The store connected a
+different WhatsApp number, and the COD confirmation template built on that number
+(`cod_confirmation`, Meta-approved) is richer than the original: it now shows a product photo at
+the top, plus product name, colour, and size (the original only showed customer name, order
+number, and amount). This requires two decisions:
+
+- **19a. Product photo source (owner-directed):** show the actual product photo for each order,
+  pulled from Shopify's product image at send time (not a fixed logo). If the image fetch fails
+  for any reason, note for build: a fallback (skip the header, or use a fixed default image) is
+  needed so a Shopify hiccup never blocks the confirmation message itself.
+- **19b. Orders with more than one product (owner-directed):** show only the first line item's
+  product/colour/size in the confirmation message. The order still keeps its full item list; only
+  this specific message is summarized to one product.
+
+Being built as owner-directed decisions pending your confirmation, same pattern as Q17/Q18.
+
+**19c. Confirmation message language, until Hindi/Gujarati templates are approved.** The new
+`cod_confirmation` template is currently Meta-approved in **English only** on this WABA (the
+original number also had `hi`/`gu` versions approved; those need to be resubmitted and approved
+again here). Until that happens, every COD confirmation message goes out in English, even for
+customers whose order/browser locale is Hindi or Gujarati — sending in an unapproved language
+would be rejected by Meta and break delivery again.
+
+- A (recommended): accept English-only confirmations for now; submit hi/gu versions of
+  `cod_confirmation` for approval when convenient (not urgent — v1 scope always allowed English
+  as a valid default).
+- B: hold all confirmation sends for hi/gu customers until their template versions are approved
+  (not recommended — this would suppress real order confirmations for some customers).
+
+Shipped as A (English-pinned) by default since it is the only option that does not block any
+customer's message; flag if B is actually wanted.
+
 ## ✅ ANSWERED (2026-08-12)
 
 **16. Whose phone number should unlock an order in WhatsApp chat?** When a customer messages

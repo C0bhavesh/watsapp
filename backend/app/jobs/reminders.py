@@ -1,6 +1,6 @@
 """Order-confirmation reminder sweep (Flow A, Q17).
 
-If a customer received the ``order_confirmation_cod`` template and did not tap Confirm or Cancel
+If a customer received the ``cod_confirmation`` template and did not tap Confirm or Cancel
 within 1 hour, resend the EXACT same template ONCE as a reminder — and never again for that order.
 
 Design (reuses the existing outbox pipeline, adds no parallel machinery):

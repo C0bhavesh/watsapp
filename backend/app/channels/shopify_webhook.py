@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import math
@@ -27,7 +28,25 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-TEMPLATE_NAME = "order_confirmation_cod"
+TEMPLATE_NAME = "cod_confirmation"
+# cod_confirmation is Meta-approved in `en` ONLY on the new WABA, so the template send is pinned to
+# en regardless of the customer's detected locale — sending it as hi/gu (no such approved locale)
+# would make Meta reject every non-en order, reintroducing the exact "every order fails to send"
+# bug this change fixes. The customer's own language (mapping.language) still drives the free-form
+# conversation replies; only this ONE template send is en. (Owner/client note: to localise the
+# confirmation, hi/gu versions of cod_confirmation must first be approved in Meta.)
+TEMPLATE_LANGUAGE = "en"
+# Meta rejects an empty named body parameter, so any missing product/order field degrades to this
+# placeholder rather than an empty string (keeps the send valid; Q19 degrade-gracefully posture).
+_EMPTY_PARAM_PLACEHOLDER = "-"
+# Bound the live product-image fetch on the orders/create ack path. Best-effort and purely
+# cosmetic: on timeout/failure the confirmation still sends, just without a header (Q19a). Kept
+# deliberately SMALL (1.0s) because it runs BEFORE the ingest DB write AND before the inline send's
+# own 3.0s bound (_INLINE_SEND_TIMEOUT_SECONDS in jobs.outbox_drain) — so the two network waits are
+# sequential on the same <5s Shopify-ack handler. 1.0 + 3.0 = 4.0s worst-case network leaves real
+# margin for the DB reads/writes under the 5s budget (was 2.0s, which left zero margin). See
+# _resolve_product_image and the resolution call site.
+_IMAGE_FETCH_TIMEOUT_SECONDS = 1.0
 MAX_WEBHOOK_BODY_BYTES = 1_048_576
 
 def _topic_header_name(topic: str) -> str:
@@ -113,6 +132,31 @@ async def _mirror_fulfillment(
         )
         return False
     return True
+
+
+async def _resolve_product_image(c: Container, product_gid: str | None) -> str | None:
+    """Resolve the first product's photo URL for the cod_confirmation header — best-effort.
+
+    Q19a: the header is the live product image, but a Shopify hiccup must NEVER block the
+    confirmation. ``get_product_image_url`` already swallows any ``ShopifyError`` (missing product,
+    ACCESS_DENIED, outage) into None; this wraps it in a short total-elapsed bound
+    (``asyncio.wait_for``) because it runs on the orders/create webhook's tight <5s ack path, and
+    catches the timeout (and anything else) so the ack can never be delayed past budget or turned
+    into a 5xx. Any failure -> None -> the template sends with no header.
+    """
+    if not product_gid:
+        return None
+    try:
+        return await asyncio.wait_for(
+            c.shopify.get_product_image_url(product_gid),
+            timeout=_IMAGE_FETCH_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        logger.warning(
+            "product image fetch failed: type=%s (confirmation header skipped)",
+            type(exc).__name__,
+        )
+        return None
 
 
 def _staleness_hours(raw: str | None) -> float:
@@ -276,19 +320,36 @@ async def shopify_webhook(request: Request) -> Response:
     if incoming.phone_e164 and is_eligible_for_push(
         incoming, datetime.now(UTC), push_policy, staleness_hours
     ):
+        # Resolve the product photo HERE (ingest time), not at send time, and cache the URL in
+        # payload_json. Rationale: the confirmation is now sent INLINE in this handler (primary,
+        # ADR-001 amendment) with a tight timeout, and the SAME payload is replayed by the backstop
+        # drain and the 1-hour reminder — resolving once at ingest means (a) the tight-budget send
+        # path does ZERO extra Shopify work, (b) the reminder (which reuses payload_json verbatim)
+        # needs no change and no re-fetch, and (c) the sender stays a pure formatter with no
+        # Shopify coupling. The one added Shopify call is bounded + best-effort (see
+        # _resolve_product_image); its worst-case latency shares the handler's pre-existing ack
+        # headroom, and a rare overrun is a SAFE idempotent Shopify retry (webhook_id dedupe -> no
+        # duplicate row; the inline send's claim-by-id -> no double send).
+        image_url = await _resolve_product_image(c, incoming.product_gid)
+        template_params: dict[str, str] = {
+            "template": TEMPLATE_NAME,
+            "language": TEMPLATE_LANGUAGE,
+            "customer_name": customer_name or _EMPTY_PARAM_PLACEHOLDER,
+            "order_id": order_name or _EMPTY_PARAM_PLACEHOLDER,
+            "product_name": incoming.product_name or _EMPTY_PARAM_PLACEHOLDER,
+            "product_color": incoming.product_color or _EMPTY_PARAM_PLACEHOLDER,
+            "product_size": incoming.product_size or _EMPTY_PARAM_PLACEHOLDER,
+            "product_amount": amount or _EMPTY_PARAM_PLACEHOLDER,
+        }
+        # Only carry image_url when resolved: its absence is the drain/inline sender's signal to
+        # send with no header (a stored non-https value would be dropped there anyway).
+        if image_url is not None:
+            template_params["image_url"] = image_url
         outbound = OutboundDraft(
             dedupe_key=f"order_created:{incoming.gid}",
             kind="order_confirmation",
             phone_e164=incoming.phone_e164,
-            payload_json=json.dumps(
-                {
-                    "template": TEMPLATE_NAME,
-                    "language": language,
-                    "customer_name": customer_name or "",
-                    "order_name": order_name,
-                    "amount": amount,
-                }
-            ),
+            payload_json=json.dumps(template_params),
         )
 
     # The mapping + outbox write goes FIRST: that row IS the customer's confirmation message,

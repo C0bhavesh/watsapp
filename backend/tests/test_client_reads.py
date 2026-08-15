@@ -812,3 +812,87 @@ async def test_list_orders_created_since_empty_result(settings, master_key) -> N
     await seed(config)
     orders = [o async for o in client.list_orders_created_since("2025-08-10")]
     assert orders == []
+
+
+async def test_get_product_image_url_returns_featured_image(settings, master_key) -> None:
+    def gql(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.read())
+        assert "product(id: $id)" in body["query"]
+        assert body["variables"] == {"id": "gid://shopify/Product/15061451407728"}
+        return httpx.Response(200, json={"data": {"product": {
+            "featuredImage": {"url": "https://cdn.shopify.com/s/files/1/x.jpg"}}}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    url = await client.get_product_image_url("gid://shopify/Product/15061451407728")
+    assert url == "https://cdn.shopify.com/s/files/1/x.jpg"
+
+
+async def test_get_product_image_url_none_when_no_image(settings, master_key) -> None:
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"product": {"featuredImage": None}}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    assert await client.get_product_image_url("gid://shopify/Product/1") is None
+
+
+async def test_get_product_image_url_swallows_shopify_error(settings, master_key) -> None:
+    # A missing product / ACCESS_DENIED / outage must degrade to None (best-effort, like
+    # get_order_fulfillments) so the confirmation still sends -- just without a header image.
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"errors": [{"message": "boom"}], "data": None})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    assert await client.get_product_image_url("gid://shopify/Product/1") is None
+
+
+async def test_get_product_image_url_rejects_non_https(settings, master_key) -> None:
+    # Meta requires a public https image link; anything else is dropped so the header is skipped.
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"product": {
+            "featuredImage": {"url": "http://insecure/x.jpg"}}}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    assert await client.get_product_image_url("gid://shopify/Product/1") is None
+
+
+async def test_get_product_image_url_rejects_non_shopify_host(settings, master_key) -> None:
+    # SSRF-adjacent: Meta's servers fetch whatever URL ends up in the header, and the value is
+    # persisted + replayed up to 24h later (reminder job). Even over https, only a Shopify CDN host
+    # (*.shopify.com) is accepted; any other host degrades to no header.
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"product": {
+            "featuredImage": {"url": "https://evil.example.com/x.jpg"}}}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    assert await client.get_product_image_url("gid://shopify/Product/1") is None
+
+
+async def test_get_product_image_url_rejects_lookalike_host(settings, master_key) -> None:
+    # A lookalike host that merely CONTAINS 'shopify.com' (not a true *.shopify.com subdomain) is
+    # rejected -- the suffix check must be dot-anchored, not a substring match.
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"product": {
+            "featuredImage": {"url": "https://cdn.shopify.com.evil.com/x.jpg"}}}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    assert await client.get_product_image_url("gid://shopify/Product/1") is None
+
+
+async def test_get_product_image_url_rejects_over_length(settings, master_key) -> None:
+    # Cap the field the same way every other untrusted Shopify string is bounded: a URL longer than
+    # the 2048 cap is dropped rather than forwarded/persisted.
+    long_url = "https://cdn.shopify.com/s/files/1/" + "a" * 2048 + ".jpg"
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"product": {
+            "featuredImage": {"url": long_url}}}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    assert await client.get_product_image_url("gid://shopify/Product/1") is None

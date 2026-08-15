@@ -15,8 +15,10 @@ from app.store.base import MappingUpsert, OutboundDraft
 
 PHONE = "+919664290413"
 PAYLOAD = {
-    "template": "order_confirmation_cod", "language": "hi",
-    "customer_name": "Suman", "order_name": "tavas3733", "amount": "949",
+    "template": "cod_confirmation", "language": "en",
+    "customer_name": "Suman", "order_id": "tavas3733",
+    "product_name": "Blue Kurti", "product_color": "Blue", "product_size": "M",
+    "product_amount": "949", "image_url": "https://cdn.shopify.com/s/files/1/x.jpg",
 }
 
 
@@ -61,11 +63,12 @@ class FakeSender:
 
     async def __call__(
         self, http, cfg, to, template_name, language, body_params,
-        button_payloads=(), timeout=20.0,
+        button_payloads=(), header_image_url=None, timeout=20.0,
     ) -> SendResult:
         self.calls.append(
             {"to": to, "template": template_name, "language": language,
-             "body_params": list(body_params), "button_payloads": list(button_payloads)}
+             "body_params": dict(body_params), "button_payloads": list(button_payloads),
+             "header_image_url": header_image_url}
         )
         return self._result
 
@@ -180,8 +183,13 @@ async def test_queued_reminder_flows_through_existing_drain(
     # The reminder was sent with the deterministic Confirm/Cancel buttons, same as any push.
     last = sender.calls[-1]
     assert last["to"] == PHONE
-    assert last["template"] == "order_confirmation_cod"
-    assert last["body_params"] == ["Suman", "tavas3733", "949"]
+    assert last["template"] == "cod_confirmation"
+    assert last["body_params"] == {
+        "customer_name": "Suman", "order_id": "tavas3733",
+        "product_name": "Blue Kurti", "product_color": "Blue", "product_size": "M",
+        "product_amount": "949",
+    }
+    assert last["header_image_url"] == "https://cdn.shopify.com/s/files/1/x.jpg"
     assert last["button_payloads"] == [f"order:confirm:{gid}", f"order:cancel:{gid}"]
     views = {v.dedupe_key: v for v in await c.ingest.recent_outbound(10)}
     assert views[f"order_reminder:{gid}"].state == "sent"

@@ -1,5 +1,5 @@
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -125,14 +125,38 @@ async def send_template(
     to: str,
     template_name: str,
     language: str,
-    body_params: Sequence[str],
+    body_params: Mapping[str, str],
     button_payloads: Sequence[str] = (),
+    header_image_url: str | None = None,
     timeout: float = 20.0,
 ) -> SendResult:
+    """Send an approved template. ``body_params`` is a name->value mapping: the cod_confirmation
+    template uses NAMED placeholders, so each body parameter object carries ``parameter_name`` (Meta
+    matches by name, not position). ``header_image_url``, when a public https link, adds an IMAGE
+    header component (the live product photo); omit it to send with no header. Components are
+    ordered header -> body -> buttons, as Meta expects.
+    """
     components: list[dict[str, Any]] = []
+    # Defense-in-depth: only a public https link becomes an IMAGE header. The two callers
+    # (ShopifyClient.get_product_image_url, outbox_drain._parse_payload) already https-check, but
+    # this shared low-level sender must not forward an unvalidated URL straight to Meta — a missing
+    # or non-https value degrades to "no header" (the send stays valid), never raises.
+    if header_image_url and header_image_url.startswith("https://"):
+        components.append(
+            {
+                "type": "header",
+                "parameters": [{"type": "image", "image": {"link": header_image_url}}],
+            }
+        )
     if body_params:
         components.append(
-            {"type": "body", "parameters": [{"type": "text", "text": p} for p in body_params]}
+            {
+                "type": "body",
+                "parameters": [
+                    {"type": "text", "parameter_name": name, "text": value}
+                    for name, value in body_params.items()
+                ],
+            }
         )
     for index, button_payload in enumerate(button_payloads):
         components.append(

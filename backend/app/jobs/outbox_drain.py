@@ -9,7 +9,7 @@ picks up anything the inline path could not complete (a shadow/off row left queu
 retryable send bumped back to ``queued``, or a row stranded ``processing`` by a killed inline
 invocation). It is currently WITHOUT a working scheduler, so treat it as a manual backstop, not an
 automatic safety net. Each run atomically claims queued ``outbound_messages`` rows
-(``queued -> processing``) and sends each ``order_confirmation_cod`` template with the deterministic
+(``queued -> processing``) and sends each ``cod_confirmation`` template with the deterministic
 ``order:confirm:{gid}`` / ``order:cancel:{gid}`` quick-reply button payloads — byte-for-byte the
 same per-row state machine (``send_one_outbound``) the inline path uses.
 
@@ -30,7 +30,7 @@ from dataclasses import dataclass
 
 from app.admin.controls import AdminControls, load_controls
 from app.channels.whatsapp_config import WhatsAppConfig, load_whatsapp_config
-from app.channels.whatsapp_sender import WhatsAppSendError, send_template
+from app.channels.whatsapp_sender import SendResult, WhatsAppSendError, send_template
 from app.core.send_policy import send_decision
 from app.deps import Container
 from app.store.base import OutboundClaim
@@ -68,10 +68,33 @@ _INLINE_SEND_TIMEOUT_SECONDS = 3.0
 # error `code` field, surfaced by whatsapp_sender._safe_error as "code=<n>" in SendResult.error
 # (the HTTP status for all of them is 400, so it cannot distinguish them; the Meta code can).
 _UNDELIVERABLE_CODES = {131026, 131047, 131049}
+# Meta media-fetch failures for a template's header IMAGE URL (131052 = unsupported/unfetchable
+# media, 131053 = media download failed) — e.g. the merchant deleted/replaced the product image
+# between order-time and a >=1h-later reminder replay (reminders.py replays payload_json verbatim).
+# These fail the WHOLE send even though the MESSAGE body itself is fine — so they are NOT terminal:
+# we retry the SAME row immediately WITHOUT the image (image-less send) rather than burn a normal
+# attempt, honouring Q19a ("a Shopify/image hiccup must never block the confirmation message").
+# Detected via the same top-level `code=` path _UNDELIVERABLE_CODES uses (_meta_error_code).
+_MEDIA_ERROR_CODES = {131052, 131053}
 # Anchored to the TOP-LEVEL `code=` field only: _safe_error renders it as the FIRST part or after
 # a "; " separator, so requiring `^` or "; " before `code=` stops a substring match inside e.g.
 # `error_subcode=131026` (a different field) being misread as the top-level send-error code.
 _META_CODE_RE = re.compile(r"(?:^|; )code=(\d+)")
+
+
+# The cod_confirmation template's 6 NAMED body params (plus template/language) that the outbox
+# payload_json must carry. image_url is OPTIONAL (resolved best-effort at ingest; absent when the
+# Shopify image fetch failed) and is handled separately so a missing header never fails parsing.
+_REQUIRED_PAYLOAD_KEYS = (
+    "template",
+    "language",
+    "customer_name",
+    "order_id",
+    "product_name",
+    "product_color",
+    "product_size",
+    "product_amount",
+)
 
 
 @dataclass(frozen=True)
@@ -79,8 +102,12 @@ class _TemplatePayload:
     template: str
     language: str
     customer_name: str
-    order_name: str
-    amount: str
+    order_id: str
+    product_name: str
+    product_color: str
+    product_size: str
+    product_amount: str
+    image_url: str | None = None
 
 
 def _gid_from_dedupe_key(dedupe_key: str) -> str | None:
@@ -97,20 +124,39 @@ def _gid_from_dedupe_key(dedupe_key: str) -> str | None:
 
 
 def _parse_payload(payload_json: str) -> _TemplatePayload | None:
-    """Parse the Phase 2 outbox payload; None on any bad/missing field (-> undeliverable)."""
+    """Parse the cod_confirmation outbox payload; None on any bad/missing REQUIRED field.
+
+    None -> the row is marked undeliverable (it can never render), which also terminally drops any
+    legacy row still queued under the OLD template shape (no ``order_id``/``product_*`` keys) — the
+    old template no longer exists on the WABA, so retrying it forever would be pointless.
+    ``image_url`` is optional: only a public https link is kept (Meta rejects anything else),
+    otherwise the header is simply skipped (Q19a graceful degradation).
+    """
     try:
         data = json.loads(payload_json)
     except (ValueError, TypeError):
         return None
     if not isinstance(data, dict):
         return None
-    fields = {}
-    for key in ("template", "language", "customer_name", "order_name", "amount"):
+    fields: dict[str, str] = {}
+    for key in _REQUIRED_PAYLOAD_KEYS:
         value = data.get(key)
         if not isinstance(value, str) or not value:
             return None
         fields[key] = value
-    return _TemplatePayload(**fields)
+    image = data.get("image_url")
+    image_url = image if isinstance(image, str) and image.startswith("https://") else None
+    return _TemplatePayload(
+        template=fields["template"],
+        language=fields["language"],
+        customer_name=fields["customer_name"],
+        order_id=fields["order_id"],
+        product_name=fields["product_name"],
+        product_color=fields["product_color"],
+        product_size=fields["product_size"],
+        product_amount=fields["product_amount"],
+        image_url=image_url,
+    )
 
 
 def _meta_error_code(error: str | None) -> int | None:
@@ -170,24 +216,62 @@ async def send_one_outbound(
 
     payload = _parse_payload(row.payload_json)
     if payload is None:
+        # Observability (not new behaviour): a None parse is either a corrupt payload or a legacy
+        # pre-deploy row (old order_confirmation_cod shape) that can no longer render on the WABA.
+        # Both are terminally undeliverable by design — the old template is gone — but log the row
+        # id (no payload contents: they may carry customer PII) so a post-deploy undeliverable
+        # spike is grep-able in Vercel logs.
+        logger.warning(
+            "outbox drain: row %s marked undeliverable (bad/legacy payload shape)", row.id
+        )
         await c.ingest.mark_outbound_undeliverable(row.id, "bad_payload")
         return OUTCOME_UNDELIVERABLE
 
     buttons = [f"order:confirm:{gid}", f"order:cancel:{gid}"]
-    body_params = [payload.customer_name, payload.order_name, payload.amount]
-    try:
+    # The cod_confirmation template uses NAMED body params (name -> value); the header image (the
+    # live product photo) is pre-resolved at ingest and carried in payload.image_url, or None (fetch
+    # failed) -> send with no header rather than block the confirmation.
+    body_params = {
+        "customer_name": payload.customer_name,
+        "order_id": payload.order_id,
+        "product_name": payload.product_name,
+        "product_color": payload.product_color,
+        "product_size": payload.product_size,
+        "product_amount": payload.product_amount,
+    }
+    async def _send(header_image_url: str | None) -> SendResult:
         # Only pass `timeout` when the caller supplied one, so the default (cron) path keeps
         # send_template's own 20s default untouched — the inline path passes a short timeout.
         if timeout is None:
-            result = await send_template(
+            return await send_template(
                 c.http, cfg, row.phone_e164, payload.template, payload.language,
-                body_params, button_payloads=buttons,
+                body_params, button_payloads=buttons, header_image_url=header_image_url,
             )
-        else:
-            result = await send_template(
-                c.http, cfg, row.phone_e164, payload.template, payload.language,
-                body_params, button_payloads=buttons, timeout=timeout,
+        return await send_template(
+            c.http, cfg, row.phone_e164, payload.template, payload.language,
+            body_params, button_payloads=buttons, header_image_url=header_image_url,
+            timeout=timeout,
+        )
+
+    try:
+        result = await _send(payload.image_url)
+        # A stale/unfetchable header image (the merchant changed the product photo between
+        # order-time and a later reminder replay) makes Meta reject the ENTIRE send with a media
+        # code — but the MESSAGE itself is fine, only the header can't be fetched. Retry THIS row
+        # once, immediately, WITHOUT the image so the customer still gets the confirmation, rather
+        # than counting it as a failed attempt and eventually landing the row `failed` with no
+        # message sent (Q19a). Guarded on `payload.image_url` so the image-less retry runs at most
+        # once. The retry's result then flows through the SAME classification below.
+        if (
+            not result.ok
+            and payload.image_url is not None
+            and _meta_error_code(result.error) in _MEDIA_ERROR_CODES
+        ):
+            logger.warning(
+                "outbox drain: row %s header image unfetchable (Meta media error); "
+                "retrying image-less", row.id,
             )
+            result = await _send(None)
     except WhatsAppSendError:
         # Transport/timeout failure: retryable. Bump and move on — never abort the drain.
         # The exception text (an httpx network error) carries no secret, but is not logged

@@ -4,6 +4,7 @@ import re
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -29,6 +30,30 @@ from app.shopify.models import (
 from app.shopify.token_manager import TokenManager
 
 BACKFILL_THROTTLE_SLEEP_SECONDS = 2
+
+# The product-image URL is the ONE field pulled from a Shopify response that becomes a WhatsApp
+# template header, so Meta's servers fetch whatever URL lands there -- an SSRF-adjacent sink -- and
+# the value is persisted to the outbox payload_json and can be replayed up to 24h later (reminder
+# job). Hold it to the same "cap/validate everything untrusted" posture as every other Shopify
+# field (the MAX_FIELD_LEN clip pattern): require https, a Shopify CDN host, and a bounded length.
+_MAX_IMAGE_URL_LEN = 2048
+_SHOPIFY_IMAGE_HOST_SUFFIX = ".shopify.com"
+
+
+def _is_shopify_image_url(url: str) -> bool:
+    """True only for a bounded https URL on a ``*.shopify.com`` host (Shopify's product-image CDN).
+
+    Dot-anchored suffix so a lookalike host (``cdn.shopify.com.evil.com``, ``evil-shopify.com``)
+    is rejected, not just a substring match. Any failure returns False so the caller degrades to no
+    header (Q19a graceful degrade) -- never an exception.
+    """
+    if len(url) > _MAX_IMAGE_URL_LEN:
+        return False
+    parts = urlsplit(url)
+    if parts.scheme != "https":
+        return False
+    host = parts.hostname
+    return host is not None and host.endswith(_SHOPIFY_IMAGE_HOST_SUFFIX)
 
 ORDER_FIELDS = (
     "id name email phone tags paymentGatewayNames displayFinancialStatus "
@@ -295,6 +320,33 @@ class ShopifyClient:
         if not isinstance(node, dict):
             return ()
         return _fulfillments_from_node(node)
+
+    async def get_product_image_url(self, product_gid: str) -> str | None:
+        """Fetch a product's featured image URL for the cod_confirmation template header.
+
+        Best-effort and fully isolated (same posture as ``get_order_fulfillments``): any
+        ``ShopifyError`` (product missing, ACCESS_DENIED, throttle, outage) or an image-less
+        product degrades to ``None`` so the confirmation still sends without a header — a Shopify
+        hiccup must never block the customer's message (Q19a). The URL is validated at THIS source
+        (``_is_shopify_image_url``: https + ``*.shopify.com`` host + length cap) — the real check,
+        since the value is then persisted and fetched by Meta; the downstream https-prefix checks
+        are only defense-in-depth.
+        """
+        query = "query($id: ID!) { product(id: $id) { featuredImage { url } } }"
+        try:
+            data = await self._graphql(query, {"id": product_gid})
+        except ShopifyError:
+            return None
+        node = data.get("product")
+        if not isinstance(node, dict):
+            return None
+        image = node.get("featuredImage")
+        if not isinstance(image, dict):
+            return None
+        url = image.get("url")
+        if isinstance(url, str) and _is_shopify_image_url(url):
+            return url
+        return None
 
     async def _with_fulfillments(self, order: Order) -> Order:
         """Best-effort attach live tracking AFTER the core order fetch already succeeded.

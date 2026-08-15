@@ -1,6 +1,7 @@
 """Outbox drain job: send_mode kill switch, per-mode send/suppress, Meta code taxonomy."""
 
 import json
+import logging
 
 import pytest
 
@@ -38,15 +39,16 @@ class FakeSender:
 
     async def __call__(
         self, http, cfg, to, template_name, language, body_params,
-        button_payloads=(), timeout=20.0,
+        button_payloads=(), header_image_url=None, timeout=20.0,
     ) -> SendResult:
         self.calls.append(
             {
                 "to": to,
                 "template": template_name,
                 "language": language,
-                "body_params": list(body_params),
+                "body_params": dict(body_params),
                 "button_payloads": list(button_payloads),
+                "header_image_url": header_image_url,
                 "timeout": timeout,
             }
         )
@@ -61,8 +63,11 @@ async def _seed_row(gid: str, phone: str = PHONE, payload: dict[str, str] | None
                     dedupe_key: str | None = None) -> None:
     c = get_container()
     payload = payload or {
-        "template": "order_confirmation_cod", "language": "hi",
-        "customer_name": "Suman", "order_name": "tavas3733", "amount": "949",
+        "template": "cod_confirmation", "language": "en",
+        "customer_name": "Suman", "order_id": "tavas3733",
+        "product_name": "Blue Kurti", "product_color": "Blue", "product_size": "M",
+        "product_amount": "949",
+        "image_url": "https://cdn.shopify.com/s/files/1/x.jpg",
     }
     mapping = MappingUpsert(
         order_gid=gid, order_name="tavas3733", order_number_int=3733, phone_e164=phone,
@@ -194,15 +199,198 @@ async def test_live_sends_marks_sent_and_status(monkeypatch: pytest.MonkeyPatch)
     assert result == {"drained": 1, "sent": 1, "suppressed": 0, "failed": 0, "undeliverable": 0}
     call = sender.calls[0]
     assert call["to"] == PHONE
-    assert call["template"] == "order_confirmation_cod"
-    assert call["language"] == "hi"
-    assert call["body_params"] == ["Suman", "tavas3733", "949"]
+    assert call["template"] == "cod_confirmation"
+    assert call["language"] == "en"
+    assert call["body_params"] == {
+        "customer_name": "Suman", "order_id": "tavas3733",
+        "product_name": "Blue Kurti", "product_color": "Blue", "product_size": "M",
+        "product_amount": "949",
+    }
+    assert call["header_image_url"] == "https://cdn.shopify.com/s/files/1/x.jpg"
     assert call["button_payloads"] == [f"order:confirm:{gid}", f"order:cancel:{gid}"]
     views = {v.dedupe_key: v for v in await c.ingest.recent_outbound(10)}
     assert views[f"order_created:{gid}"].state == "sent"
     mappings = {m.order_gid: m for m in await c.ingest.recent_mappings(10)}
     assert mappings[gid].status == "template_sent"
     assert not await c.ingest.claim_queued_outbound()
+
+
+async def test_payload_without_image_url_sends_no_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Q19a graceful degradation: when the ingest-time image fetch failed, no image_url is stored,
+    # so the send goes out with header_image_url=None (no header) rather than being blocked.
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    gid = "gid://shopify/Order/9"
+    await _seed_row(gid, payload={
+        "template": "cod_confirmation", "language": "en", "customer_name": "A",
+        "order_id": "tavas1", "product_name": "P", "product_color": "C",
+        "product_size": "S", "product_amount": "10",
+    })
+    sender = FakeSender(SendResult(ok=True, status_code=200, wamid="w", error=None))
+    _install_sender(monkeypatch, sender)
+
+    result = await run_outbox_drain(c)
+
+    assert result["sent"] == 1
+    assert sender.calls[0]["header_image_url"] is None
+
+
+async def test_non_https_image_url_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Meta rejects a non-https image link; a stored non-https value must degrade to no header,
+    # never be forwarded (defence-in-depth alongside the client's own https check).
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    gid = "gid://shopify/Order/8"
+    await _seed_row(gid, payload={
+        "template": "cod_confirmation", "language": "en", "customer_name": "A",
+        "order_id": "tavas1", "product_name": "P", "product_color": "C",
+        "product_size": "S", "product_amount": "10", "image_url": "http://insecure/x.jpg",
+    })
+    sender = FakeSender(SendResult(ok=True, status_code=200, wamid="w", error=None))
+    _install_sender(monkeypatch, sender)
+
+    await run_outbox_drain(c)
+
+    assert sender.calls[0]["header_image_url"] is None
+
+
+async def test_legacy_old_shape_payload_is_undeliverable(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A row queued under the OLD template shape (order_confirmation_cod / order_name / amount, no
+    # named product fields) can no longer render the new template -> terminal undeliverable rather
+    # than an infinite retry (the old template no longer exists on the WABA regardless).
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    gid = "gid://shopify/Order/7"
+    await _seed_row(gid, payload={
+        "template": "order_confirmation_cod", "language": "hi",
+        "customer_name": "Suman", "order_name": "tavas3733", "amount": "949",
+    })
+    sender = FakeSender([])
+    _install_sender(monkeypatch, sender)
+
+    caplog.set_level(logging.WARNING, logger="app.jobs.outbox_drain")
+    result = await run_outbox_drain(c)
+
+    assert result["undeliverable"] == 1
+    assert sender.calls == []
+    views = {v.dedupe_key: v for v in await c.ingest.recent_outbound(10)}
+    assert views[f"order_created:{gid}"].state == "undeliverable"
+    # Observability: a bad/legacy payload marked undeliverable is logged (row id only, no PII) so a
+    # post-deploy undeliverable spike is grep-able in Vercel logs.
+    undeliverable_logs = [
+        r for r in caplog.records
+        if "undeliverable" in r.getMessage() and "payload" in r.getMessage()
+    ]
+    assert len(undeliverable_logs) == 1
+
+
+async def test_media_error_131052_retries_image_less(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Q19a: a Shopify/image hiccup must never block the confirmation. When Meta rejects the whole
+    # send because the header image URL can't be fetched (131052 -- e.g. the merchant deleted the
+    # product photo before a >=1h-later reminder replay), retry the SAME row immediately WITHOUT the
+    # image rather than counting it as a failed attempt. The customer still gets the message.
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    gid = "gid://shopify/Order/1"
+    await _seed_row(gid)
+    sender = FakeSender([
+        SendResult(ok=False, status_code=400, wamid=None, error="code=131052; message=media"),
+        SendResult(ok=True, status_code=200, wamid="wamid.ok", error=None),
+    ])
+    _install_sender(monkeypatch, sender)
+
+    result = await run_outbox_drain(c)
+
+    assert result["sent"] == 1
+    assert result["failed"] == 0
+    # First attempt carried the image; the retry stripped it (image-less send).
+    assert sender.calls[0]["header_image_url"] == "https://cdn.shopify.com/s/files/1/x.jpg"
+    assert sender.calls[1]["header_image_url"] is None
+    views = {v.dedupe_key: v for v in await c.ingest.recent_outbound(10)}
+    view = views[f"order_created:{gid}"]
+    assert view.state == "sent"
+    assert view.attempts == 0  # the media retry did NOT burn an attempt
+
+
+async def test_media_error_131053_retries_image_less(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    gid = "gid://shopify/Order/2"
+    await _seed_row(gid)
+    sender = FakeSender([
+        SendResult(ok=False, status_code=400, wamid=None, error="code=131053; message=media"),
+        SendResult(ok=True, status_code=200, wamid="wamid.ok", error=None),
+    ])
+    _install_sender(monkeypatch, sender)
+
+    result = await run_outbox_drain(c)
+
+    assert result["sent"] == 1
+    assert sender.calls[1]["header_image_url"] is None
+
+
+async def test_media_error_without_image_does_not_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Guard against an infinite/pointless retry loop: a media-error code on a row that had NO image
+    # to begin with must flow straight through the normal failure classification, not re-send.
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    gid = "gid://shopify/Order/3"
+    await _seed_row(gid, payload={
+        "template": "cod_confirmation", "language": "en", "customer_name": "A",
+        "order_id": "tavas1", "product_name": "P", "product_color": "C",
+        "product_size": "S", "product_amount": "10",
+    })
+    sender = FakeSender([
+        SendResult(ok=False, status_code=400, wamid=None, error="code=131052; message=media"),
+    ])
+    _install_sender(monkeypatch, sender)
+
+    await run_outbox_drain(c)
+
+    assert len(sender.calls) == 1  # no image -> no image-less retry
+    views = {v.dedupe_key: v for v in await c.ingest.recent_outbound(10)}
+    view = views[f"order_created:{gid}"]
+    assert view.state == "queued"  # normal retryable bump
+    assert view.attempts == 1
+
+
+async def test_media_error_retry_still_failing_bumps_normally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # If the image-less retry ALSO fails (with a non-media, non-terminal error), it counts as one
+    # normal bumped attempt -- proving the retry result flows through the standard classification
+    # and the row is not stuck sending forever.
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    gid = "gid://shopify/Order/4"
+    await _seed_row(gid)
+    sender = FakeSender([
+        SendResult(ok=False, status_code=400, wamid=None, error="code=131052; message=media"),
+        SendResult(ok=False, status_code=503, wamid=None, error=None),
+    ])
+    _install_sender(monkeypatch, sender)
+
+    result = await run_outbox_drain(c)
+
+    assert result["sent"] == 0
+    assert len(sender.calls) == 2
+    assert sender.calls[1]["header_image_url"] is None
+    views = {v.dedupe_key: v for v in await c.ingest.recent_outbound(10)}
+    view = views[f"order_created:{gid}"]
+    assert view.state == "queued"
+    assert view.attempts == 1
+    assert view.last_error_code == "503"
 
 
 async def test_shadow_suppresses(monkeypatch: pytest.MonkeyPatch) -> None:

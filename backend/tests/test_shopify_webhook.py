@@ -3,6 +3,7 @@ import base64
 import hashlib
 import hmac as hmac_lib
 import json
+import logging
 import time
 from datetime import UTC, datetime
 
@@ -783,6 +784,84 @@ async def test_inline_send_touches_only_its_own_row(monkeypatch: pytest.MonkeyPa
     views = {v.dedupe_key: v for v in await store.recent_outbound(10)}
     assert views[f"order_created:{gid_b}"].state == "sent"
     assert views[f"order_created:{other_gid}"].state == "queued"
+
+
+# --- Owner-requested raw-payload debug logging (2026-08-15) -----------------------------------
+#
+# The handler logs a "SHOPIFY WEBHOOK RECEIVED" line + the full parsed payload JSON AFTER HMAC
+# verify + shop-domain check + json.loads succeed, before any topic branching. This is an
+# owner-approved, deliberate exception to the no-PII-logging rule (the raw payload includes
+# customer name/phone/email/address); see error_learnings.md. The security-relevant property is
+# that the log sits AFTER verification, so a forged/unsigned probe never gets its body logged.
+#
+# The logs run inside the ASGI handler in-process, so caplog captures them during the POST.
+
+
+async def test_debug_log_fires_for_a_valid_signed_webhook(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="app.channels.shopify_webhook")
+    gid = "gid://shopify/Order/logvalid"
+    body = json.dumps(payload(gid)).encode()
+    resp = await post(body, headers(body, webhook_id="wh-logvalid"))
+
+    assert resp.status_code == 200
+    text = caplog.text
+    # The receipt line carries the topic, shop (None header here), and webhook id.
+    assert "SHOPIFY WEBHOOK RECEIVED" in text
+    assert "topic=orders/create" in text
+    assert "webhook_id=wh-logvalid" in text
+    # The full parsed payload JSON is logged (incl. the customer phone, deliberately).
+    assert "ORDER JSON" in text
+    assert gid in text
+    assert "+919664290413" in text
+
+
+async def test_debug_log_fires_uniformly_for_a_non_order_topic(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The log sits BEFORE topic branching, so every handled topic (not just orders/create) is
+    # visible — here customers/update, which never reaches the orders/create code path.
+    caplog.set_level(logging.INFO, logger="app.channels.shopify_webhook")
+    body = json.dumps(customer_payload()).encode()
+    resp = await post(body, headers(body, topic="customers/update", webhook_id="wh-logcust"))
+
+    assert resp.status_code == 200
+    text = caplog.text
+    assert "SHOPIFY WEBHOOK RECEIVED" in text
+    assert "topic=customers/update" in text
+    assert "webhook_id=wh-logcust" in text
+    assert "ORDER JSON" in text
+
+
+async def test_debug_log_does_not_fire_for_an_invalid_signature(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # SECURITY: the log must sit AFTER HMAC verification. A forged/garbage-signature probe is
+    # rejected 403 and must NEVER have its payload logged — otherwise the debug log becomes a
+    # pre-auth information source that echoes attacker-supplied bodies as if legitimate.
+    caplog.set_level(logging.INFO, logger="app.channels.shopify_webhook")
+    body = json.dumps(payload("gid://shopify/Order/forged")).encode()
+    resp = await post(body, {**headers(body), "X-Shopify-Hmac-Sha256": "AAAA"})
+
+    assert resp.status_code == 403
+    assert "SHOPIFY WEBHOOK RECEIVED" not in caplog.text
+    assert "ORDER JSON" not in caplog.text
+    assert "gid://shopify/Order/forged" not in caplog.text
+
+
+async def test_debug_log_does_not_fire_for_a_foreign_shop_domain(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The log also sits AFTER the shop-domain check: a delivery signed with our secret but bearing
+    # a foreign shop domain is rejected 403 and must not be logged either.
+    caplog.set_level(logging.INFO, logger="app.channels.shopify_webhook")
+    body = json.dumps(payload("gid://shopify/Order/foreign")).encode()
+    resp = await post(body, {**headers(body), "X-Shopify-Shop-Domain": "evil.myshopify.com"})
+
+    assert resp.status_code == 403
+    assert "SHOPIFY WEBHOOK RECEIVED" not in caplog.text
+    assert "gid://shopify/Order/foreign" not in caplog.text
 
 
 async def test_inline_send_bounded_by_wall_clock_timeout(

@@ -200,6 +200,19 @@ async def shopify_webhook(request: Request) -> Response:
     if not isinstance(payload, dict):
         return JSONResponse({"ok": True, "ignored": True})
 
+    # Owner-requested debug visibility (2026-08-15) — logs the raw payload incl. customer PII
+    # (name/phone/email/address). This is an INTENTIONAL, owner-approved exception to the project's
+    # no-PII-logging rule (do NOT "fix" it by narrowing/redacting later — see error_learnings.md).
+    # It sits AFTER HMAC verify + shop-domain check + json.loads, before topic branching, so it
+    # fires uniformly for every handled topic and never logs an unverified/forged request's body.
+    logger.info(
+        "SHOPIFY WEBHOOK RECEIVED: topic=%s shop=%s webhook_id=%s",
+        topic,
+        shop_domain,
+        webhook_id,
+    )
+    logger.info("ORDER JSON: %s", json.dumps(payload, indent=2))
+
     # orders/updated and customers/update deliberately do NOT go through the
     # processed_webhooks dedupe table the way orders/create does below: upsert_order_mirror /
     # upsert_customer are ON CONFLICT DO UPDATE, so replaying the same webhook twice just

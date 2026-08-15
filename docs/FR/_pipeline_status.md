@@ -70,6 +70,18 @@
     data-minimization rule narrower than but overlapping the already-answered Q15 (order data
     kept indefinitely) — routed to the client as Q18 rather than settled here. No data is deleted
     while this is ON HOLD.
+  - **✅ Storage groundwork DONE + reviewed (commit `372aad2`, 2026-08-15)** — `delivered_at`
+    captured via live GraphQL only (Shopify's REST webhook payload has no delivery-date field at
+    all — confirmed, documented in code). Made deliberately "sticky" (`COALESCE`, never
+    overwritten back to NULL by a later write) so a routine webhook update can't wipe a date
+    captured via GraphQL.
+    **⚠ Data-integrity note for whoever builds the Q18 deletion sweep:** because `delivered_at` is
+    sticky/write-once, it currently has NO path to be cleared if Shopify ever un-marks a shipment
+    as delivered (cancelled fulfillment, corrected carrier event, etc.) — a stale non-null
+    `delivered_at` for a shipment that isn't actually delivered would cause premature deletion of
+    its still-needed tracking data under the Q18 rule as proposed. The Q18 build should either
+    re-verify delivery against a live Shopify read before deleting, or make delivered_at clearable
+    from the GraphQL path specifically — don't trust the stored value alone as the deletion trigger.
 
 - **🟠 Phase 5 deferred / later (2026-08-10)** — items intentionally OUT of the confirm/cancel v1,
   none of which block the flow working:

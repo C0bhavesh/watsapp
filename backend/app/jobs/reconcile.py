@@ -12,6 +12,14 @@ order not yet cancelled is left in place for the next run; a transient Shopify e
 never aborts the whole job. The notification is best-effort: a missing WhatsApp config or a
 transport failure is logged and skipped, never rolls back the tag/status write, and never aborts
 the job for other orders in the batch.
+
+Claim state machine (three states): a mapping sits at ``cancel_requested`` until a run atomically
+CLAIMS it into the transient ``cancel_reconciling`` state (so two overlapping runs never
+double-process the same order). Every claimed order is then finalized within the same run — advanced
+to ``cancelled`` on success, or RELEASED back to ``cancel_requested`` on any skip/failure so the
+next run retries it (see the atomic-claim/release contract in the inline comment at the claim call
+site). A claimed row that is never finalized (e.g. a mid-run crash) is recovered by a bounded
+10-minute stale-reclaim — see the residual-risk note on ``run_reconcile_cancels``.
 """
 
 import logging
@@ -85,6 +93,22 @@ async def _notify_cancelled(
     return "notified"
 
 
+async def _release_claim(c: Container, gid: str) -> None:
+    """Release a claimed order back to ``cancel_requested`` so the next run retries it. A
+    store-layer error here (anything other than the Shopify path, e.g. a transient DB hiccup) must
+    NOT abort the rest of the batch -- this job's contract is that one row never fails the whole run
+    -- so a failed release is logged and swallowed (mirrors outbox_drain's per-row error handling).
+    The row then simply stays in the transient ``cancel_reconciling`` state until the 10-minute
+    stale-reclaim picks it up, which is strictly no worse than leaving it unfinalized on a crash."""
+    try:
+        await c.ingest.set_mapping_status(gid, "cancel_requested")
+    except Exception as exc:  # a flaky release for one row must never abandon the rest of the batch
+        logger.warning(
+            "reconcile cancels: failed to release claim for %s: %s (stale-reclaim will recover)",
+            gid, type(exc).__name__,
+        )
+
+
 async def run_reconcile_cancels(c: Container) -> dict[str, Any]:
     controls = await load_controls(c.config)
     # Loaded ONCE per run (not per order) -- config doesn't change mid-run, and a corrupt/missing
@@ -100,7 +124,18 @@ async def run_reconcile_cancels(c: Container) -> dict[str, Any]:
     # orders_awaiting_cancel_reconcile atomically CLAIMS each returned order (flips it to a
     # transient in-progress state) so two overlapping runs never double-process it. Every claimed
     # gid must therefore be finalized below: advanced to 'cancelled' on success, or RELEASED back
-    # to 'cancel_requested' on any skip/failure (via set_mapping_status) so the row is not lost.
+    # to 'cancel_requested' on any skip/failure (via _release_claim) so the row is not lost.
+    #
+    # RESIDUAL RISK (documented, deliberately accepted -- not a TODO): the success path writes the
+    # tag before it advances the status (add_tags -> set_mapping_status('cancelled') -> notify). A
+    # crash BETWEEN a successful add_tags and set_mapping_status leaves the row stuck at
+    # 'cancel_reconciling'; the 10-minute stale-reclaim then re-processes it on a later run,
+    # re-applying add_tags (idempotent, harmless) but also re-sending cod_cancel -- a possible
+    # DUPLICATE customer notification. This window is bounded in practice: a Vercel serverless
+    # invocation times out far short of 10 minutes, so a genuinely still-running process can never
+    # collide with its own stale-reclaimed row. Reordering the writes is explicitly out of scope
+    # here; per this file's convention we document the bounded residual risk rather than leave it
+    # silent (both a code review and an independent security review judged it practically closed).
     gids = await c.ingest.orders_awaiting_cancel_reconcile(_RECONCILE_LIMIT)
     reconciled = pending = skipped = 0
     notified = notify_skipped = 0
@@ -109,17 +144,17 @@ async def run_reconcile_cancels(c: Container) -> dict[str, Any]:
             order = await c.shopify.get_order(gid)
             if order is None:
                 skipped += 1
-                await c.ingest.set_mapping_status(gid, "cancel_requested")  # release claim
+                await _release_claim(c, gid)
                 continue
             if not order.is_cancelled():
                 pending += 1  # still awaiting Shopify -> leave for the next run
-                await c.ingest.set_mapping_status(gid, "cancel_requested")  # release claim
+                await _release_claim(c, gid)
                 continue
             auth = authorize_own_order(order)
             if auth is None:
                 # No phone on the order to satisfy the ownership invariant -> cannot tag it.
                 skipped += 1
-                await c.ingest.set_mapping_status(gid, "cancel_requested")  # release claim
+                await _release_claim(c, gid)
                 continue
             await c.shopify.add_tags(auth, controls.tags.cancelled)
             await c.ingest.set_mapping_status(gid, "cancelled")
@@ -139,7 +174,7 @@ async def run_reconcile_cancels(c: Container) -> dict[str, Any]:
             # (status not advanced) so the next run retries it.
             logger.warning("reconcile cancels: shopify error for %s (will retry next run)", gid)
             pending += 1
-            await c.ingest.set_mapping_status(gid, "cancel_requested")  # release claim
+            await _release_claim(c, gid)
     return {
         "checked": len(gids),
         "reconciled": reconciled,

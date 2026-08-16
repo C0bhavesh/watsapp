@@ -206,6 +206,41 @@ async def test_reconcile_survives_transport_failure_during_notification(
     assert c.ingest._mapping_status[GID] == "cancelled"  # type: ignore[attr-defined]
 
 
+async def test_release_claim_store_error_does_not_abort_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A store-layer error while RELEASING one order's claim (a non-ShopifyError from the ingest
+    # store) must NOT abort the rest of the batch: the remaining claimed orders still get
+    # processed. Guards this file's documented "one row never aborts the whole job" contract.
+    c = get_container()
+    gid2 = "gid://shopify/Order/2"
+    await c.ingest.set_mapping_status(GID, "cancel_requested")   # not-yet-cancelled -> releases
+    await c.ingest.set_mapping_status(gid2, "cancel_requested")  # cancelled -> reconciled
+    shopify = FakeShopify(
+        {
+            GID: _order(GID, cancelled_at=None),
+            gid2: _order(gid2, cancelled_at="2026-08-10T00:00:00Z"),
+        }
+    )
+    c.shopify = shopify  # type: ignore[assignment]
+
+    real_set = c.ingest.set_mapping_status
+
+    async def _flaky_set(order_gid: str, status: str) -> None:
+        if order_gid == GID and status == "cancel_requested":
+            raise RuntimeError("transient store hiccup")
+        await real_set(order_gid, status)
+
+    monkeypatch.setattr(c.ingest, "set_mapping_status", _flaky_set)
+
+    result = await run_reconcile_cancels(c)
+
+    # GID's release raised and was swallowed; GID2 was still reconciled.
+    assert result["reconciled"] == 1
+    assert shopify.add_tags_calls == [(gid2, ["cancelled"])]
+    assert c.ingest._mapping_status[gid2] == "cancelled"  # type: ignore[attr-defined]
+
+
 async def test_not_yet_cancelled_left_untouched() -> None:
     c = get_container()
     await c.ingest.set_mapping_status(GID, "cancel_requested")

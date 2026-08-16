@@ -54,6 +54,6 @@ async def run_send_reminders(c: Container) -> dict[str, object]:
             # fabricate a payload.
             continue
         reminder = replace(original, dedupe_key=f"{_REMINDER_PREFIX}{gid}")
-        if await c.ingest.enqueue_outbound(reminder):
+        if await c.ingest.enqueue_outbound(reminder) is not None:
             queued += 1
     return {"swept": len(stale), "queued": queued}

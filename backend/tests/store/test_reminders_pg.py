@@ -156,8 +156,9 @@ async def test_enqueue_outbound_on_conflict_do_nothing(pool: LazyPool) -> None:
         dedupe_key=f"order_reminder:{gid}", kind="order_confirmation",
         phone_e164=phone, payload_json="{}",
     )
-    assert await store.enqueue_outbound(reminder) is True
-    assert await store.enqueue_outbound(reminder) is False  # UNIQUE dedupe_key = exactly-once
+    first_id = await store.enqueue_outbound(reminder)
+    assert isinstance(first_id, int)
+    assert await store.enqueue_outbound(reminder) is None  # UNIQUE dedupe_key = exactly-once
     async with pool.acquire() as conn:
         count = await conn.fetchval(
             "SELECT count(*) FROM outbound_messages WHERE dedupe_key = $1", reminder.dedupe_key

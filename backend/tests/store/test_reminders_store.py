@@ -144,9 +144,10 @@ async def test_enqueue_outbound_is_idempotent_on_dedupe_key() -> None:
         dedupe_key="order_reminder:gid://shopify/Order/6", kind="order_confirmation",
         phone_e164="+911111111111", payload_json="{}",
     )
-    assert await store.enqueue_outbound(reminder) is True
+    first_id = await store.enqueue_outbound(reminder)
+    assert isinstance(first_id, int)
     # Second insert of the SAME dedupe_key is a no-op -> the UNIQUE key is the exactly-once guard.
-    assert await store.enqueue_outbound(reminder) is False
+    assert await store.enqueue_outbound(reminder) is None
     views = [v for v in await store.recent_outbound(10) if v.dedupe_key == reminder.dedupe_key]
     assert len(views) == 1
     assert views[0].state == "queued"

@@ -335,8 +335,11 @@ class InMemoryIngestStore:
         # WHERE ... = ANY($1) batching).
         return {k: self.outbound[k] for k in dedupe_keys if k in self.outbound}
 
-    async def enqueue_outbound(self, outbound: OutboundDraft) -> bool:
-        return self._enqueue(outbound) is not None
+    async def enqueue_outbound(self, outbound: OutboundDraft) -> int | None:
+        # `_enqueue` already returns the new row's id (or None on a dedupe_key conflict) --
+        # `ingest_order_created` has relied on this since the ADR-001 inline-send amendment; this
+        # method just needed to stop discarding that value.
+        return self._enqueue(outbound)
 
     async def delete_by_phone(self, phone_e164: str) -> DeletionResult:
         removed_mappings = [

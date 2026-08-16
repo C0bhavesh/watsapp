@@ -740,21 +740,24 @@ class PostgresIngestStore:
             for r in rows
         }
 
-    async def enqueue_outbound(self, outbound: OutboundDraft) -> bool:
+    async def enqueue_outbound(self, outbound: OutboundDraft) -> int | None:
         # Same ON CONFLICT (dedupe_key) DO NOTHING idempotency ingest_order_created uses: the UNIQUE
-        # dedupe_key constraint IS the exactly-once guarantee, so the reminder sweep can run every
-        # tick (or overlap) and still queue at most one reminder row per order. Returns whether a
-        # fresh row was inserted.
+        # dedupe_key constraint IS the exactly-once guarantee. RETURNING id gives the freshly-queued
+        # row's id (None on a conflict) so a caller (e.g. an inline-send-eligible notification) can
+        # claim exactly it via claim_outbound_by_id -- ingest_order_created already relies on this
+        # same pattern for the original push.
         async with self._pool.acquire() as conn:
-            result = await conn.execute(
+            # Route asyncpg's Any return through a typed local (same as ingest_order_created) so
+            # mypy strict's warn_return_any stays satisfied.
+            outbound_id: int | None = await conn.fetchval(
                 "INSERT INTO outbound_messages (dedupe_key, kind, phone_e164, payload_json)"
-                " VALUES ($1, $2, $3, $4) ON CONFLICT (dedupe_key) DO NOTHING",
+                " VALUES ($1, $2, $3, $4) ON CONFLICT (dedupe_key) DO NOTHING RETURNING id",
                 outbound.dedupe_key,
                 outbound.kind,
                 outbound.phone_e164,
                 outbound.payload_json,
             )
-        return _rows_affected(result) > 0
+        return outbound_id
 
     async def delete_by_phone(self, phone_e164: str) -> DeletionResult:
         """DPDP right-to-erasure: purge every row keyed to one phone number, atomically.

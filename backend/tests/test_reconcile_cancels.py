@@ -1,34 +1,67 @@
-"""Cancel reconciliation job: apply the final `cancelled` tag once Shopify confirms cancelledAt."""
+"""Cancel reconciliation job: apply the final `cancelled` tag once Shopify confirms cancelledAt,
+and notify the customer with cod_cancel once that happens."""
 
 import httpx
 import pytest
 
+from app.admin.controls import AdminControls, save_controls
+from app.channels.whatsapp_sender import SendResult
 from app.core.order_resolver import authorize_own_order
 from app.deps import get_container, reset_container
 from app.jobs.reconcile import run_reconcile_cancels
-from app.shopify.models import AuthorizedOrder, CancelRequested, Order
+from app.shopify.models import AuthorizedOrder, CancelRequested, Customer, Order
 
 CRON = "topsecret-reconcile-1"  # >= 16 chars
 
 
 @pytest.fixture(autouse=True)
-def _fresh(master_key: str, monkeypatch: pytest.MonkeyPatch):
+async def _fresh(master_key: str, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("APP_MASTER_KEY", master_key)
     monkeypatch.setenv("CRON_SECRET", CRON)
     monkeypatch.delenv("DATABASE_URL", raising=False)
     reset_container()
+    c = get_container()
+    await c.config.set_secret("whatsapp:access_token", "tok")
+    await c.config.set_secret("whatsapp:app_secret", "sec")
+    await c.config.set_secret("whatsapp:verify_token", "ver")
+    await c.config.set_plain("whatsapp:phone_number_id", "1298805403309058")
+    await c.config.set_plain("whatsapp:waba_id", "2454816495000045")
+    await c.config.set_plain("whatsapp:api_version", "v23.0")
+    await save_controls(c.config, AdminControls(send_mode="live"))
     yield
     reset_container()
 
 
+class FakeSender:
+    """Records send_template calls made by reconcile.py's cod_cancel notification."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def __call__(
+        self, http, cfg, to, template_name, language, body_params,
+        button_payloads=(), header_image_url=None, timeout=20.0,
+    ) -> SendResult:
+        self.calls.append({"to": to, "template": template_name, "language": language,
+                           "body_params": list(body_params)})
+        return SendResult(ok=True, status_code=200, wamid="wamid.cancel", error=None)
+
+
+def _install_sender(monkeypatch: pytest.MonkeyPatch) -> FakeSender:
+    sender = FakeSender()
+    monkeypatch.setattr("app.jobs.reconcile.send_template", sender)
+    return sender
+
+
 def _order(
-    gid: str, phone: str | None = "+919664290413", cancelled_at: str | None = None
+    gid: str, phone: str | None = "+919664290413", cancelled_at: str | None = None,
+    customer: Customer | None = None,
 ) -> Order:
     return Order(
         gid=gid, name="tavas1", email=None, phone=phone, shipping_phone=None,
         billing_phone=None, financial_status=None, fulfillment_status=None,
         cancelled_at=cancelled_at, tags=(), payment_gateway_names=(), total=None,
-        customer_locale=None,
+        customer_locale=None, customer=customer,
     )
 
 
@@ -82,6 +115,95 @@ async def test_cancelled_order_gets_final_tag() -> None:
     assert action["action"] == "cancelled"
     assert action["actor_wa_id"] == "system"
     assert action["result"] == "ok"
+
+
+async def test_cancelled_order_sends_cod_cancel_notification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    c = get_container()
+    sender = _install_sender(monkeypatch)
+    await c.ingest.set_mapping_status(GID, "cancel_requested")
+    customer = Customer(
+        gid="gid://shopify/Customer/1", first_name="Suman", last_name="B", email=None, phone=None,
+        address_line1=None, address_line2=None, city=None, state=None, postal_code=None,
+        country=None,
+    )
+    shopify = FakeShopify(
+        {GID: _order(GID, cancelled_at="2026-08-10T00:00:00Z", customer=customer)}
+    )
+    c.shopify = shopify  # type: ignore[assignment]
+
+    result = await run_reconcile_cancels(c)
+
+    assert result["reconciled"] == 1
+    assert sender.calls == [
+        {"to": "+919664290413", "template": "cod_cancel", "language": "en",
+         "body_params": ["Suman B", "tavas1"]}
+    ]
+
+
+async def test_reconciled_notification_suppressed_by_send_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    c = get_container()
+    sender = _install_sender(monkeypatch)
+    await save_controls(c.config, AdminControls(send_mode="off"))
+    await c.ingest.set_mapping_status(GID, "cancel_requested")
+    shopify = FakeShopify({GID: _order(GID, cancelled_at="2026-08-10T00:00:00Z")})
+    c.shopify = shopify  # type: ignore[assignment]
+
+    result = await run_reconcile_cancels(c)
+
+    # The kill switch affects notification only -- the tag/status write still happens.
+    assert result["reconciled"] == 1
+    assert shopify.add_tags_calls == [(GID, ["cancelled"])]
+    assert sender.calls == []
+
+
+async def test_reconcile_survives_corrupt_whatsapp_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    c = get_container()
+    sender = _install_sender(monkeypatch)
+    # Simulate a master-key rotation / corrupted encrypted secret (same technique used in
+    # test_whatsapp_webhook.py's VaultError tests): a raw config_repo write bypasses encryption,
+    # so decrypt later raises VaultError.
+    await c.config_repo.set("whatsapp:app_secret", "gAAAAAcorrupt")
+    await c.ingest.set_mapping_status(GID, "cancel_requested")
+    shopify = FakeShopify({GID: _order(GID, cancelled_at="2026-08-10T00:00:00Z")})
+    c.shopify = shopify  # type: ignore[assignment]
+
+    result = await run_reconcile_cancels(c)
+
+    # Reconciliation (the primary job) is unaffected by a broken WhatsApp config -- only the
+    # notification is skipped.
+    assert result["reconciled"] == 1
+    assert shopify.add_tags_calls == [(GID, ["cancelled"])]
+    assert sender.calls == []
+
+
+async def test_reconcile_survives_transport_failure_during_notification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.channels.whatsapp_sender import WhatsAppSendError
+
+    c = get_container()
+
+    async def _raising_send_template(*args, **kwargs):
+        raise WhatsAppSendError("timed out")
+
+    monkeypatch.setattr("app.jobs.reconcile.send_template", _raising_send_template)
+    await c.ingest.set_mapping_status(GID, "cancel_requested")
+    shopify = FakeShopify({GID: _order(GID, cancelled_at="2026-08-10T00:00:00Z")})
+    c.shopify = shopify  # type: ignore[assignment]
+
+    result = await run_reconcile_cancels(c)
+
+    # The tag/status write already happened before the notification attempt -- a transport
+    # failure sending cod_cancel must not undo it or affect the job's own success count.
+    assert result["reconciled"] == 1
+    assert shopify.add_tags_calls == [(GID, ["cancelled"])]
+    assert c.ingest._mapping_status[GID] == "cancelled"  # type: ignore[attr-defined]
 
 
 async def test_not_yet_cancelled_left_untouched() -> None:

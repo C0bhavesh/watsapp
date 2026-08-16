@@ -92,3 +92,29 @@ async def test_claim_sql_is_atomic_transactional_and_skip_locked() -> None:
             attempts=0,
         )
     ]
+
+
+async def test_reconcile_claim_sql_is_atomic_transactional_and_skip_locked() -> None:
+    # orders_awaiting_cancel_reconcile must, like claim_queued_outbound, atomically SELECT the
+    # rows still 'cancel_requested' AND flip them to a transient 'cancel_reconciling' state in ONE
+    # round trip inside a transaction, with FOR UPDATE SKIP LOCKED so two overlapping reconcile
+    # runs can never both claim the same order and thus double-send cod_cancel. It also reclaims a
+    # 'cancel_reconciling' row abandoned by a killed invocation once it is older than 10 minutes.
+    conn = _FakeConn([{"order_gid": "gid://shopify/Order/1"}])
+    store = PostgresIngestStore(_FakePool(conn))  # type: ignore[arg-type]
+
+    gids = await store.orders_awaiting_cancel_reconcile(limit=25)
+
+    assert len(conn.fetch_calls) == 1
+    sql, args, ran_in_txn = conn.fetch_calls[0]
+    assert ran_in_txn is True  # the CTE + row lock must run inside an explicit transaction
+    assert "FOR UPDATE SKIP LOCKED" in sql  # concurrent claims skip already-locked rows
+    assert "SET status = 'cancel_reconciling'" in sql  # atomic flip out of cancel_requested
+    assert (
+        "WHERE status = 'cancel_requested'"
+        " OR (status = 'cancel_reconciling'"
+        " AND updated_at < now() - interval '10 minutes')"
+    ) in sql
+    assert "RETURNING order_gid" in sql
+    assert args == (25,)
+    assert gids == ["gid://shopify/Order/1"]

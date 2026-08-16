@@ -246,6 +246,121 @@ async def test_cancelled_order_without_phone_skipped() -> None:
     assert shopify.add_tags_calls == []
 
 
+async def test_notification_routes_to_mapping_phone_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The mapping phone (already E.164, and the number that actually held the WhatsApp
+    # conversation) is preferred over the order's raw best_phone for the recipient.
+    from app.store.base import MappingUpsert
+
+    c = get_container()
+    sender = _install_sender(monkeypatch)
+    c.ingest.mappings[GID] = MappingUpsert(  # type: ignore[attr-defined]
+        order_gid=GID, order_name="tavas1", order_number_int=1, phone_e164="+919812345678",
+        customer_name="Suman", email=None, language="en",
+        financial_status_at_create="PENDING", is_cod=True,
+    )
+    await c.ingest.set_mapping_status(GID, "cancel_requested")
+    shopify = FakeShopify(
+        {GID: _order(GID, phone="09664290413", cancelled_at="2026-08-10T00:00:00Z")}
+    )
+    c.shopify = shopify  # type: ignore[assignment]
+
+    result = await run_reconcile_cancels(c)
+
+    assert result["reconciled"] == 1
+    assert result["notified"] == 1
+    assert sender.calls[0]["to"] == "+919812345678"  # mapping phone, not the raw order phone
+
+
+async def test_notification_falls_back_to_normalized_order_phone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No mapping phone -> fall back to the order's best phone NORMALIZED to E.164 (never the raw
+    # Shopify string): a bare "09664290413" must be delivered as "+919664290413".
+    c = get_container()
+    sender = _install_sender(monkeypatch)
+    await c.ingest.set_mapping_status(GID, "cancel_requested")
+    shopify = FakeShopify(
+        {GID: _order(GID, phone="09664290413", cancelled_at="2026-08-10T00:00:00Z")}
+    )
+    c.shopify = shopify  # type: ignore[assignment]
+
+    result = await run_reconcile_cancels(c)
+
+    assert result["reconciled"] == 1
+    assert result["notified"] == 1
+    assert sender.calls[0]["to"] == "+919664290413"
+
+
+async def test_notify_counters_track_suppressed_and_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    c = get_container()
+    _install_sender(monkeypatch)
+    await save_controls(c.config, AdminControls(send_mode="off"))
+    await c.ingest.set_mapping_status(GID, "cancel_requested")
+    shopify = FakeShopify({GID: _order(GID, cancelled_at="2026-08-10T00:00:00Z")})
+    c.shopify = shopify  # type: ignore[assignment]
+
+    result = await run_reconcile_cancels(c)
+
+    assert result["reconciled"] == 1
+    assert result["notified"] == 0
+    assert result["notify_skipped"] == 1
+
+
+async def test_failed_send_result_is_logged_and_counted(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A >=400 Meta response returns SendResult(ok=False, ...) rather than raising: it must be
+    # logged (with the gid + status/error) and counted as skipped, not silently swallowed.
+    import logging
+
+    c = get_container()
+
+    async def _failing_send(*args, **kwargs) -> SendResult:
+        return SendResult(ok=False, status_code=429, wamid=None, error="code=131056")
+
+    monkeypatch.setattr("app.jobs.reconcile.send_template", _failing_send)
+    await c.ingest.set_mapping_status(GID, "cancel_requested")
+    shopify = FakeShopify({GID: _order(GID, cancelled_at="2026-08-10T00:00:00Z")})
+    c.shopify = shopify  # type: ignore[assignment]
+
+    with caplog.at_level(logging.WARNING, logger="app.jobs.reconcile"):
+        result = await run_reconcile_cancels(c)
+
+    assert result["reconciled"] == 1
+    assert result["notify_skipped"] == 1
+    joined = " ".join(r.getMessage() for r in caplog.records)
+    assert GID in joined
+    assert "429" in joined
+
+
+async def test_transport_failure_log_includes_gid(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    from app.channels.whatsapp_sender import WhatsAppSendError
+
+    c = get_container()
+
+    async def _raising_send_template(*args, **kwargs):
+        raise WhatsAppSendError("timed out")
+
+    monkeypatch.setattr("app.jobs.reconcile.send_template", _raising_send_template)
+    await c.ingest.set_mapping_status(GID, "cancel_requested")
+    shopify = FakeShopify({GID: _order(GID, cancelled_at="2026-08-10T00:00:00Z")})
+    c.shopify = shopify  # type: ignore[assignment]
+
+    with caplog.at_level(logging.WARNING, logger="app.jobs.reconcile"):
+        result = await run_reconcile_cancels(c)
+
+    assert result["notify_skipped"] == 1
+    assert GID in " ".join(r.getMessage() for r in caplog.records)
+
+
 async def test_job_registered_and_runs_via_cron_endpoint() -> None:
     from app.main import app as fastapi_app
 

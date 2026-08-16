@@ -533,10 +533,33 @@ class InMemoryIngestStore:
             }
         )
 
+    async def get_mapping_phone(self, order_gid: str) -> str | None:
+        mapping = self.mappings.get(order_gid)
+        return mapping.phone_e164 if mapping is not None else None
+
     async def orders_awaiting_cancel_reconcile(self, limit: int = 50) -> list[str]:
-        return [
-            gid for gid, status in self._mapping_status.items() if status == "cancel_requested"
-        ][:limit]
+        # Atomic-claim parity with the Postgres impl: flip each returned order out of
+        # 'cancel_requested' to the transient 'cancel_reconciling' state as it is claimed, so a
+        # second call (a would-be overlapping reconcile run) never re-hands the same order and
+        # cod_cancel is not double-sent. There is no real concurrency here, but the STATE must move
+        # so the semantics do not regress behind Postgres. Also reclaim a 'cancel_reconciling' row
+        # abandoned by a dead invocation once it is older than the 10-minute staleness threshold
+        # (mirrors claim_queued_outbound), so a stranded transient row is not lost forever.
+        now = datetime.now(UTC)
+        claimed: list[str] = []
+        for gid, status in self._mapping_status.items():
+            is_stale = (
+                status == "cancel_reconciling"
+                and now - self._mapping_updated_at.get(gid, now) >= _PROCESSING_STALE
+            )
+            if status != "cancel_requested" and not is_stale:
+                continue
+            self._mapping_status[gid] = "cancel_reconciling"
+            self._mapping_updated_at[gid] = now
+            claimed.append(gid)
+            if len(claimed) >= limit:
+                break
+        return claimed
 
 
 class InMemoryMessageStore:

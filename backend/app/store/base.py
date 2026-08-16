@@ -177,6 +177,12 @@ class IngestStore(Protocol):
         user_errors_json: str | None,
     ) -> None: ...
 
+    async def get_mapping_phone(self, order_gid: str) -> str | None: ...
+
+    # Atomically CLAIMS the returned orders: each is flipped out of 'cancel_requested' to a
+    # transient in-progress state so two overlapping reconcile runs cannot both claim the same
+    # order (and double-send cod_cancel). The caller must finalize each claimed order -- advance
+    # it on success, or release it back to 'cancel_requested' on any skip/failure.
     async def orders_awaiting_cancel_reconcile(self, limit: int = 50) -> list[str]: ...
 
     # --- Order mirror sync (Shopify webhook -> Postgres, no live read-path change yet) ---

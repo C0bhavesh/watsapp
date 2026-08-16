@@ -178,15 +178,34 @@ async def test_bump_stays_queued_until_cap_then_fails() -> None:
     assert view.last_error_code == "500"
 
 
-async def test_set_mapping_status_and_reconcile_list() -> None:
+async def test_reconcile_claim_flips_status_and_is_not_double_claimed() -> None:
     store = InMemoryIngestStore()
     await _seed(store, 2)
     gid1 = "gid://shopify/Order/1"
     await store.set_mapping_status(gid1, "cancel_requested")
+    # The claim returns the row AND flips it out of 'cancel_requested' so a second overlapping
+    # reconcile run can never re-claim (and thus re-send cod_cancel for) the same order.
     assert await store.orders_awaiting_cancel_reconcile() == [gid1]
-    # A different status is not surfaced by the reconcile list.
+    assert store._mapping_status[gid1] == "cancel_reconciling"
+    assert await store.orders_awaiting_cancel_reconcile() == []
+    # A different status is never surfaced by the reconcile claim.
     await store.set_mapping_status("gid://shopify/Order/2", "confirmed")
-    assert await store.orders_awaiting_cancel_reconcile() == [gid1]
+    assert await store.orders_awaiting_cancel_reconcile() == []
+
+
+async def test_reconcile_claim_reclaims_stale_reconciling_row() -> None:
+    # A row a killed reconcile invocation flipped to 'cancel_reconciling' but never finalized or
+    # reverted would otherwise be stranded forever (nothing else re-queues it). Once older than the
+    # staleness threshold it MUST be reclaimed -- mirroring claim_queued_outbound's stale-processing
+    # reclaim -- while a freshly-claimed row is NOT (that would double-send).
+    store = InMemoryIngestStore()
+    await _seed(store, 1)
+    gid = "gid://shopify/Order/1"
+    await store.set_mapping_status(gid, "cancel_requested")
+    assert await store.orders_awaiting_cancel_reconcile() == [gid]
+    assert await store.orders_awaiting_cancel_reconcile() == []  # fresh -> not reclaimed
+    store._mapping_updated_at[gid] = datetime.now(UTC) - timedelta(minutes=15)
+    assert await store.orders_awaiting_cancel_reconcile() == [gid]  # stale -> reclaimed
 
 
 async def test_record_order_action_persists() -> None:

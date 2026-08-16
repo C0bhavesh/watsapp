@@ -1040,13 +1040,46 @@ class PostgresIngestStore:
                 user_errors_json,
             )
 
-    async def orders_awaiting_cancel_reconcile(self, limit: int = 50) -> list[str]:
+    async def get_mapping_phone(self, order_gid: str) -> str | None:
+        # The already-E.164 phone that actually held the WhatsApp conversation for this order
+        # (order_mappings.phone_e164, written by the signed orders/create webhook). The reconcile
+        # notification prefers it over the order's raw Shopify best_phone as the cod_cancel
+        # recipient. Returns None when there is no mapping row or no stored phone.
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT order_gid FROM order_mappings WHERE status = 'cancel_requested'"
-                " ORDER BY updated_at LIMIT $1",
-                limit,
+            row = await conn.fetchrow(
+                "SELECT phone_e164 FROM order_mappings WHERE order_gid = $1", order_gid
             )
+        if row is None or row["phone_e164"] is None:
+            return None
+        return str(row["phone_e164"])
+
+    async def orders_awaiting_cancel_reconcile(self, limit: int = 50) -> list[str]:
+        # Atomic claim (same idiom as claim_queued_outbound): SELECT the orders still awaiting
+        # cancel-reconciliation AND flip each to the transient 'cancel_reconciling' state in ONE
+        # round trip inside a transaction. FOR UPDATE SKIP LOCKED makes a concurrent reconcile run
+        # skip an already-claimed row, so two overlapping runs can NEVER both claim the same order
+        # -> cod_cancel is never double-sent. run_reconcile_cancels advances a claimed row to
+        # 'cancelled' on success and reverts it to 'cancel_requested' on any skip/failure so it is
+        # never lost. The predicate also RECLAIMS a 'cancel_reconciling' row abandoned by a killed
+        # invocation (never finalized or reverted) once it is older than 10 minutes -- two orders
+        # of magnitude above a single run's work, so a genuinely in-flight claim is never stolen.
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                rows = await conn.fetch(
+                    "WITH claimed AS ("
+                    " SELECT order_gid FROM order_mappings"
+                    " WHERE status = 'cancel_requested'"
+                    " OR (status = 'cancel_reconciling'"
+                    " AND updated_at < now() - interval '10 minutes')"
+                    " ORDER BY updated_at"
+                    " LIMIT $1"
+                    " FOR UPDATE SKIP LOCKED"
+                    ")"
+                    " UPDATE order_mappings SET status = 'cancel_reconciling', updated_at = now()"
+                    " WHERE order_gid IN (SELECT order_gid FROM claimed)"
+                    " RETURNING order_gid",
+                    limit,
+                )
         return [str(r["order_gid"]) for r in rows]
 
 

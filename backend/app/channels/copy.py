@@ -2,6 +2,9 @@ from typing import Final
 
 SUPPORTED_LANGUAGES: Final = ("en", "hi", "hinglish", "gu")
 DEFAULT_LANGUAGE: Final = "en"
+# Meta rejects an empty template body parameter (named or positional) — every template-sending
+# call site substitutes this when a real value is unavailable, rather than sending "".
+EMPTY_PARAM_PLACEHOLDER: Final = "-"
 
 _COPY: Final[dict[str, dict[str, str]]] = {
     "order_confirmed": {

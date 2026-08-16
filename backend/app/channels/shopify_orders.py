@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 
+from app.channels.copy import EMPTY_PARAM_PLACEHOLDER
 from app.core.phone import normalize_phone
 from app.shopify.models import Customer, Fulfillment, LineItem, Money, Order
 
@@ -327,6 +328,16 @@ def fulfillment_from_webhook_payload(
         # GraphQL read path (_fulfillments_from_node), never here. Do NOT invent a REST field.
     )
     return order_gid, fulfillment
+
+
+def customer_display_name(order: Order) -> str:
+    """A template body-parameter name: "First Last" from the order's customer, or the shared
+    empty-param placeholder when there is no customer or both name fields are blank."""
+    if order.customer is not None:
+        name = f"{order.customer.first_name or ''} {order.customer.last_name or ''}".strip()
+        if name:
+            return name
+    return EMPTY_PARAM_PLACEHOLDER
 
 
 def customer_from_webhook_payload(payload: dict) -> Customer | None:  # type: ignore[type-arg]

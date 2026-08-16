@@ -125,16 +125,18 @@ async def send_template(
     to: str,
     template_name: str,
     language: str,
-    body_params: Mapping[str, str],
+    body_params: Mapping[str, str] | Sequence[str],
     button_payloads: Sequence[str] = (),
     header_image_url: str | None = None,
     timeout: float = 20.0,
 ) -> SendResult:
-    """Send an approved template. ``body_params`` is a name->value mapping: the cod_confirmation
-    template uses NAMED placeholders, so each body parameter object carries ``parameter_name`` (Meta
-    matches by name, not position). ``header_image_url``, when a public https link, adds an IMAGE
-    header component (the live product photo); omit it to send with no header. Components are
-    ordered header -> body -> buttons, as Meta expects.
+    """Send an approved template. ``body_params`` is either a NAMED mapping (name -> value, each
+    parameter object carries ``parameter_name`` -- used by templates with named placeholders like
+    ``cod_confirmation``) or a POSITIONAL sequence (used by templates with ``{{1}}``/``{{2}}``-style
+    placeholders like ``cod_confirmmsg``/``cod_cancel`` -- no ``parameter_name`` key, order
+    matters). ``header_image_url``, when a public https link, adds an IMAGE header component (the
+    live product photo); omit it to send with no header. Components are ordered header -> body ->
+    buttons, as Meta expects.
     """
     components: list[dict[str, Any]] = []
     # Defense-in-depth: only a public https link becomes an IMAGE header. The two callers
@@ -149,15 +151,14 @@ async def send_template(
             }
         )
     if body_params:
-        components.append(
-            {
-                "type": "body",
-                "parameters": [
-                    {"type": "text", "parameter_name": name, "text": value}
-                    for name, value in body_params.items()
-                ],
-            }
-        )
+        if isinstance(body_params, Mapping):
+            parameters = [
+                {"type": "text", "parameter_name": name, "text": value}
+                for name, value in body_params.items()
+            ]
+        else:
+            parameters = [{"type": "text", "text": value} for value in body_params]
+        components.append({"type": "body", "parameters": parameters})
     for index, button_payload in enumerate(button_payloads):
         components.append(
             {

@@ -1,15 +1,18 @@
 from datetime import UTC, datetime, timedelta
 
+from app.channels.copy import EMPTY_PARAM_PLACEHOLDER
 from app.channels.shopify_orders import (
     MAX_FIELD_LEN,
     IncomingOrder,
     choose_language,
+    customer_display_name,
     customer_from_webhook_payload,
     fulfillment_from_webhook_payload,
     is_eligible_for_push,
     order_from_webhook_payload,
     parse_order_created,
 )
+from app.shopify.models import Customer, Order
 
 PAYLOAD = {
     "admin_graphql_api_id": "gid://shopify/Order/12187547894128",
@@ -497,3 +500,33 @@ def test_customer_from_webhook_payload_clips_oversized_fields() -> None:
     assert cust.email is not None and len(cust.email) == MAX_FIELD_LEN
     assert cust.address_line1 is not None and len(cust.address_line1) == MAX_FIELD_LEN
     assert cust.city is not None and len(cust.city) == MAX_FIELD_LEN
+
+
+def _bare_order(gid: str = "gid://shopify/Order/1", customer: Customer | None = None) -> Order:
+    return Order(
+        gid=gid, name="tavas1", email=None, phone="+919664290413", shipping_phone=None,
+        billing_phone=None, financial_status=None, fulfillment_status=None, cancelled_at=None,
+        tags=(), payment_gateway_names=(), total=None, customer_locale=None, customer=customer,
+    )
+
+
+def test_customer_display_name_from_first_and_last() -> None:
+    customer = Customer(
+        gid="gid://shopify/Customer/1", first_name="Suman", last_name="B", email=None, phone=None,
+        address_line1=None, address_line2=None, city=None, state=None, postal_code=None,
+        country=None,
+    )
+    assert customer_display_name(_bare_order(customer=customer)) == "Suman B"
+
+
+def test_customer_display_name_placeholder_when_no_customer() -> None:
+    assert customer_display_name(_bare_order(customer=None)) == EMPTY_PARAM_PLACEHOLDER
+
+
+def test_customer_display_name_placeholder_when_names_blank() -> None:
+    customer = Customer(
+        gid="gid://shopify/Customer/1", first_name=None, last_name=None, email=None, phone=None,
+        address_line1=None, address_line2=None, city=None, state=None, postal_code=None,
+        country=None,
+    )
+    assert customer_display_name(_bare_order(customer=customer)) == EMPTY_PARAM_PLACEHOLDER

@@ -85,6 +85,27 @@ async def test_send_template_builds_named_body_and_button_components() -> None:
     assert not any(c["type"] == "header" for c in template["components"])
 
 
+async def test_send_template_builds_positional_body_params() -> None:
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.read())
+        return httpx.Response(200, json={"messages": [{"id": "wamid.T2"}]})
+
+    await send_template(
+        client_with(handler), CFG, "919999999999", "cod_confirmmsg", "en",
+        body_params=["Bhavesh", "tavas3733"],
+    )
+    template = captured["body"]["template"]
+    assert template["name"] == "cod_confirmmsg"
+    body_component = next(c for c in template["components"] if c["type"] == "body")
+    # Positional params: NO parameter_name key, order preserved.
+    assert body_component["parameters"] == [
+        {"type": "text", "text": "Bhavesh"},
+        {"type": "text", "text": "tavas3733"},
+    ]
+
+
 async def test_send_template_prepends_image_header_when_url_supplied() -> None:
     captured = {}
 

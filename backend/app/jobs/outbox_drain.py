@@ -26,7 +26,7 @@ import asyncio
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.admin.controls import AdminControls, load_controls
 from app.channels.whatsapp_config import WhatsAppConfig, load_whatsapp_config
@@ -42,7 +42,12 @@ logger = logging.getLogger("app.jobs.outbox_drain")
 # order:confirm/cancel:{gid} buttons — so the drain treats them identically; only the dedupe_key
 # prefix differs (that distinct key is the reminder's exactly-once guarantee). The gid is recovered
 # by stripping whichever prefix is present.
-_DEDUPE_PREFIXES = ("order_created:", "order_reminder:")
+# The order-confirmation family (original push + its 1-hour reminder) is the ONLY family whose
+# successful send advances order_mappings.status -- see the dedupe-family gate in
+# send_one_outbound. Fulfillment notifications (Task 3) share none of that state machine.
+_ORDER_CONFIRMATION_DEDUPE_PREFIXES = ("order_created:", "order_reminder:")
+_FULFILLMENT_DEDUPE_PREFIXES = ("fulfillment_shipped:", "fulfillment_delivered:")
+_DEDUPE_PREFIXES = _ORDER_CONFIRMATION_DEDUPE_PREFIXES + _FULFILLMENT_DEDUPE_PREFIXES
 # Rows claimed per cron tick. Kept small so a run comfortably fits inside any reasonable
 # per-invocation time budget: send_template's per-call timeout is 20s, and Vercel's platform
 # timeout on this legacy-`builds` config may be as low as the ~10-15s default (maxDuration unset).
@@ -82,39 +87,32 @@ _MEDIA_ERROR_CODES = {131052, 131053}
 _META_CODE_RE = re.compile(r"(?:^|; )code=(\d+)")
 
 
-# The cod_confirmation template's 6 NAMED body params (plus template/language) that the outbox
-# payload_json must carry. image_url is OPTIONAL (resolved best-effort at ingest; absent when the
-# Shopify image fetch failed) and is handled separately so a missing header never fails parsing.
-_REQUIRED_PAYLOAD_KEYS = (
-    "template",
-    "language",
-    "customer_name",
-    "order_id",
-    "product_name",
-    "product_color",
-    "product_size",
-    "product_amount",
-)
+# Every payload_json must carry these three top-level keys; body_params is a NAMED dict (Meta
+# named-placeholder templates, e.g. cod_confirmation) or a POSITIONAL list (Meta {{n}}-placeholder
+# templates, e.g. order_shipped/order_delivered) -- mirrors send_template's own Mapping | Sequence
+# duality. image_url and buttons are both optional (absence means "no header" / "no buttons").
+_REQUIRED_PAYLOAD_KEYS = ("template", "language")
 
 
 @dataclass(frozen=True)
 class _TemplatePayload:
     template: str
     language: str
-    customer_name: str
-    order_id: str
-    product_name: str
-    product_color: str
-    product_size: str
-    product_amount: str
+    body_params: dict[str, str] | list[str]
     image_url: str | None = None
+    buttons: list[str] = field(default_factory=list)
 
 
 def _gid_from_dedupe_key(dedupe_key: str) -> str | None:
-    """'order_created:gid://shopify/Order/1' -> 'gid://shopify/Order/1'; else None.
+    """Strip a known dedupe_key prefix and return the trailing id; else None.
 
-    Accepts the reminder prefix too ('order_reminder:...'). The gid itself contains ':' so the
-    prefix is stripped whole rather than split on ':'.
+    The trailing id's MEANING differs by prefix family: for 'order_created:'/'order_reminder:' it
+    is the ORDER gid (used below to advance order_mappings.status on a successful send); for
+    'fulfillment_shipped:'/'fulfillment_delivered:' it is the FULFILLMENT gid (used only as an
+    opaque validity check here -- the fulfillment-notification success path has no mapping-status
+    side effect at all, see the dedupe-family gate near the end of send_one_outbound). Any
+    prefix in _DEDUPE_PREFIXES is accepted; an unrecognized prefix (corrupt/garbage dedupe_key)
+    returns None, which send_one_outbound treats as a terminal bad_dedupe_key failure.
     """
     for prefix in _DEDUPE_PREFIXES:
         if dedupe_key.startswith(prefix):
@@ -124,13 +122,15 @@ def _gid_from_dedupe_key(dedupe_key: str) -> str | None:
 
 
 def _parse_payload(payload_json: str) -> _TemplatePayload | None:
-    """Parse the cod_confirmation outbox payload; None on any bad/missing REQUIRED field.
+    """Parse the generic outbox payload envelope; None on any bad/missing/malformed field.
 
     None -> the row is marked undeliverable (it can never render), which also terminally drops any
-    legacy row still queued under the OLD template shape (no ``order_id``/``product_*`` keys) — the
-    old template no longer exists on the WABA, so retrying it forever would be pointless.
+    legacy row still queued under an OLDER flat-key shape (no top-level ``body_params``) -- an
+    already-retired template shape, so retrying it forever would be pointless.
     ``image_url`` is optional: only a public https link is kept (Meta rejects anything else),
-    otherwise the header is simply skipped (Q19a graceful degradation).
+    otherwise the header is simply skipped (Q19a graceful degradation). ``buttons`` is optional:
+    absence or a non-list value means no button components (e.g. prepaid_order, order_shipped,
+    order_delivered all have no Confirm/Cancel component on the WABA).
     """
     try:
         data = json.loads(payload_json)
@@ -144,18 +144,34 @@ def _parse_payload(payload_json: str) -> _TemplatePayload | None:
         if not isinstance(value, str) or not value:
             return None
         fields[key] = value
+    raw_body_params = data.get("body_params")
+    body_params: dict[str, str] | list[str]
+    if isinstance(raw_body_params, dict):
+        if not raw_body_params or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in raw_body_params.items()
+        ):
+            return None
+        body_params = raw_body_params
+    elif isinstance(raw_body_params, list):
+        if not raw_body_params or not all(isinstance(v, str) for v in raw_body_params):
+            return None
+        body_params = raw_body_params
+    else:
+        return None
     image = data.get("image_url")
     image_url = image if isinstance(image, str) and image.startswith("https://") else None
+    raw_buttons = data.get("buttons")
+    buttons = (
+        raw_buttons
+        if isinstance(raw_buttons, list) and all(isinstance(b, str) for b in raw_buttons)
+        else []
+    )
     return _TemplatePayload(
         template=fields["template"],
         language=fields["language"],
-        customer_name=fields["customer_name"],
-        order_id=fields["order_id"],
-        product_name=fields["product_name"],
-        product_color=fields["product_color"],
-        product_size=fields["product_size"],
-        product_amount=fields["product_amount"],
+        body_params=body_params,
         image_url=image_url,
+        buttons=buttons,
     )
 
 
@@ -227,24 +243,12 @@ async def send_one_outbound(
         await c.ingest.mark_outbound_undeliverable(row.id, "bad_payload")
         return OUTCOME_UNDELIVERABLE
 
-    # prepaid_order has no BUTTONS component approved on the WABA (informational only, no
-    # Confirm/Cancel step for a prepaid customer) -- only cod_confirmation gets the quick-reply
-    # buttons. Everything else about the send (body params, header image, retry) is identical.
-    buttons = (
-        [f"order:confirm:{gid}", f"order:cancel:{gid}"] if payload.template == "cod_confirmation"
-        else []
-    )
-    # The cod_confirmation template uses NAMED body params (name -> value); the header image (the
-    # live product photo) is pre-resolved at ingest and carried in payload.image_url, or None (fetch
-    # failed) -> send with no header rather than block the confirmation.
-    body_params = {
-        "customer_name": payload.customer_name,
-        "order_id": payload.order_id,
-        "product_name": payload.product_name,
-        "product_color": payload.product_color,
-        "product_size": payload.product_size,
-        "product_amount": payload.product_amount,
-    }
+    # buttons/body_params now come straight from the payload envelope (Task 1's generalization) --
+    # no per-template string check here anymore. Any template with no Confirm/Cancel component on
+    # the WABA (prepaid_order, order_shipped, order_delivered) simply carries an empty/absent
+    # "buttons" list, which _parse_payload already normalized to [].
+    buttons = payload.buttons
+    body_params = payload.body_params
     async def _send(header_image_url: str | None) -> SendResult:
         # Only pass `timeout` when the caller supplied one, so the default (cron) path keeps
         # send_template's own 20s default untouched — the inline path passes a short timeout.
@@ -288,7 +292,13 @@ async def send_one_outbound(
 
     if result.ok:
         await c.ingest.mark_outbound_sent(row.id, result.wamid)
-        await c.ingest.set_mapping_status(gid, "template_sent")
+        # Only the order-confirmation family (original push + its 1-hour reminder) has anything to
+        # do with order_mappings' confirm/cancel state machine. A fulfillment notification's `gid`
+        # here is a FULFILLMENT gid, not an order gid -- writing it into order_mappings would be
+        # wrong even if it happened to not error, so this is gated on the dedupe_key's own prefix
+        # family, not on `gid`'s mere presence.
+        if row.dedupe_key.startswith(_ORDER_CONFIRMATION_DEDUPE_PREFIXES):
+            await c.ingest.set_mapping_status(gid, "template_sent")
         return OUTCOME_SENT
 
     code = _meta_error_code(result.error)

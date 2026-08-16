@@ -331,20 +331,29 @@ async def shopify_webhook(request: Request) -> Response:
         # duplicate row; the inline send's claim-by-id -> no double send).
         image_url = await _resolve_product_image(c, incoming.product_gid)
         template_name = TEMPLATE_NAME_COD if incoming.is_cod() else TEMPLATE_NAME_PREPAID
-        template_params: dict[str, str] = {
+        template_params: dict[str, object] = {
             "template": template_name,
             "language": TEMPLATE_LANGUAGE,
-            "customer_name": customer_name or EMPTY_PARAM_PLACEHOLDER,
-            "order_id": order_name or EMPTY_PARAM_PLACEHOLDER,
-            "product_name": incoming.product_name or EMPTY_PARAM_PLACEHOLDER,
-            "product_color": incoming.product_color or EMPTY_PARAM_PLACEHOLDER,
-            "product_size": incoming.product_size or EMPTY_PARAM_PLACEHOLDER,
-            "product_amount": amount or EMPTY_PARAM_PLACEHOLDER,
+            "body_params": {
+                "customer_name": customer_name or EMPTY_PARAM_PLACEHOLDER,
+                "order_id": order_name or EMPTY_PARAM_PLACEHOLDER,
+                "product_name": incoming.product_name or EMPTY_PARAM_PLACEHOLDER,
+                "product_color": incoming.product_color or EMPTY_PARAM_PLACEHOLDER,
+                "product_size": incoming.product_size or EMPTY_PARAM_PLACEHOLDER,
+                "product_amount": amount or EMPTY_PARAM_PLACEHOLDER,
+            },
         }
         # Only carry image_url when resolved: its absence is the drain/inline sender's signal to
         # send with no header (a stored non-https value would be dropped there anyway).
         if image_url is not None:
             template_params["image_url"] = image_url
+        # prepaid_order has no BUTTONS component approved on the WABA -- only cod_confirmation gets
+        # the quick-reply buttons, baked in HERE (ingest time, when incoming.gid is known) rather
+        # than derived at send time from a template-name string check.
+        if template_name == TEMPLATE_NAME_COD:
+            template_params["buttons"] = [
+                f"order:confirm:{incoming.gid}", f"order:cancel:{incoming.gid}",
+            ]
         outbound = OutboundDraft(
             dedupe_key=f"order_created:{incoming.gid}",
             kind="order_confirmation",

@@ -91,14 +91,17 @@ async def test_orders_create_ingests_and_queues() -> None:
     # cod_confirmation is en-only on the WABA, so the template send is pinned to en even for a
     # hi-IN customer locale (the free-form conversation still uses the customer's language).
     assert params["language"] == "en"
-    assert params["customer_name"] == "Suman B"
-    assert params["order_id"] == "tavas3733"
-    assert params["product_amount"] == "949.00"
+    assert params["buttons"] == [
+        "order:confirm:gid://shopify/Order/1", "order:cancel:gid://shopify/Order/1",
+    ]
+    assert params["body_params"]["customer_name"] == "Suman B"
+    assert params["body_params"]["order_id"] == "tavas3733"
+    assert params["body_params"]["product_amount"] == "949.00"
     # This payload() carries no line_items, so the product fields degrade to the placeholder and
     # no header image is resolved (no Shopify call made).
-    assert params["product_name"] == "-"
-    assert params["product_color"] == "-"
-    assert params["product_size"] == "-"
+    assert params["body_params"]["product_name"] == "-"
+    assert params["body_params"]["product_color"] == "-"
+    assert params["body_params"]["product_size"] == "-"
     assert "image_url" not in params
     assert draft.phone_e164 == "+919664290413"
 
@@ -119,6 +122,7 @@ async def test_prepaid_order_routes_to_prepaid_template() -> None:
     params = json.loads(draft.payload_json)
     assert params["template"] == "prepaid_order"
     assert params["language"] == "en"
+    assert "buttons" not in params
 
 
 def _payload_with_product(gid: str = "gid://shopify/Order/img1") -> dict:
@@ -153,9 +157,9 @@ async def test_orders_create_resolves_product_image_into_payload(
     draft = c.ingest.outbound["order_created:gid://shopify/Order/img1"]  # type: ignore[attr-defined]
     params = json.loads(draft.payload_json)
     assert seen["gid"] == "gid://shopify/Product/15061451407728"
-    assert params["product_name"] == "Chic Kurta Set"
-    assert params["product_color"] == "Cream"
-    assert params["product_size"] == "M"
+    assert params["body_params"]["product_name"] == "Chic Kurta Set"
+    assert params["body_params"]["product_color"] == "Cream"
+    assert params["body_params"]["product_size"] == "M"
     assert params["image_url"] == "https://cdn.shopify.com/s/files/1/kurta.jpg"
 
 
@@ -178,7 +182,7 @@ async def test_orders_create_degrades_gracefully_when_image_fetch_fails(
     assert resp.json()["queued"] is True
     draft = c.ingest.outbound["order_created:gid://shopify/Order/img2"]  # type: ignore[attr-defined]
     params = json.loads(draft.payload_json)
-    assert params["product_name"] == "Chic Kurta Set"
+    assert params["body_params"]["product_name"] == "Chic Kurta Set"
     assert "image_url" not in params
 
 
@@ -1039,7 +1043,7 @@ async def test_slow_image_fetch_alone_stays_bounded_and_drops_image(
     assert elapsed < 3.0
     draft = c.ingest.outbound["order_created:gid://shopify/Order/slowimg"]  # type: ignore[attr-defined]
     params = json.loads(draft.payload_json)
-    assert params["product_name"] == "Chic Kurta Set"
+    assert params["body_params"]["product_name"] == "Chic Kurta Set"
     assert "image_url" not in params
 
 

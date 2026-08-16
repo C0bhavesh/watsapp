@@ -46,7 +46,10 @@ class FakeSender:
                 "to": to,
                 "template": template_name,
                 "language": language,
-                "body_params": dict(body_params),
+                # Stored AS-IS (not coerced to dict): body_params is either a named dict
+                # (cod_confirmation/prepaid_order) or a positional list (order_shipped/
+                # order_delivered), matching send_template's own dual-mode support.
+                "body_params": body_params,
                 "button_payloads": list(button_payloads),
                 "header_image_url": header_image_url,
                 "timeout": timeout,
@@ -59,15 +62,18 @@ class FakeSender:
         return result
 
 
-async def _seed_row(gid: str, phone: str = PHONE, payload: dict[str, str] | None = None,
+async def _seed_row(gid: str, phone: str = PHONE, payload: dict[str, object] | None = None,
                     dedupe_key: str | None = None) -> None:
     c = get_container()
     payload = payload or {
         "template": "cod_confirmation", "language": "en",
-        "customer_name": "Suman", "order_id": "tavas3733",
-        "product_name": "Blue Kurti", "product_color": "Blue", "product_size": "M",
-        "product_amount": "949",
+        "body_params": {
+            "customer_name": "Suman", "order_id": "tavas3733",
+            "product_name": "Blue Kurti", "product_color": "Blue", "product_size": "M",
+            "product_amount": "949",
+        },
         "image_url": "https://cdn.shopify.com/s/files/1/x.jpg",
+        "buttons": [f"order:confirm:{gid}", f"order:cancel:{gid}"],
     }
     mapping = MappingUpsert(
         order_gid=gid, order_name="tavas3733", order_number_int=3733, phone_e164=phone,
@@ -83,6 +89,99 @@ async def _seed_row(gid: str, phone: str = PHONE, payload: dict[str, str] | None
 
 def _install_sender(monkeypatch: pytest.MonkeyPatch, sender: FakeSender) -> None:
     monkeypatch.setattr("app.jobs.outbox_drain.send_template", sender)
+
+
+async def test_positional_body_params_send_without_parameter_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.admin.controls import load_controls
+    from app.channels.whatsapp_config import load_whatsapp_config
+    from app.jobs.outbox_drain import send_one_outbound
+
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    gid = "gid://shopify/Fulfillment/1"
+    await _seed_row(gid, payload={
+        "template": "order_shipped", "language": "en",
+        "body_params": ["Bhavesh", "tavas4119", "Delhivery", "https://track/AWB1"],
+    }, dedupe_key=f"fulfillment_shipped:{gid}")
+    sender = FakeSender(SendResult(ok=True, status_code=200, wamid="w", error=None))
+    _install_sender(monkeypatch, sender)
+    controls = await load_controls(c.config)
+    cfg = await load_whatsapp_config(c.config)
+    assert cfg is not None
+    (row,) = await c.ingest.claim_queued_outbound()
+
+    outcome = await send_one_outbound(c, cfg, controls, row)
+
+    assert outcome == "sent"
+    assert sender.calls[0]["body_params"] == [
+        "Bhavesh", "tavas4119", "Delhivery", "https://track/AWB1",
+    ]
+    assert sender.calls[0]["button_payloads"] == []
+
+
+async def test_row_without_buttons_field_sends_no_buttons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.admin.controls import load_controls
+    from app.channels.whatsapp_config import load_whatsapp_config
+    from app.jobs.outbox_drain import send_one_outbound
+
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    gid = "gid://shopify/Fulfillment/2"
+    await _seed_row(gid, payload={
+        "template": "order_delivered", "language": "en",
+        "body_params": ["Bhavesh", "tavas4120"],
+    }, dedupe_key=f"fulfillment_delivered:{gid}")
+    sender = FakeSender(SendResult(ok=True, status_code=200, wamid="w", error=None))
+    _install_sender(monkeypatch, sender)
+    controls = await load_controls(c.config)
+    cfg = await load_whatsapp_config(c.config)
+    assert cfg is not None
+    (row,) = await c.ingest.claim_queued_outbound()
+
+    outcome = await send_one_outbound(c, cfg, controls, row)
+
+    assert outcome == "sent"
+    assert sender.calls[0]["button_payloads"] == []
+    # A fulfillment notification's success must NOT advance order_mappings.status -- it has nothing
+    # to do with the confirm/cancel state machine (unlike order_created:/order_reminder: rows). The
+    # _seed_row helper always writes a "pending" mapping row for the gid, so the proof is that the
+    # send leaves it "pending" (never "template_sent"), not that the row is absent.
+    mappings = {m.order_gid: m for m in await c.ingest.recent_mappings(10)}
+    assert mappings[gid].status == "pending"
+
+
+async def test_cod_confirmation_buttons_now_come_from_the_payload_not_a_template_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression proof for the button-derivation change: cod_confirmation still gets buttons, but
+    # now because payload.buttons carries them, not a `template == "cod_confirmation"` string check.
+    from app.admin.controls import load_controls
+    from app.channels.whatsapp_config import load_whatsapp_config
+    from app.jobs.outbox_drain import send_one_outbound
+
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    gid = "gid://shopify/Order/1"
+    await _seed_row(gid, payload={
+        "template": "cod_confirmation", "language": "en",
+        "body_params": {"customer_name": "Suman", "order_id": "tavas1"},
+        "buttons": [f"order:confirm:{gid}", f"order:cancel:{gid}"],
+    })
+    sender = FakeSender(SendResult(ok=True, status_code=200, wamid="w", error=None))
+    _install_sender(monkeypatch, sender)
+    controls = await load_controls(c.config)
+    cfg = await load_whatsapp_config(c.config)
+    assert cfg is not None
+    (row,) = await c.ingest.claim_queued_outbound()
+
+    outcome = await send_one_outbound(c, cfg, controls, row)
+
+    assert outcome == "sent"
+    assert sender.calls[0]["button_payloads"] == [f"order:confirm:{gid}", f"order:cancel:{gid}"]
 
 
 async def test_send_one_outbound_sends_and_transitions(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -124,9 +223,12 @@ async def test_prepaid_order_row_sends_with_no_buttons(monkeypatch: pytest.Monke
     gid = "gid://shopify/Order/2"
     await _seed_row(gid, payload={
         "template": "prepaid_order", "language": "en",
-        "customer_name": "Suman", "order_id": "tavas3734",
-        "product_name": "Blue Kurti", "product_color": "Blue", "product_size": "M",
-        "product_amount": "949",
+        "body_params": {
+            "customer_name": "Suman", "order_id": "tavas3734",
+            "product_name": "Blue Kurti", "product_color": "Blue", "product_size": "M",
+            "product_amount": "949",
+        },
+        # No "buttons" key at all -- prepaid_order has no Confirm/Cancel component on the WABA.
     })
     sender = FakeSender(SendResult(ok=True, status_code=200, wamid="wamid.2", error=None))
     _install_sender(monkeypatch, sender)
@@ -253,9 +355,11 @@ async def test_payload_without_image_url_sends_no_header(
     await save_controls(c.config, AdminControls(send_mode="live"))
     gid = "gid://shopify/Order/9"
     await _seed_row(gid, payload={
-        "template": "cod_confirmation", "language": "en", "customer_name": "A",
-        "order_id": "tavas1", "product_name": "P", "product_color": "C",
-        "product_size": "S", "product_amount": "10",
+        "template": "cod_confirmation", "language": "en",
+        "body_params": {
+            "customer_name": "A", "order_id": "tavas1", "product_name": "P",
+            "product_color": "C", "product_size": "S", "product_amount": "10",
+        },
     })
     sender = FakeSender(SendResult(ok=True, status_code=200, wamid="w", error=None))
     _install_sender(monkeypatch, sender)
@@ -273,9 +377,12 @@ async def test_non_https_image_url_is_dropped(monkeypatch: pytest.MonkeyPatch) -
     await save_controls(c.config, AdminControls(send_mode="live"))
     gid = "gid://shopify/Order/8"
     await _seed_row(gid, payload={
-        "template": "cod_confirmation", "language": "en", "customer_name": "A",
-        "order_id": "tavas1", "product_name": "P", "product_color": "C",
-        "product_size": "S", "product_amount": "10", "image_url": "http://insecure/x.jpg",
+        "template": "cod_confirmation", "language": "en",
+        "body_params": {
+            "customer_name": "A", "order_id": "tavas1", "product_name": "P",
+            "product_color": "C", "product_size": "S", "product_amount": "10",
+        },
+        "image_url": "http://insecure/x.jpg",
     })
     sender = FakeSender(SendResult(ok=True, status_code=200, wamid="w", error=None))
     _install_sender(monkeypatch, sender)
@@ -376,9 +483,11 @@ async def test_media_error_without_image_does_not_retry(
     await save_controls(c.config, AdminControls(send_mode="live"))
     gid = "gid://shopify/Order/3"
     await _seed_row(gid, payload={
-        "template": "cod_confirmation", "language": "en", "customer_name": "A",
-        "order_id": "tavas1", "product_name": "P", "product_color": "C",
-        "product_size": "S", "product_amount": "10",
+        "template": "cod_confirmation", "language": "en",
+        "body_params": {
+            "customer_name": "A", "order_id": "tavas1", "product_name": "P",
+            "product_color": "C", "product_size": "S", "product_amount": "10",
+        },
     })
     sender = FakeSender([
         SendResult(ok=False, status_code=400, wamid=None, error="code=131052; message=media"),

@@ -14,12 +14,23 @@ from app.jobs.reminders import run_send_reminders
 from app.store.base import MappingUpsert, OutboundDraft
 
 PHONE = "+919664290413"
-PAYLOAD = {
-    "template": "cod_confirmation", "language": "en",
-    "customer_name": "Suman", "order_id": "tavas3733",
-    "product_name": "Blue Kurti", "product_color": "Blue", "product_size": "M",
-    "product_amount": "949", "image_url": "https://cdn.shopify.com/s/files/1/x.jpg",
-}
+
+
+def _payload(gid: str) -> dict[str, object]:
+    # The generalized outbox envelope (Task 1): NAMED body_params for cod_confirmation, with the
+    # Confirm/Cancel buttons baked in at ingest keyed to THIS order's gid (mirrors what
+    # shopify_webhook now writes). The reminder replays payload_json verbatim, so its buttons carry
+    # the same gid -- exactly as production does.
+    return {
+        "template": "cod_confirmation", "language": "en",
+        "body_params": {
+            "customer_name": "Suman", "order_id": "tavas3733",
+            "product_name": "Blue Kurti", "product_color": "Blue", "product_size": "M",
+            "product_amount": "949",
+        },
+        "image_url": "https://cdn.shopify.com/s/files/1/x.jpg",
+        "buttons": [f"order:confirm:{gid}", f"order:cancel:{gid}"],
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -47,7 +58,7 @@ async def _seed_template_sent(gid: str, age_minutes: int, status: str = "templat
     )
     draft = OutboundDraft(
         dedupe_key=f"order_created:{gid}", kind="order_confirmation",
-        phone_e164=PHONE, payload_json=json.dumps(PAYLOAD),
+        phone_e164=PHONE, payload_json=json.dumps(_payload(gid)),
     )
     await c.ingest.ingest_order_created(f"wh-{gid}", "orders/create", mapping, draft)
     await c.ingest.set_mapping_status(gid, status)
@@ -84,7 +95,7 @@ async def test_stale_order_gets_one_reminder_queued_with_original_payload() -> N
     reminder = await c.ingest.find_outbound_by_dedupe_key(f"order_reminder:{gid}")
     assert reminder is not None
     assert reminder.phone_e164 == PHONE
-    assert json.loads(reminder.payload_json) == PAYLOAD  # verbatim reuse of the original push
+    assert json.loads(reminder.payload_json) == _payload(gid)  # verbatim reuse of the push
     assert reminder.kind == "order_confirmation"
 
 

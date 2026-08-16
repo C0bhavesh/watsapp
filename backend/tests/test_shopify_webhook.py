@@ -494,6 +494,61 @@ async def test_fulfillment_notification_failure_still_acks_200(
     assert f"fulfillment_shipped:{fulfillment_gid}" not in store.outbound  # type: ignore[attr-defined]
 
 
+async def test_fulfillment_notification_routes_to_mapping_phone_not_shipping_phone() -> None:
+    # Regression guard (mirrors the reconcile cod_cancel fix): the notification must go to the SAME
+    # number the original confirmation did -- the mapping phone, which ranks the customer's own
+    # phone ABOVE the shipping-address phone. Order.best_phone() only knows phone/shipping/billing
+    # (never customer.phone), so a gift/relative order (customer phone != shipping phone) would
+    # otherwise silently message a stranger.
+    order_gid = "gid://shopify/Order/507"
+    p = payload(order_gid)
+    p["customer"]["phone"] = "+919812345678"  # the customer's own number (held the conversation)
+    p["shipping_address"] = {"phone": "+919000000000"}  # a different recipient/reception number
+    body = json.dumps(p).encode()
+    await post(body, headers(body, webhook_id="wh-o-507"))
+
+    fulfillment_gid = "gid://shopify/Fulfillment/507"
+    fbody = json.dumps(fulfillment_payload(order_gid, fulfillment_gid)).encode()
+    await post(fbody, headers(fbody, topic="fulfillments/create", webhook_id="wh-f-507"))
+
+    store = get_container().ingest
+    draft = store.outbound[f"fulfillment_shipped:{fulfillment_gid}"]  # type: ignore[attr-defined]
+    assert draft.phone_e164 == "+919812345678"
+
+
+async def test_shipped_notification_failure_does_not_block_delivered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Per-notification isolation: when BOTH shipped and delivered are newly true in one event (a
+    # delivered payload still carries tracking), a failure enqueuing the shipped notification must
+    # NOT prevent the delivered one from being attempted -- otherwise the delivered dedupe key is
+    # never written and that notification is lost until an unrelated future webhook re-triggers it.
+    order_gid = "gid://shopify/Order/508"
+    body = json.dumps(payload(order_gid)).encode()
+    await post(body, headers(body, webhook_id="wh-o-508"))
+
+    store = get_container().ingest
+    original_enqueue = store.enqueue_outbound
+
+    async def selective(draft: object) -> object:
+        if draft.dedupe_key.startswith("fulfillment_shipped:"):  # type: ignore[attr-defined]
+            raise RuntimeError("shipped enqueue unavailable")
+        return await original_enqueue(draft)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(store, "enqueue_outbound", selective)
+
+    fulfillment_gid = "gid://shopify/Fulfillment/508"
+    fpayload = fulfillment_payload(order_gid, fulfillment_gid)
+    fpayload["shipment_status"] = "delivered"  # both is_shipped AND is_delivered true this event
+    fbody = json.dumps(fpayload).encode()
+    resp = await post(fbody, headers(fbody, topic="fulfillments/update", webhook_id="wh-f-508"))
+
+    assert resp.status_code == 200
+    # Shipped failed, but delivered was still attempted and queued.
+    assert f"fulfillment_shipped:{fulfillment_gid}" not in store.outbound  # type: ignore[attr-defined]
+    assert f"fulfillment_delivered:{fulfillment_gid}" in store.outbound  # type: ignore[attr-defined]
+
+
 async def test_fulfillments_malformed_payload_ignored() -> None:
     # No order_id -> unlinkable -> ignored, never a 500 on a signed delivery.
     body = json.dumps({"admin_graphql_api_id": "gid://shopify/Fulfillment/x"}).encode()

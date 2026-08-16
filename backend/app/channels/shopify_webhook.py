@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import math
+import traceback
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request, Response
@@ -20,6 +21,7 @@ from app.channels.shopify_orders import (
 )
 from app.channels.shopify_signature import verify_shopify_hmac
 from app.config.crypto import VaultError
+from app.core.phone import normalize_phone
 from app.deps import Container, get_container
 from app.jobs.outbox_drain import send_inline_outbound
 from app.shopify.models import Customer, Fulfillment, Order
@@ -170,60 +172,94 @@ async def _notify_fulfillment_events(
         return
     try:
         order = await c.ingest.get_mirrored_order(order_gid)
-        phone = order.best_phone() if order is not None else None
-        if order is None or phone is None:
-            logger.info("fulfillment notify: no mirrored order/phone for %s; skipped", order_gid)
-            return
-        name = customer_display_name(order)
-        if is_shipped:
-            await _enqueue_and_send_fulfillment_notification(
-                c,
-                dedupe_key=f"fulfillment_shipped:{fulfillment.gid}",
-                phone=phone,
-                template=TEMPLATE_NAME_SHIPPED,
-                body_params=[
-                    name,
-                    order.name,
-                    fulfillment.tracking_company or EMPTY_PARAM_PLACEHOLDER,
-                    fulfillment.tracking_url
-                    or fulfillment.tracking_number
-                    or EMPTY_PARAM_PLACEHOLDER,
-                ],
-            )
-        if is_delivered:
-            await _enqueue_and_send_fulfillment_notification(
-                c,
-                dedupe_key=f"fulfillment_delivered:{fulfillment.gid}",
-                phone=phone,
-                template=TEMPLATE_NAME_DELIVERED,
-                body_params=[name, order.name],
-            )
+        # Route to the phone that actually held the WhatsApp conversation: the order's mapping
+        # phone (the ORIGINAL confirmation's recipient -- already E.164, and ranked with the
+        # customer's own phone ABOVE shipping/billing, unlike Order.best_phone()). Fall back to the
+        # order's best phone NORMALIZED to E.164 only if no mapping exists (best_phone() can carry a
+        # raw, unparseable string for a GraphQL-backfilled order). Sending best_phone() straight
+        # through would silently message the SHIPPING contact for a gift/relative order -- a
+        # different person than the one who messaged the bot (mirrors reconcile._notify_cancelled).
+        to = await c.ingest.get_mapping_phone(order_gid)
     except Exception as exc:
-        # Log only the exception TYPE, never the rendered exception/traceback (2026-08-13
-        # error_learning): a store/enqueue error's text can echo the fulfillment's tracking
-        # number/URL, which must not reach the logs. A failure here must degrade to "notification
-        # not sent this time", never a 500 on a signed delivery (which would burn Shopify's
-        # 19-failure retry budget) -- matching _mirror_fulfillment's own posture, as promised in
-        # this function's docstring.
-        logger.error(
-            "fulfillment notify failed: gid=%s type=%s", order_gid, type(exc).__name__
+        # The shared read (mirror + mapping) legitimately blocks BOTH notifications -- there is
+        # nothing to send without the order -- so a failure here skips the event, PII-free.
+        _log_notify_failure(order_gid, exc)
+        return
+    if order is None:
+        logger.info("fulfillment notify: no mirrored order for %s; skipped", order_gid)
+        return
+    if to is None:
+        to = normalize_phone(order.best_phone())
+    if to is None:
+        logger.info("fulfillment notify: no deliverable phone for %s; skipped", order_gid)
+        return
+    name = customer_display_name(order)
+    # Each notification is attempted INDEPENDENTLY: _enqueue_and_send... never raises, so a failure
+    # sending the shipped notification cannot stop the delivered one (both can be newly true in the
+    # same event -- a delivered payload still carries tracking) and vice versa. Its own dedupe key
+    # is then still written, so the notification is not silently lost.
+    if is_shipped:
+        await _enqueue_and_send_fulfillment_notification(
+            c,
+            order_gid=order_gid,
+            dedupe_key=f"fulfillment_shipped:{fulfillment.gid}",
+            phone=to,
+            template=TEMPLATE_NAME_SHIPPED,
+            body_params=[
+                name,
+                order.name,
+                fulfillment.tracking_company or EMPTY_PARAM_PLACEHOLDER,
+                fulfillment.tracking_url
+                or fulfillment.tracking_number
+                or EMPTY_PARAM_PLACEHOLDER,
+            ],
+        )
+    if is_delivered:
+        await _enqueue_and_send_fulfillment_notification(
+            c,
+            order_gid=order_gid,
+            dedupe_key=f"fulfillment_delivered:{fulfillment.gid}",
+            phone=to,
+            template=TEMPLATE_NAME_DELIVERED,
+            body_params=[name, order.name],
         )
 
 
-async def _enqueue_and_send_fulfillment_notification(
-    c: Container, dedupe_key: str, phone: str, template: str, body_params: list[str]
-) -> None:
-    draft = OutboundDraft(
-        dedupe_key=dedupe_key,
-        kind=dedupe_key.split(":", 1)[0],
-        phone_e164=phone,
-        payload_json=json.dumps(
-            {"template": template, "language": FULFILLMENT_TEMPLATE_LANGUAGE,
-             "body_params": body_params}
-        ),
+def _log_notify_failure(order_gid: str, exc: BaseException) -> None:
+    """PII-free failure log for a fulfillment notification. Adds the last traceback frame's
+    file:line (location ONLY -- never str(exc), whose text can echo a tracking number/URL) so a
+    genuine future bug on this best-effort path is at least locatable in production."""
+    frames = traceback.extract_tb(exc.__traceback__)
+    location = f"{frames[-1].filename}:{frames[-1].lineno}" if frames else "unknown"
+    logger.error(
+        "fulfillment notify failed: gid=%s type=%s at=%s",
+        order_gid, type(exc).__name__, location,
     )
-    outbound_id = await c.ingest.enqueue_outbound(draft)
-    await send_inline_outbound(c, outbound_id, timeout=_FULFILLMENT_INLINE_SEND_TIMEOUT_SECONDS)
+
+
+async def _enqueue_and_send_fulfillment_notification(
+    c: Container, order_gid: str, dedupe_key: str, phone: str, template: str,
+    body_params: list[str],
+) -> None:
+    """Enqueue + inline-send ONE fulfillment notification. Self-contained and failure-isolated:
+    it NEVER raises past this call, so one notification failing never prevents a sibling (shipped
+    vs delivered) from being attempted, and never turns the signed webhook's ack into a 500."""
+    try:
+        draft = OutboundDraft(
+            dedupe_key=dedupe_key,
+            kind=dedupe_key.split(":", 1)[0],
+            phone_e164=phone,
+            payload_json=json.dumps(
+                {"template": template, "language": FULFILLMENT_TEMPLATE_LANGUAGE,
+                 "body_params": body_params}
+            ),
+        )
+        outbound_id = await c.ingest.enqueue_outbound(draft)
+        await send_inline_outbound(
+            c, outbound_id, timeout=_FULFILLMENT_INLINE_SEND_TIMEOUT_SECONDS
+        )
+    except Exception as exc:
+        _log_notify_failure(order_gid, exc)
 
 
 async def _resolve_product_image(c: Container, product_gid: str | None) -> str | None:

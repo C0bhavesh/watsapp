@@ -35,7 +35,10 @@ def payload(gid: str = "gid://shopify/Order/1") -> dict:
         "name": "tavas3733",
         "order_number": 3733,
         "email": "c@example.com",
-        "customer": {"first_name": "Suman", "last_name": "B"},
+        "customer": {
+            "admin_graphql_api_id": "gid://shopify/Customer/9001",
+            "first_name": "Suman", "last_name": "B",
+        },
         "shipping_address": {"phone": "+919664290413"},
         "tags": "COD",
         "payment_gateway_names": ["Cash on Delivery (COD)"],
@@ -342,10 +345,153 @@ async def test_fulfillments_topic_populates_the_mirror(topic: str) -> None:
     assert len(order.fulfillments) == 1
     assert order.fulfillments[0].tracking_number == "AWB0099887766"
     assert order.fulfillments[0].tracking_company == "Delhivery"
-    # The fulfillment delivery itself must NOT queue an outbound (only the original orders/create
-    # push exists). A second queued row here would re-send the confirmation template.
+    # The fulfillment mirror write itself never re-sends the ORIGINAL confirmation template -- but
+    # it DOES now queue its own order_shipped notification (this feature), since the default
+    # fulfillment_payload() already carries tracking info.
     store = get_container().ingest
-    assert list(store.outbound) == [f"order_created:{order_gid}"]  # type: ignore[attr-defined]
+    fulfillment_gid = fulfillment_payload(order_gid).get("admin_graphql_api_id")
+    assert set(store.outbound) == {  # type: ignore[attr-defined]
+        f"order_created:{order_gid}", f"fulfillment_shipped:{fulfillment_gid}",
+    }
+
+
+async def test_fulfillment_with_tracking_sends_order_shipped() -> None:
+    order_gid = "gid://shopify/Order/500"
+    body = json.dumps(payload(order_gid)).encode()
+    await post(body, headers(body, webhook_id="wh-o-500"))
+
+    fulfillment_gid = "gid://shopify/Fulfillment/500"
+    fbody = json.dumps(
+        fulfillment_payload(order_gid, fulfillment_gid)
+    ).encode()
+    resp = await post(fbody, headers(fbody, topic="fulfillments/create", webhook_id="wh-f-500"))
+
+    assert resp.status_code == 200
+    store = get_container().ingest
+    assert f"fulfillment_shipped:{fulfillment_gid}" in store.outbound  # type: ignore[attr-defined]
+    draft = store.outbound[f"fulfillment_shipped:{fulfillment_gid}"]  # type: ignore[attr-defined]
+    params = json.loads(draft.payload_json)
+    assert params["template"] == "order_shipped"
+    assert params["language"] == "en"
+    assert params["body_params"] == [
+        "Suman B", "tavas3733", "Delhivery", "https://www.delhivery.com/track/AWB0099887766",
+    ]
+    assert "buttons" not in params
+    # No delivered notification -- shipment_status is absent from this payload.
+    assert f"fulfillment_delivered:{fulfillment_gid}" not in store.outbound  # type: ignore[attr-defined]
+
+
+async def test_fulfillment_replay_does_not_re_enqueue_shipped() -> None:
+    # A fulfillments/update replay with tracking ALREADY present must not queue a second
+    # order_shipped -- the dedupe key (fulfillment_gid-keyed) is the entire guarantee.
+    order_gid = "gid://shopify/Order/501"
+    body = json.dumps(payload(order_gid)).encode()
+    await post(body, headers(body, webhook_id="wh-o-501"))
+
+    fulfillment_gid = "gid://shopify/Fulfillment/501"
+    fbody = json.dumps(fulfillment_payload(order_gid, fulfillment_gid)).encode()
+    await post(fbody, headers(fbody, topic="fulfillments/create", webhook_id="wh-f-501a"))
+    await post(fbody, headers(fbody, topic="fulfillments/update", webhook_id="wh-f-501b"))
+
+    store = get_container().ingest
+    shipped_rows = [
+        k for k in store.outbound  # type: ignore[attr-defined]
+        if k == f"fulfillment_shipped:{fulfillment_gid}"
+    ]
+    assert len(shipped_rows) == 1
+
+
+async def test_fulfillment_shipment_status_delivered_sends_order_delivered() -> None:
+    order_gid = "gid://shopify/Order/502"
+    body = json.dumps(payload(order_gid)).encode()
+    await post(body, headers(body, webhook_id="wh-o-502"))
+
+    fulfillment_gid = "gid://shopify/Fulfillment/502"
+    fpayload = fulfillment_payload(order_gid, fulfillment_gid)
+    fpayload["shipment_status"] = "delivered"
+    fbody = json.dumps(fpayload).encode()
+    resp = await post(fbody, headers(fbody, topic="fulfillments/update", webhook_id="wh-f-502"))
+
+    assert resp.status_code == 200
+    store = get_container().ingest
+    assert f"fulfillment_delivered:{fulfillment_gid}" in store.outbound  # type: ignore[attr-defined]
+    draft = store.outbound[f"fulfillment_delivered:{fulfillment_gid}"]  # type: ignore[attr-defined]
+    params = json.loads(draft.payload_json)
+    assert params["template"] == "order_delivered"
+    assert params["language"] == "en"
+    assert params["body_params"] == ["Suman B", "tavas3733"]
+    assert "buttons" not in params
+    # This payload ALSO has tracking info (fulfillment_payload's defaults) -> shipped fires too.
+    assert f"fulfillment_shipped:{fulfillment_gid}" in store.outbound  # type: ignore[attr-defined]
+
+
+async def test_fulfillment_non_delivered_shipment_status_does_not_send_delivered() -> None:
+    order_gid = "gid://shopify/Order/503"
+    body = json.dumps(payload(order_gid)).encode()
+    await post(body, headers(body, webhook_id="wh-o-503"))
+
+    fulfillment_gid = "gid://shopify/Fulfillment/503"
+    fpayload = fulfillment_payload(order_gid, fulfillment_gid)
+    fpayload["shipment_status"] = "in_transit"
+    fbody = json.dumps(fpayload).encode()
+    await post(fbody, headers(fbody, topic="fulfillments/update", webhook_id="wh-f-503"))
+
+    store = get_container().ingest
+    assert f"fulfillment_delivered:{fulfillment_gid}" not in store.outbound  # type: ignore[attr-defined]
+
+
+async def test_fulfillment_no_mirrored_order_skips_notification() -> None:
+    # A fulfillment for an order this bot never saw orders/create for -- no mirror row, no
+    # notification (never a 500; the webhook still acks 200 normally).
+    order_gid = "gid://shopify/Order/999999"  # deliberately never posted via orders/create
+    fulfillment_gid = "gid://shopify/Fulfillment/999999"
+    fbody = json.dumps(fulfillment_payload(order_gid, fulfillment_gid)).encode()
+    resp = await post(fbody, headers(fbody, topic="fulfillments/create", webhook_id="wh-f-999999"))
+
+    assert resp.status_code == 200
+    store = get_container().ingest
+    assert f"fulfillment_shipped:{fulfillment_gid}" not in store.outbound  # type: ignore[attr-defined]
+
+
+async def test_split_shipment_fulfillments_get_independent_notifications() -> None:
+    order_gid = "gid://shopify/Order/504"
+    body = json.dumps(payload(order_gid)).encode()
+    await post(body, headers(body, webhook_id="wh-o-504"))
+
+    gid_a = "gid://shopify/Fulfillment/504a"
+    gid_b = "gid://shopify/Fulfillment/504b"
+    fbody_a = json.dumps(fulfillment_payload(order_gid, gid_a)).encode()
+    fbody_b = json.dumps(fulfillment_payload(order_gid, gid_b)).encode()
+    await post(fbody_a, headers(fbody_a, topic="fulfillments/create", webhook_id="wh-f-504a"))
+    await post(fbody_b, headers(fbody_b, topic="fulfillments/create", webhook_id="wh-f-504b"))
+
+    store = get_container().ingest
+    assert f"fulfillment_shipped:{gid_a}" in store.outbound  # type: ignore[attr-defined]
+    assert f"fulfillment_shipped:{gid_b}" in store.outbound  # type: ignore[attr-defined]
+
+
+async def test_fulfillment_notification_failure_still_acks_200(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A DB error while resolving the order / enqueuing the notification must degrade to
+    # "notification not sent, logged" -- never a 500 on a signed delivery (which would burn
+    # Shopify's 19-failure retry budget and can delete the subscription).
+    order_gid = "gid://shopify/Order/505"
+    body = json.dumps(payload(order_gid)).encode()
+    await post(body, headers(body, webhook_id="wh-o-505"))
+
+    store = get_container().ingest
+
+    async def boom(gid: object) -> object:
+        raise RuntimeError("mirror read unavailable")
+
+    monkeypatch.setattr(store, "get_mirrored_order", boom)
+    fulfillment_gid = "gid://shopify/Fulfillment/505"
+    fbody = json.dumps(fulfillment_payload(order_gid, fulfillment_gid)).encode()
+    resp = await post(fbody, headers(fbody, topic="fulfillments/create", webhook_id="wh-f-505"))
+
+    assert resp.status_code == 200
+    assert f"fulfillment_shipped:{fulfillment_gid}" not in store.outbound  # type: ignore[attr-defined]
 
 
 async def test_fulfillments_malformed_payload_ignored() -> None:

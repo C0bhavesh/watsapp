@@ -63,7 +63,7 @@ class FakeSender:
 
 
 async def _seed_row(gid: str, phone: str = PHONE, payload: dict[str, object] | None = None,
-                    dedupe_key: str | None = None) -> None:
+                    dedupe_key: str | None = None) -> int | None:
     c = get_container()
     payload = payload or {
         "template": "cod_confirmation", "language": "en",
@@ -84,7 +84,8 @@ async def _seed_row(gid: str, phone: str = PHONE, payload: dict[str, object] | N
         dedupe_key=dedupe_key or f"order_created:{gid}", kind="order_confirmation",
         phone_e164=phone, payload_json=json.dumps(payload),
     )
-    await c.ingest.ingest_order_created(f"wh-{gid}", "orders/create", mapping, draft)
+    result = await c.ingest.ingest_order_created(f"wh-{gid}", "orders/create", mapping, draft)
+    return result.outbound_id
 
 
 def _install_sender(monkeypatch: pytest.MonkeyPatch, sender: FakeSender) -> None:
@@ -293,6 +294,30 @@ async def test_send_one_outbound_inline_uses_a_short_distinct_timeout(
 
     assert sender.calls[0]["timeout"] == _INLINE_SEND_TIMEOUT_SECONDS
     assert _INLINE_SEND_TIMEOUT_SECONDS < 20.0  # genuinely shorter than the cron default
+
+
+async def test_send_inline_outbound_accepts_a_timeout_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Fulfillment notifications (Task 3) pass a SMALLER timeout than the order-confirmation inline
+    # send's default, since up to two of them (shipped + delivered) can fire in one webhook
+    # invocation and neither has an image-fetch step ahead of it. The default (no override) must
+    # stay IDENTICAL to today's behavior for the order-confirmation call site.
+    from app.jobs.outbox_drain import send_inline_outbound
+
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    gid = "gid://shopify/Order/1"
+    # send_inline_outbound claims the row by id itself, so hand it the just-queued row's id
+    # directly (do NOT pre-claim via claim_queued_outbound, which would leave nothing to claim).
+    outbound_id = await _seed_row(gid)
+    sender = FakeSender(SendResult(ok=True, status_code=200, wamid="w", error=None))
+    _install_sender(monkeypatch, sender)
+
+    outcome = await send_inline_outbound(c, outbound_id, timeout=1.5)
+
+    assert outcome == "sent"
+    assert sender.calls[0]["timeout"] == 1.5
 
 
 async def test_send_mode_off_short_circuits(monkeypatch: pytest.MonkeyPatch) -> None:

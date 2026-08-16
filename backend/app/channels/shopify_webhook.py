@@ -11,6 +11,7 @@ from app.channels.copy import EMPTY_PARAM_PLACEHOLDER
 from app.channels.shopify_orders import (
     choose_language,
     clip,
+    customer_display_name,
     customer_from_webhook_payload,
     fulfillment_from_webhook_payload,
     is_eligible_for_push,
@@ -47,6 +48,19 @@ TEMPLATE_LANGUAGE = "en"
 # _resolve_product_image and the resolution call site.
 _IMAGE_FETCH_TIMEOUT_SECONDS = 1.0
 MAX_WEBHOOK_BODY_BYTES = 1_048_576
+
+TEMPLATE_NAME_SHIPPED = "order_shipped"
+TEMPLATE_NAME_DELIVERED = "order_delivered"
+# Both Meta-approved in `en` ONLY (checked live during planning, same situation as every other
+# template this app sends) -- pinned regardless of the order's detected language.
+FULFILLMENT_TEMPLATE_LANGUAGE = "en"
+# Bounds each fulfillment-notification inline send. Smaller than the order-confirmation inline
+# send's _INLINE_SEND_TIMEOUT_SECONDS (3.0s in outbox_drain.py) because up to TWO of these can fire
+# in one webhook invocation (shipped AND delivered both newly true in the same event) and neither
+# has an image-fetch step ahead of it (unlike cod_confirmation) -- 2.0 + 2.0 = 4.0s worst case
+# combined, matching the same "leaves real margin under Shopify's 5s ack ceiling" precedent already
+# established for the order-confirmation inline path.
+_FULFILLMENT_INLINE_SEND_TIMEOUT_SECONDS = 2.0
 
 def _topic_header_name(topic: str) -> str:
     """GraphQL subscription enum -> the X-Shopify-Topic header form.
@@ -131,6 +145,85 @@ async def _mirror_fulfillment(
         )
         return False
     return True
+
+
+async def _notify_fulfillment_events(
+    c: Container, order_gid: str, fulfillment: Fulfillment, raw_payload: dict  # type: ignore[type-arg]
+) -> None:
+    """Best-effort: enqueue+inline-send order_shipped/order_delivered when newly triggered by this
+    event. Never raises, never blocks the webhook ack -- any failure here degrades to "notification
+    not sent this time", never a 500 (mirrors _mirror_fulfillment's own posture).
+
+    Shipped = this fulfillment now has both a tracking company AND a tracking number/url (checked
+    on every create/update event; the per-fulfillment dedupe key, not an in-code flag, is what
+    prevents re-sending on a replay). Delivered = the RAW webhook payload's shipment_status is
+    exactly "delivered" (Shopify's own enum, confirmed present and reliable for this store's
+    courier via a real production payload captured during planning -- read directly from
+    raw_payload since fulfillment_from_webhook_payload's Fulfillment model intentionally does not
+    carry this field, see fulfillment_from_webhook_payload's own docstring).
+    """
+    is_shipped = bool(fulfillment.tracking_company) and bool(
+        fulfillment.tracking_number or fulfillment.tracking_url
+    )
+    is_delivered = raw_payload.get("shipment_status") == "delivered"
+    if not is_shipped and not is_delivered:
+        return
+    try:
+        order = await c.ingest.get_mirrored_order(order_gid)
+        phone = order.best_phone() if order is not None else None
+        if order is None or phone is None:
+            logger.info("fulfillment notify: no mirrored order/phone for %s; skipped", order_gid)
+            return
+        name = customer_display_name(order)
+        if is_shipped:
+            await _enqueue_and_send_fulfillment_notification(
+                c,
+                dedupe_key=f"fulfillment_shipped:{fulfillment.gid}",
+                phone=phone,
+                template=TEMPLATE_NAME_SHIPPED,
+                body_params=[
+                    name,
+                    order.name,
+                    fulfillment.tracking_company or EMPTY_PARAM_PLACEHOLDER,
+                    fulfillment.tracking_url
+                    or fulfillment.tracking_number
+                    or EMPTY_PARAM_PLACEHOLDER,
+                ],
+            )
+        if is_delivered:
+            await _enqueue_and_send_fulfillment_notification(
+                c,
+                dedupe_key=f"fulfillment_delivered:{fulfillment.gid}",
+                phone=phone,
+                template=TEMPLATE_NAME_DELIVERED,
+                body_params=[name, order.name],
+            )
+    except Exception as exc:
+        # Log only the exception TYPE, never the rendered exception/traceback (2026-08-13
+        # error_learning): a store/enqueue error's text can echo the fulfillment's tracking
+        # number/URL, which must not reach the logs. A failure here must degrade to "notification
+        # not sent this time", never a 500 on a signed delivery (which would burn Shopify's
+        # 19-failure retry budget) -- matching _mirror_fulfillment's own posture, as promised in
+        # this function's docstring.
+        logger.error(
+            "fulfillment notify failed: gid=%s type=%s", order_gid, type(exc).__name__
+        )
+
+
+async def _enqueue_and_send_fulfillment_notification(
+    c: Container, dedupe_key: str, phone: str, template: str, body_params: list[str]
+) -> None:
+    draft = OutboundDraft(
+        dedupe_key=dedupe_key,
+        kind=dedupe_key.split(":", 1)[0],
+        phone_e164=phone,
+        payload_json=json.dumps(
+            {"template": template, "language": FULFILLMENT_TEMPLATE_LANGUAGE,
+             "body_params": body_params}
+        ),
+    )
+    outbound_id = await c.ingest.enqueue_outbound(draft)
+    await send_inline_outbound(c, outbound_id, timeout=_FULFILLMENT_INLINE_SEND_TIMEOUT_SECONDS)
 
 
 async def _resolve_product_image(c: Container, product_gid: str | None) -> str | None:
@@ -281,9 +374,9 @@ async def shopify_webhook(request: Request) -> Response:
         if parsed is None:
             return JSONResponse({"ok": True, "ignored": True})
         order_gid, fulfillment = parsed
-        return JSONResponse(
-            {"ok": True, "ignored": not await _mirror_fulfillment(c, order_gid, fulfillment)}
-        )
+        mirrored = await _mirror_fulfillment(c, order_gid, fulfillment)
+        await _notify_fulfillment_events(c, order_gid, fulfillment, payload)
+        return JSONResponse({"ok": True, "ignored": not mirrored})
 
     # Explicit, not an implicit else: HANDLED_TOPICS is DERIVED from REQUIRED_TOPICS, so a
     # future subscription topic passes the gate above automatically. Falling through would run

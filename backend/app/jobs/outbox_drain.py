@@ -340,8 +340,12 @@ async def run_outbox_drain(c: Container) -> dict[str, object]:
     }
 
 
-async def send_inline_outbound(c: Container, outbound_id: int | None) -> str | None:
-    """Send the JUST-QUEUED order-confirmation row inline, bounded by a short timeout.
+async def send_inline_outbound(
+    c: Container, outbound_id: int | None, timeout: float = _INLINE_SEND_TIMEOUT_SECONDS,
+) -> str | None:
+    """Send the JUST-QUEUED row inline, bounded by ``timeout`` (defaults to
+    ``_INLINE_SEND_TIMEOUT_SECONDS``, the order-confirmation call site's existing behavior,
+    unchanged for any caller that doesn't pass an override).
 
     Owner-directed reversal (ADR-001 amendment, 2026-08-15): the external scheduler that drove
     the outbox drain stopped working, so the primary confirmation send now happens inline in the
@@ -385,8 +389,8 @@ async def send_inline_outbound(c: Container, outbound_id: int | None) -> str | N
         # the ack past the budget. A timeout raises TimeoutError, caught below like any other
         # failure (row stays recoverable for the backstop drain; never propagates past the ack).
         return await asyncio.wait_for(
-            send_one_outbound(c, cfg, controls, claim, timeout=_INLINE_SEND_TIMEOUT_SECONDS),
-            timeout=_INLINE_SEND_TIMEOUT_SECONDS,
+            send_one_outbound(c, cfg, controls, claim, timeout=timeout),
+            timeout=timeout,
         )
     except Exception as exc:
         logger.warning(

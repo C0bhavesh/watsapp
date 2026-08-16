@@ -425,6 +425,128 @@ async def test_legacy_old_shape_payload_is_undeliverable(
     assert len(undeliverable_logs) == 1
 
 
+async def test_empty_dict_body_params_is_undeliverable(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # _parse_payload's empty-dict branch: a NAMED body_params of {} carries no placeholder values,
+    # so the template can never render -> terminal undeliverable, never sent. This gates the
+    # follow-up payload writer: an accidental drop of the `if not raw_body_params` empty-check would
+    # let an empty dict through, and this test would catch it.
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    gid = "gid://shopify/Order/71"
+    await _seed_row(gid, payload={
+        "template": "cod_confirmation", "language": "en", "body_params": {},
+    })
+    sender = FakeSender([])
+    _install_sender(monkeypatch, sender)
+
+    caplog.set_level(logging.WARNING, logger="app.jobs.outbox_drain")
+    result = await run_outbox_drain(c)
+
+    assert result["undeliverable"] == 1
+    assert sender.calls == []
+    views = {v.dedupe_key: v for v in await c.ingest.recent_outbound(10)}
+    assert views[f"order_created:{gid}"].state == "undeliverable"
+    undeliverable_logs = [
+        r for r in caplog.records
+        if "undeliverable" in r.getMessage() and "payload" in r.getMessage()
+    ]
+    assert len(undeliverable_logs) == 1
+
+
+async def test_empty_list_body_params_is_undeliverable(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # _parse_payload's empty-list branch: a POSITIONAL body_params of [] carries no {{n}} values,
+    # so the template can never render -> terminal undeliverable, never sent. Distinct code path
+    # from the empty-dict case above (list `if not raw_body_params`, not the dict one).
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    gid = "gid://shopify/Order/72"
+    await _seed_row(gid, payload={
+        "template": "order_shipped", "language": "en", "body_params": [],
+    })
+    sender = FakeSender([])
+    _install_sender(monkeypatch, sender)
+
+    caplog.set_level(logging.WARNING, logger="app.jobs.outbox_drain")
+    result = await run_outbox_drain(c)
+
+    assert result["undeliverable"] == 1
+    assert sender.calls == []
+    views = {v.dedupe_key: v for v in await c.ingest.recent_outbound(10)}
+    assert views[f"order_created:{gid}"].state == "undeliverable"
+    undeliverable_logs = [
+        r for r in caplog.records
+        if "undeliverable" in r.getMessage() and "payload" in r.getMessage()
+    ]
+    assert len(undeliverable_logs) == 1
+
+
+async def test_dict_body_params_non_string_value_is_undeliverable(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # _parse_payload's dict non-string-value branch: a NAMED body_params whose values are not all
+    # strings ({"x": 1}) fails the `isinstance(v, str)` all(...) guard -> terminal undeliverable.
+    # Meta placeholder values must be strings; an accidental drop of the isinstance guard would send
+    # a malformed payload, and this test would catch it. Distinct path from the empty-dict case.
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    gid = "gid://shopify/Order/73"
+    await _seed_row(gid, payload={
+        "template": "cod_confirmation", "language": "en", "body_params": {"x": 1},
+    })
+    sender = FakeSender([])
+    _install_sender(monkeypatch, sender)
+
+    caplog.set_level(logging.WARNING, logger="app.jobs.outbox_drain")
+    result = await run_outbox_drain(c)
+
+    assert result["undeliverable"] == 1
+    assert sender.calls == []
+    views = {v.dedupe_key: v for v in await c.ingest.recent_outbound(10)}
+    assert views[f"order_created:{gid}"].state == "undeliverable"
+    undeliverable_logs = [
+        r for r in caplog.records
+        if "undeliverable" in r.getMessage() and "payload" in r.getMessage()
+    ]
+    assert len(undeliverable_logs) == 1
+
+
+async def test_list_body_params_non_string_entry_is_undeliverable(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # _parse_payload's list non-string-entry branch: a POSITIONAL body_params whose entries are not
+    # all strings ([1, 2]) fails the `isinstance(v, str)` all(...) guard -> terminal undeliverable.
+    # Distinct code path from the dict non-string-value case (list all(...), not the dict one).
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    gid = "gid://shopify/Order/74"
+    await _seed_row(gid, payload={
+        "template": "order_shipped", "language": "en", "body_params": [1, 2],
+    })
+    sender = FakeSender([])
+    _install_sender(monkeypatch, sender)
+
+    caplog.set_level(logging.WARNING, logger="app.jobs.outbox_drain")
+    result = await run_outbox_drain(c)
+
+    assert result["undeliverable"] == 1
+    assert sender.calls == []
+    views = {v.dedupe_key: v for v in await c.ingest.recent_outbound(10)}
+    assert views[f"order_created:{gid}"].state == "undeliverable"
+    undeliverable_logs = [
+        r for r in caplog.records
+        if "undeliverable" in r.getMessage() and "payload" in r.getMessage()
+    ]
+    assert len(undeliverable_logs) == 1
+
+
 async def test_media_error_131052_retries_image_less(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

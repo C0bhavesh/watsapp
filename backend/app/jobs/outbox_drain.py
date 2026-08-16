@@ -227,7 +227,13 @@ async def send_one_outbound(
         await c.ingest.mark_outbound_undeliverable(row.id, "bad_payload")
         return OUTCOME_UNDELIVERABLE
 
-    buttons = [f"order:confirm:{gid}", f"order:cancel:{gid}"]
+    # prepaid_order has no BUTTONS component approved on the WABA (informational only, no
+    # Confirm/Cancel step for a prepaid customer) -- only cod_confirmation gets the quick-reply
+    # buttons. Everything else about the send (body params, header image, retry) is identical.
+    buttons = (
+        [f"order:confirm:{gid}", f"order:cancel:{gid}"] if payload.template == "cod_confirmation"
+        else []
+    )
     # The cod_confirmation template uses NAMED body params (name -> value); the header image (the
     # live product photo) is pre-resolved at ingest and carried in payload.image_url, or None (fetch
     # failed) -> send with no header rather than block the confirmation.

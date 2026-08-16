@@ -114,6 +114,35 @@ async def test_send_one_outbound_sends_and_transitions(monkeypatch: pytest.Monke
     assert mappings[gid].status == "template_sent"
 
 
+async def test_prepaid_order_row_sends_with_no_buttons(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.admin.controls import load_controls
+    from app.channels.whatsapp_config import load_whatsapp_config
+    from app.jobs.outbox_drain import send_one_outbound
+
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    gid = "gid://shopify/Order/2"
+    await _seed_row(gid, payload={
+        "template": "prepaid_order", "language": "en",
+        "customer_name": "Suman", "order_id": "tavas3734",
+        "product_name": "Blue Kurti", "product_color": "Blue", "product_size": "M",
+        "product_amount": "949",
+    })
+    sender = FakeSender(SendResult(ok=True, status_code=200, wamid="wamid.2", error=None))
+    _install_sender(monkeypatch, sender)
+
+    controls = await load_controls(c.config)
+    cfg = await load_whatsapp_config(c.config)
+    assert cfg is not None
+    (row,) = await c.ingest.claim_queued_outbound()
+
+    outcome = await send_one_outbound(c, cfg, controls, row)
+
+    assert outcome == "sent"
+    assert sender.calls[0]["template"] == "prepaid_order"
+    assert sender.calls[0]["button_payloads"] == []
+
+
 async def test_send_one_outbound_default_timeout_is_the_send_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

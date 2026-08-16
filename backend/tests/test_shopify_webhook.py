@@ -103,6 +103,24 @@ async def test_orders_create_ingests_and_queues() -> None:
     assert draft.phone_e164 == "+919664290413"
 
 
+async def test_prepaid_order_routes_to_prepaid_template() -> None:
+    # A prepaid order is only push-eligible under an "all"/"all_prepaid_no_buttons" policy; the
+    # default "cod_only" would filter it out before routing (is_eligible_for_push), so set a policy
+    # that pushes prepaid orders to actually exercise the COD-vs-prepaid template selection.
+    await get_container().config.set_plain("push_policy", "all")
+    body_dict = payload()
+    body_dict["tags"] = ""  # no "cod" tag
+    body_dict["payment_gateway_names"] = ["Razorpay"]  # not a COD gateway
+    body = json.dumps(body_dict).encode()
+    resp = await post(body, headers(body))
+    assert resp.status_code == 200
+    store = get_container().ingest
+    draft = store.outbound["order_created:gid://shopify/Order/1"]  # type: ignore[attr-defined]
+    params = json.loads(draft.payload_json)
+    assert params["template"] == "prepaid_order"
+    assert params["language"] == "en"
+
+
 def _payload_with_product(gid: str = "gid://shopify/Order/img1") -> dict:
     p = payload(gid)
     p["line_items"] = [

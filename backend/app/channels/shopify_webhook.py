@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+from app.channels.copy import EMPTY_PARAM_PLACEHOLDER
 from app.channels.shopify_orders import (
     choose_language,
     clip,
@@ -28,17 +29,15 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-TEMPLATE_NAME = "cod_confirmation"
-# cod_confirmation is Meta-approved in `en` ONLY on the new WABA, so the template send is pinned to
-# en regardless of the customer's detected locale — sending it as hi/gu (no such approved locale)
-# would make Meta reject every non-en order, reintroducing the exact "every order fails to send"
-# bug this change fixes. The customer's own language (mapping.language) still drives the free-form
-# conversation replies; only this ONE template send is en. (Owner/client note: to localise the
-# confirmation, hi/gu versions of cod_confirmation must first be approved in Meta.)
+TEMPLATE_NAME_COD = "cod_confirmation"
+TEMPLATE_NAME_PREPAID = "prepaid_order"
+# Both are Meta-approved in `en` ONLY on the new WABA, so the template send is pinned to en
+# regardless of the customer's detected locale — sending hi/gu (no such approved locale) would
+# make Meta reject the order, reintroducing the exact "every order fails to send" bug this change
+# fixes. The customer's own language (mapping.language) still drives the free-form conversation
+# replies; only this ONE template send is en. (Owner/client note: to localise the confirmation,
+# hi/gu versions of both templates must first be approved in Meta.)
 TEMPLATE_LANGUAGE = "en"
-# Meta rejects an empty named body parameter, so any missing product/order field degrades to this
-# placeholder rather than an empty string (keeps the send valid; Q19 degrade-gracefully posture).
-_EMPTY_PARAM_PLACEHOLDER = "-"
 # Bound the live product-image fetch on the orders/create ack path. Best-effort and purely
 # cosmetic: on timeout/failure the confirmation still sends, just without a header (Q19a). Kept
 # deliberately SMALL (1.0s) because it runs BEFORE the ingest DB write AND before the inline send's
@@ -331,15 +330,16 @@ async def shopify_webhook(request: Request) -> Response:
         # headroom, and a rare overrun is a SAFE idempotent Shopify retry (webhook_id dedupe -> no
         # duplicate row; the inline send's claim-by-id -> no double send).
         image_url = await _resolve_product_image(c, incoming.product_gid)
+        template_name = TEMPLATE_NAME_COD if incoming.is_cod() else TEMPLATE_NAME_PREPAID
         template_params: dict[str, str] = {
-            "template": TEMPLATE_NAME,
+            "template": template_name,
             "language": TEMPLATE_LANGUAGE,
-            "customer_name": customer_name or _EMPTY_PARAM_PLACEHOLDER,
-            "order_id": order_name or _EMPTY_PARAM_PLACEHOLDER,
-            "product_name": incoming.product_name or _EMPTY_PARAM_PLACEHOLDER,
-            "product_color": incoming.product_color or _EMPTY_PARAM_PLACEHOLDER,
-            "product_size": incoming.product_size or _EMPTY_PARAM_PLACEHOLDER,
-            "product_amount": amount or _EMPTY_PARAM_PLACEHOLDER,
+            "customer_name": customer_name or EMPTY_PARAM_PLACEHOLDER,
+            "order_id": order_name or EMPTY_PARAM_PLACEHOLDER,
+            "product_name": incoming.product_name or EMPTY_PARAM_PLACEHOLDER,
+            "product_color": incoming.product_color or EMPTY_PARAM_PLACEHOLDER,
+            "product_size": incoming.product_size or EMPTY_PARAM_PLACEHOLDER,
+            "product_amount": amount or EMPTY_PARAM_PLACEHOLDER,
         }
         # Only carry image_url when resolved: its absence is the drain/inline sender's signal to
         # send with no header (a stored non-https value would be dropped there anyway).

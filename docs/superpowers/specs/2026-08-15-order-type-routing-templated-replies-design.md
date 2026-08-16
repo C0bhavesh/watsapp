@@ -93,6 +93,14 @@ Every other reply in `order_actions.py` (`cancel_too_late`, `already_cancelled`,
 template covers those states, and building/approving new ones for every edge case is out of
 scope.
 
+**Language pin (grounding fact, checked against the live WABA during planning):** `cod_confirmmsg`
+is Meta-approved in `en` only (same as `cod_confirmation`/`prepaid_order`, Q19c). The template
+send is pinned to `"en"` regardless of the customer's detected order language — sending the
+order's actual language (e.g. `hi`) would be rejected by Meta, reintroducing the Q19 "every order
+fails to send" bug for that call site. This does not change how the order's language is detected
+or used elsewhere (free-form replies still use it); it only means this one template send is
+English, matching the existing `cod_confirmation` precedent exactly.
+
 ### 3. Cancel confirmation → `cod_cancel`, fired from `reconcile.py`
 
 `order_actions.py`'s cancel flow is **not modified** — the two-phase ask, the provisional
@@ -103,8 +111,11 @@ the cancellation.
 
 In `jobs/reconcile.py::run_reconcile_cancels`, right after `add_tags(auth, controls.tags.cancelled)`
 and `set_mapping_status(gid, "cancelled")` succeed (i.e., cancellation is now a confirmed fact),
-add a best-effort `send_template(..., "cod_cancel", ...)` call using `auth.verified_phone` and
-`choose_language(order.customer_locale, ...)`. `cod_cancel` also takes two positional params
+add a best-effort `send_template(..., "cod_cancel", ...)` call using `auth.verified_phone`. Like `cod_confirmmsg` above, `cod_cancel` is Meta-approved in `en`
+only (checked against the live WABA during planning), so this send is also pinned to `"en"` —
+`choose_language`/`order.customer_locale` are NOT used for this template send (they remain
+relevant only where the codebase already uses them, e.g. `order_actions.py`'s plain-text replies).
+`cod_cancel` also takes two positional params
 (`{{1}}` name, `{{2}}` order number) — `order.name` for the second; for the first,
 `order.customer.first_name` + `order.customer.last_name` if present, else the literal fallback
 `"-"` (matching the exact missing-field fallback Q19 already established for `cod_confirmation`'s

@@ -104,10 +104,16 @@ class Sends:
     def __init__(self) -> None:
         self.texts: list[tuple[str, str]] = []
         self.buttons: list[tuple[str, str, list[tuple[str, str]]]] = []
+        self.templates: list[tuple[str, str, str, list[str]]] = []
 
     @property
     def last_text(self) -> str:
         return self.texts[-1][1]
+
+    @property
+    def last_template(self) -> tuple[str, str, str, list[str]]:
+        """(to, template_name, language, body_params)."""
+        return self.templates[-1]
 
 
 @pytest.fixture
@@ -122,8 +128,16 @@ def sends(monkeypatch: pytest.MonkeyPatch) -> Sends:
         captured.buttons.append((to, body_text, list(buttons)))
         return SendResult(ok=True, status_code=200, wamid="w", error=None)
 
+    async def _send_template(
+        http, cfg, to, template_name, language, body_params, button_payloads=(),
+        header_image_url=None, timeout=20.0,
+    ) -> SendResult:
+        captured.templates.append((to, template_name, language, list(body_params)))
+        return SendResult(ok=True, status_code=200, wamid="w", error=None)
+
     monkeypatch.setattr(order_actions, "send_text", _send_text)
     monkeypatch.setattr(order_actions, "send_buttons", _send_buttons)
+    monkeypatch.setattr(order_actions, "send_template", _send_template)
     return captured
 
 
@@ -257,7 +271,7 @@ async def test_allowlist_hit_full_confirm_behavior(master_key: str, sends: Sends
     await dispatch_button(c, _button(f"order:confirm:{GID}"))
     assert shopify.add_tags_calls == [(GID, ["confirmed"])]
     assert c.ingest._mapping_status[GID] == "confirmed"
-    assert sends.last_text == copy_for("confirm_success", "en")
+    assert sends.last_template == (OWNER, "cod_confirmmsg", "en", ["-", "tavas1"])
 
 
 # --- confirm ---
@@ -273,7 +287,7 @@ async def test_confirm_tags_records_and_status(master_key: str, sends: Sends) ->
     assert action["actor_wa_id"] == OWNER
     assert action["source_wamid"] == "m1"
     assert c.ingest._mapping_status[GID] == "confirmed"
-    assert sends.last_text == copy_for("confirm_success", "en")
+    assert sends.last_template == (OWNER, "cod_confirmmsg", "en", ["-", "tavas1"])
 
 
 async def test_confirm_idempotent_on_already_confirmed(master_key: str, sends: Sends) -> None:
@@ -282,7 +296,7 @@ async def test_confirm_idempotent_on_already_confirmed(master_key: str, sends: S
     await dispatch_button(c, _button(f"order:confirm:{GID}"))
     assert shopify.add_tags_calls == []  # no second mutation
     assert c.ingest.order_actions == []
-    assert sends.last_text == copy_for("already_confirmed", "en")
+    assert sends.last_template == (OWNER, "cod_confirmmsg", "en", ["-", "tavas1"])
 
 
 async def test_confirm_on_cancelled_order_says_already_cancelled(
@@ -472,8 +486,15 @@ async def test_cancel_confirm_transport_error_records_error_row(
 
 # --- language ---
 
-async def test_reply_uses_order_language(master_key: str, sends: Sends) -> None:
+async def test_confirm_template_send_is_pinned_to_en_regardless_of_order_language(
+    master_key: str, sends: Sends
+) -> None:
     shopify = FakeShopify(order=_order(locale="hi-IN"))
     c = await _container(master_key, shopify)
     await dispatch_button(c, _button(f"order:confirm:{GID}"))
-    assert sends.last_text == copy_for("confirm_success", "hi")
+    # cod_confirmmsg is Meta-approved in en only -- the confirm reply is pinned to en even for a
+    # hi-IN order (unlike the OTHER replies in this file, which still use copy_for's language
+    # detection -- this is a deliberate, template-specific exception, not a general regression).
+    _to, template_name, language, _params = sends.last_template
+    assert template_name == "cod_confirmmsg"
+    assert language == "en"

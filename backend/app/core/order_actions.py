@@ -11,13 +11,14 @@ fulfilled/dispatched order refuses. Nothing here ever raises — the signed webh
 
 import json
 import logging
+from collections.abc import Sequence
 
 from app.admin.controls import AdminControls, load_controls
 from app.channels.copy import copy_for
-from app.channels.shopify_orders import choose_language
+from app.channels.shopify_orders import choose_language, customer_display_name
 from app.channels.whatsapp_config import WhatsAppConfig, load_whatsapp_config
 from app.channels.whatsapp_inbound import InboundButton, InboundInteractive
-from app.channels.whatsapp_sender import WhatsAppSendError, send_buttons, send_text
+from app.channels.whatsapp_sender import WhatsAppSendError, send_buttons, send_template, send_text
 from app.core.order_resolver import resolve_by_gid
 from app.core.send_policy import send_decision
 from app.deps import Container
@@ -42,6 +43,11 @@ _MUTATION_AUDIT_ACTION: dict[str, str] = {
     "confirm": "confirm",
     "cancel_confirm": "cancel_requested",
 }
+
+_COD_CONFIRMMSG_TEMPLATE = "cod_confirmmsg"
+# cod_confirmmsg is Meta-approved in `en` ONLY (checked live during planning, same situation as
+# cod_confirmation/prepaid_order, Q19c) -- pinned regardless of the order's detected language.
+_CONFIRM_TEMPLATE_LANGUAGE = "en"
 
 
 def _shopify_error_detail(exc: ShopifyError) -> str | None:
@@ -104,6 +110,16 @@ async def _safe_send_buttons(
         await send_buttons(c.http, cfg, to, body_text, buttons)
     except WhatsAppSendError:
         logger.warning("button dispatch: buttons send failed (transport)")
+
+
+async def _safe_send_template(
+    c: Container, cfg: WhatsAppConfig, to: str, template_name: str, body_params: Sequence[str]
+) -> None:
+    """Send a template reply, swallowing a transport failure so dispatch never raises."""
+    try:
+        await send_template(c.http, cfg, to, template_name, _CONFIRM_TEMPLATE_LANGUAGE, body_params)
+    except WhatsAppSendError:
+        logger.warning("button dispatch: template send failed (transport)")
 
 
 async def dispatch_button(c: Container, event: Event) -> None:
@@ -177,14 +193,17 @@ async def _handle_confirm(
     if order.is_cancelled():
         await _safe_send_text(c, cfg, event.wa_id, copy_for("already_cancelled", lang))
         return
+    confirm_params = [customer_display_name(order), order.name]
     if _has_any_tag(order.tags, controls.tags.confirmed):
         # Idempotent re-tap: the confirmed tag is already on the live order -> no second mutation.
-        await _safe_send_text(c, cfg, event.wa_id, copy_for("already_confirmed", lang))
+        # cod_confirmmsg's wording ("your order has been confirmed successfully") is still accurate
+        # on a re-tap, so both branches converge on the same template send.
+        await _safe_send_template(c, cfg, event.wa_id, _COD_CONFIRMMSG_TEMPLATE, confirm_params)
         return
     await c.shopify.add_tags(auth, controls.tags.confirmed)
     await c.ingest.record_order_action(gid, "confirm", event.wa_id, event.message_id, "ok", None)
     await c.ingest.set_mapping_status(gid, "confirmed")
-    await _safe_send_text(c, cfg, event.wa_id, copy_for("confirm_success", lang))
+    await _safe_send_template(c, cfg, event.wa_id, _COD_CONFIRMMSG_TEMPLATE, confirm_params)
 
 
 async def _handle_cancel_request(

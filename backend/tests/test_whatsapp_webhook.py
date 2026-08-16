@@ -396,8 +396,18 @@ def _wire_real_dispatch(
         sends.append((to, body_text))
         return SendResult(ok=True, status_code=200, wamid="w", error=None)
 
+    async def fake_send_template(
+        http, cfg, to, template_name, language, body_params, button_payloads=(),
+        header_image_url=None, timeout=20.0,
+    ):
+        from app.channels.whatsapp_sender import SendResult
+
+        sends.append((to, template_name))
+        return SendResult(ok=True, status_code=200, wamid="w", error=None)
+
     monkeypatch.setattr("app.core.order_actions.send_text", fake_send_text)
     monkeypatch.setattr("app.core.order_actions.send_buttons", fake_send_buttons)
+    monkeypatch.setattr("app.core.order_actions.send_template", fake_send_template)
     return fake, resolve_calls, sends
 
 

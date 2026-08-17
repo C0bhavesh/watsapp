@@ -21,3 +21,17 @@ def test_controls_panel_js_sends_retention_days(client: TestClient) -> None:
     js = client.get("/admin/ui/admin.js").text
     assert "retention_days" in js
     assert "c-retention" in js
+
+
+def test_chats_panel_present(client: TestClient) -> None:
+    html = client.get("/admin/ui/").text
+    assert 'id="chats-card"' in html
+    assert 'id="chats-list-table"' in html
+    assert 'id="chat-thread"' in html
+
+
+def test_chats_panel_js_calls_the_new_endpoints(client: TestClient) -> None:
+    js = client.get("/admin/ui/admin.js").text
+    assert "/admin/conversations" in js
+    assert "loadChatList" in js
+    assert "loadChatThread" in js

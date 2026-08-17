@@ -330,11 +330,64 @@ async function loadViews() {
 }
 el("views-refresh").addEventListener("click", loadViews);
 
+// ---- chats -----------------------------------------------------------------
+function renderChatEntry(entry) {
+  const div = document.createElement("div");
+  const side = entry.type === "customer_message" ? "bubble-in" : "bubble-out";
+  div.className = "bubble " + side + " bubble-" + entry.type;
+  const label = document.createElement("div");
+  label.className = "bubble-label";
+  label.textContent = entry.type.replace("_", " ");
+  const text = document.createElement("div");
+  text.textContent = entry.text;
+  const ts = document.createElement("div");
+  ts.className = "bubble-ts";
+  ts.textContent = entry.timestamp || "";
+  div.appendChild(label);
+  div.appendChild(text);
+  div.appendChild(ts);
+  return div;
+}
+
+async function loadChatThread(waId) {
+  try {
+    const entries = await api("GET", "/admin/conversations/" + encodeURIComponent(waId));
+    const container = el("chat-thread");
+    container.innerHTML = "";
+    for (const entry of entries) {
+      container.appendChild(renderChatEntry(entry));
+    }
+    setStatus("chats-status", "");
+  } catch (e) { setStatus("chats-status", e.message, "err"); }
+}
+
+async function loadChatList() {
+  try {
+    const threads = await api("GET", "/admin/conversations");
+    const tbody = el("chats-list-table").querySelector("tbody");
+    tbody.innerHTML = "";
+    for (const t of threads) {
+      const tr = document.createElement("tr");
+      tr.style.cursor = "pointer";
+      tr.addEventListener("click", () => loadChatThread(t.user_id));
+      for (const val of [t.user_id, t.last_active_at || "", t.preview || ""]) {
+        const td = document.createElement("td");
+        td.textContent = val;
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    setStatus("chats-status", "");
+  } catch (e) { setStatus("chats-status", e.message, "err"); }
+}
+el("chats-refresh").addEventListener("click", loadChatList);
+
 // ---- boot -----------------------------------------------------------------
 async function loadAll() {
   try {
     await Promise.all([
-      loadShopify(), loadWhatsApp(), loadProviders(), loadKnowledge(), loadControls(), loadViews(),
+      loadShopify(), loadWhatsApp(), loadProviders(), loadKnowledge(), loadControls(),
+      loadViews(), loadChatList(),
     ]);
   } catch (e) { /* individual sections surface their own errors */ }
 }

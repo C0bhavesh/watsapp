@@ -85,6 +85,29 @@ class OutboundView:
 
 
 @dataclass(frozen=True)
+class ConversationSummary:
+    user_id: str
+    last_active_at: str | None
+
+
+@dataclass(frozen=True)
+class OutboundEntry:
+    dedupe_key: str
+    kind: str
+    state: str
+    payload_json: str
+    created_at: str | None
+
+
+@dataclass(frozen=True)
+class OrderActionEntry:
+    order_gid: str
+    action: str
+    result: str
+    created_at: str | None
+
+
+@dataclass(frozen=True)
 class DeletionResult:
     """Row counts removed by a DPDP erasure/retention operation, per phone-bearing table.
 
@@ -179,6 +202,14 @@ class IngestStore(Protocol):
 
     async def get_mapping_phone(self, order_gid: str) -> str | None: ...
 
+    async def find_outbound_by_phone(
+        self, phone_e164: str, limit: int = 100
+    ) -> list[OutboundEntry]: ...
+
+    async def find_order_actions_by_wa_id(
+        self, wa_id: str, limit: int = 100
+    ) -> list[OrderActionEntry]: ...
+
     # Atomically CLAIMS the returned orders: each is flipped out of 'cancel_requested' to a
     # transient in-progress state so two overlapping reconcile runs cannot both claim the same
     # order (and double-send cod_cancel). The caller must finalize each claimed order -- advance
@@ -219,6 +250,14 @@ class ConversationStore(Protocol):
     """Windowed chat history + handoff state per WhatsApp sender."""
 
     async def get_or_create(self, user_id: str) -> int: ...
+
+    # Genuinely read-only: unlike get_or_create, MUST NOT create a conversation row on a miss.
+    # A miss (no conversation for this user_id) returns an empty list.
+    async def find_messages_by_user_id(
+        self, user_id: str, limit: int = 100
+    ) -> list[StoredMessage]: ...
+
+    async def recent_conversations(self, limit: int = 50) -> list[ConversationSummary]: ...
 
     async def recent_messages(self, conversation_id: int, limit: int) -> list[StoredMessage]: ...
 

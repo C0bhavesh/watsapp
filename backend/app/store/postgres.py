@@ -15,12 +15,15 @@ from app.shopify.models import (
     normalize_order_name,
 )
 from app.store.base import (
+    ConversationSummary,
     DeletionResult,
     IngestResult,
     MappingUpsert,
     MappingView,
+    OrderActionEntry,
     OutboundClaim,
     OutboundDraft,
+    OutboundEntry,
     OutboundView,
     StoredMessage,
 )
@@ -656,6 +659,46 @@ class PostgresIngestStore:
             for r in rows
         ]
 
+    async def find_outbound_by_phone(
+        self, phone_e164: str, limit: int = 100
+    ) -> list[OutboundEntry]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT dedupe_key, kind, state, payload_json, created_at"
+                " FROM outbound_messages WHERE phone_e164 = $1"
+                " ORDER BY created_at DESC LIMIT $2",
+                phone_e164, limit,
+            )
+        return [
+            OutboundEntry(
+                dedupe_key=str(r["dedupe_key"]),
+                kind=str(r["kind"]),
+                state=str(r["state"]),
+                payload_json=str(r["payload_json"]),
+                created_at=r["created_at"].isoformat() if r["created_at"] else None,
+            )
+            for r in rows
+        ]
+
+    async def find_order_actions_by_wa_id(
+        self, wa_id: str, limit: int = 100
+    ) -> list[OrderActionEntry]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT order_gid, action, result, created_at FROM order_actions"
+                " WHERE actor_wa_id = $1 ORDER BY created_at DESC LIMIT $2",
+                wa_id, limit,
+            )
+        return [
+            OrderActionEntry(
+                order_gid=str(r["order_gid"]),
+                action=str(r["action"]),
+                result=str(r["result"]),
+                created_at=r["created_at"].isoformat() if r["created_at"] else None,
+            )
+            for r in rows
+        ]
+
     async def find_stale_template_sent(
         self, older_than_minutes: int, max_age_minutes: int
     ) -> list[MappingView]:
@@ -1134,6 +1177,43 @@ class PostgresConversationStore:
                 created_at=r["created_at"].isoformat() if r["created_at"] else None,
             )
             for r in ordered
+        ]
+
+    async def find_messages_by_user_id(
+        self, user_id: str, limit: int = 100
+    ) -> list[StoredMessage]:
+        # Genuinely read-only -- unlike get_or_create, a miss (no conversation row for this
+        # user_id yet) returns an empty list via the JOIN yielding zero rows, never creates one.
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT m.role, m.content, m.created_at FROM messages m"
+                " JOIN conversations c ON c.id = m.conversation_id"
+                " WHERE c.user_id = $1 ORDER BY m.created_at DESC LIMIT $2",
+                user_id, limit,
+            )
+        ordered = list(reversed(rows))
+        return [
+            StoredMessage(
+                role=str(r["role"]),
+                content=str(r["content"]),
+                created_at=r["created_at"].isoformat() if r["created_at"] else None,
+            )
+            for r in ordered
+        ]
+
+    async def recent_conversations(self, limit: int = 50) -> list[ConversationSummary]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT user_id, last_active_at FROM conversations"
+                " ORDER BY last_active_at DESC LIMIT $1",
+                limit,
+            )
+        return [
+            ConversationSummary(
+                user_id=str(r["user_id"]),
+                last_active_at=r["last_active_at"].isoformat() if r["last_active_at"] else None,
+            )
+            for r in rows
         ]
 
     async def append_message(self, conversation_id: int, role: str, content: str) -> None:

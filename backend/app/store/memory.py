@@ -3,12 +3,15 @@ from datetime import UTC, datetime, timedelta
 
 from app.shopify.models import Customer, Fulfillment, LineItem, Order, normalize_order_name
 from app.store.base import (
+    ConversationSummary,
     DeletionResult,
     IngestResult,
     MappingUpsert,
     MappingView,
+    OrderActionEntry,
     OutboundClaim,
     OutboundDraft,
+    OutboundEntry,
     OutboundView,
     StoredMessage,
 )
@@ -288,6 +291,38 @@ class InMemoryIngestStore:
         ]
         return list(reversed(views))[:limit]
 
+    async def find_outbound_by_phone(
+        self, phone_e164: str, limit: int = 100
+    ) -> list[OutboundEntry]:
+        matches = [
+            (dedupe_key, draft) for dedupe_key, draft in self.outbound.items()
+            if draft.phone_e164 == phone_e164
+        ]
+        return [
+            OutboundEntry(
+                dedupe_key=dedupe_key,
+                kind=draft.kind,
+                state=self._outbound_meta[dedupe_key].state,
+                payload_json=draft.payload_json,
+                created_at=self._outbound_meta[dedupe_key].updated_at.isoformat(),
+            )
+            for dedupe_key, draft in matches[-limit:]
+        ]
+
+    async def find_order_actions_by_wa_id(
+        self, wa_id: str, limit: int = 100
+    ) -> list[OrderActionEntry]:
+        matches = [row for row in self.order_actions if row.get("actor_wa_id") == wa_id]
+        return [
+            OrderActionEntry(
+                order_gid=str(row["order_gid"]),
+                action=str(row["action"]),
+                result=str(row["result"]),
+                created_at=row.get("created_at"),
+            )
+            for row in matches[-limit:]
+        ]
+
     async def find_stale_template_sent(
         self, older_than_minutes: int, max_age_minutes: int
     ) -> list[MappingView]:
@@ -533,6 +568,7 @@ class InMemoryIngestStore:
                 "source_wamid": source_wamid,
                 "result": result,
                 "user_errors_json": user_errors_json,
+                "created_at": datetime.now(UTC).isoformat(),
             }
         )
 
@@ -582,6 +618,10 @@ class InMemoryConversationStore:
         self._messages: dict[int, list[StoredMessage]] = {}
         self._paused_until: dict[int, datetime] = {}
         self._handoff_attempted_at: dict[int, datetime] = {}
+        # Mirrors conversations.last_active_at (Postgres bumps this on every get_or_create, even
+        # an already-exists ON CONFLICT hit -- not just on first creation). Needed so
+        # recent_conversations can order threads by recency, same as the Postgres index does.
+        self._last_active_at: dict[int, datetime] = {}
         self._next_id = 1
 
     async def get_or_create(self, user_id: str) -> int:
@@ -593,7 +633,9 @@ class InMemoryConversationStore:
             self._conversations[user_id] = self._next_id
             self._messages[self._next_id] = []
             self._next_id += 1
-        return self._conversations[user_id]
+        conversation_id = self._conversations[user_id]
+        self._last_active_at[conversation_id] = datetime.now(UTC)
+        return conversation_id
 
     async def recent_messages(self, conversation_id: int, limit: int) -> list[StoredMessage]:
         return self._messages.get(conversation_id, [])[-limit:]
@@ -602,6 +644,31 @@ class InMemoryConversationStore:
         self._messages.setdefault(conversation_id, []).append(
             StoredMessage(role=role, content=content, created_at=None)
         )
+
+    async def find_messages_by_user_id(
+        self, user_id: str, limit: int = 100
+    ) -> list[StoredMessage]:
+        conversation_id = self._conversations.get(user_id)
+        if conversation_id is None:
+            return []
+        return self._messages.get(conversation_id, [])[-limit:]
+
+    async def recent_conversations(self, limit: int = 50) -> list[ConversationSummary]:
+        ordered = sorted(
+            self._conversations.items(),
+            key=lambda item: self._last_active_at.get(item[1], datetime.min.replace(tzinfo=UTC)),
+            reverse=True,
+        )
+        summaries: list[ConversationSummary] = []
+        for user_id, conv_id in ordered[:limit]:
+            active = self._last_active_at.get(conv_id)
+            summaries.append(
+                ConversationSummary(
+                    user_id=user_id,
+                    last_active_at=active.isoformat() if active is not None else None,
+                )
+            )
+        return summaries
 
     async def pause_until(self, conversation_id: int, until: datetime) -> None:
         self._paused_until[conversation_id] = until

@@ -625,3 +625,58 @@ def test_conversations_list_order_with_no_customer_name_parts(client: TestClient
     row = next(r for r in rows if r["phone"] == normalized)
     assert row["customer_name"] is None
     assert row["order_names"] == ["tavas702"]
+
+
+def test_conversation_thread_order_summary_includes_customer_address(client: TestClient) -> None:
+    login(client)
+    normalized = "+919876500040"
+    order = order_from_webhook_payload({
+        "admin_graphql_api_id": "gid://shopify/Order/addr1",
+        "name": "tavas800", "phone": normalized, "financial_status": "paid",
+        "fulfillment_status": None, "tags": "", "payment_gateway_names": [],
+        "total_price": "500.00", "currency": "INR",
+        "updated_at": "2026-08-17T10:00:00+05:30",
+        "customer": {
+            "admin_graphql_api_id": "gid://shopify/Customer/40",
+            "first_name": "Neha", "last_name": "Verma",
+        },
+        "shipping_address": {
+            "address1": "12 MG Road", "address2": "Flat 3B",
+            "city": "Pune", "province": "Maharashtra", "zip": "411001",
+        },
+    })
+    assert order is not None
+    asyncio.run(get_container().ingest.upsert_order_mirror(order))
+
+    thread_id = asyncio.run(get_container().conversations.get_or_create(normalized))
+    resp = client.get(f"/admin/conversations/{thread_id}")
+
+    summary = resp.json()["orders"][0]
+    assert summary["customer_name"] == "Neha Verma"
+    assert summary["address_line1"] == "12 MG Road"
+    assert summary["address_line2"] == "Flat 3B"
+    assert summary["city"] == "Pune"
+    assert summary["state"] == "Maharashtra"
+    assert summary["postal_code"] == "411001"
+
+
+def test_conversation_thread_order_summary_no_customer_has_null_address(client: TestClient) -> None:
+    login(client)
+    normalized = "+919876500041"
+    order = order_from_webhook_payload({
+        "admin_graphql_api_id": "gid://shopify/Order/noaddr",
+        "name": "tavas801", "phone": normalized, "financial_status": "paid",
+        "fulfillment_status": None, "tags": "", "payment_gateway_names": [],
+        "total_price": "500.00", "currency": "INR",
+        "updated_at": "2026-08-17T10:00:00+05:30",
+    })
+    assert order is not None
+    asyncio.run(get_container().ingest.upsert_order_mirror(order))
+
+    thread_id = asyncio.run(get_container().conversations.get_or_create(normalized))
+    resp = client.get(f"/admin/conversations/{thread_id}")
+
+    summary = resp.json()["orders"][0]
+    assert summary["customer_name"] is None
+    assert summary["address_line1"] is None
+    assert summary["city"] is None

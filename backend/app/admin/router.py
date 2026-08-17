@@ -758,6 +758,18 @@ def _order_summary(order: Order) -> dict[str, object]:
         tracking_company = first.tracking_company
         tracking_number = first.tracking_number
         tracking_url = first.tracking_url
+    customer_name = None
+    address_line1 = address_line2 = city = state = postal_code = None
+    if order.customer:
+        name = " ".join(
+            p for p in (order.customer.first_name, order.customer.last_name) if p
+        ).strip()
+        customer_name = name or None
+        address_line1 = order.customer.address_line1
+        address_line2 = order.customer.address_line2
+        city = order.customer.city
+        state = order.customer.state
+        postal_code = order.customer.postal_code
     return {
         "order_name": order.name,
         "financial_status": order.financial_status,
@@ -770,6 +782,12 @@ def _order_summary(order: Order) -> dict[str, object]:
         "tracking_company": tracking_company,
         "tracking_number": tracking_number,
         "tracking_url": tracking_url,
+        "customer_name": customer_name,
+        "address_line1": address_line1,
+        "address_line2": address_line2,
+        "city": city,
+        "state": state,
+        "postal_code": postal_code,
         "line_items": [
             {
                 "title": li.title,

@@ -29,6 +29,13 @@ class InboundButton:
     timestamp: str
 
 
+@dataclass(frozen=True)
+class InboundStatus:
+    wamid: str
+    status: str
+    timestamp: str
+
+
 InboundEvent = InboundText | InboundInteractive | InboundButton
 
 
@@ -164,3 +171,55 @@ def _parse_message(msg: Any) -> InboundEvent | None:
         )
 
     return None
+
+
+def extract_statuses(
+    payload: dict[str, Any], expected_phone_number_id: str | None = None
+) -> list[InboundStatus]:
+    """Parse EVERY WhatsApp delivery/read status event across all entries/changes.
+
+    Mirrors extract_events exactly (same tenant guard, same attacker-typed defensive parsing) but
+    walks value.statuses instead of value.messages -- a distinct part of the same webhook envelope
+    that this codebase otherwise ignores entirely.
+    """
+    statuses: list[InboundStatus] = []
+    entries = payload.get("entry")
+    if not isinstance(entries, list):
+        return statuses
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        changes = entry.get("changes")
+        if not isinstance(changes, list):
+            continue
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            value = change.get("value")
+            if not isinstance(value, dict):
+                continue
+            if expected_phone_number_id is not None and not _tenant_matches(
+                value, expected_phone_number_id
+            ):
+                continue
+            raw_statuses = value.get("statuses")
+            if not isinstance(raw_statuses, list):
+                continue
+            for raw in raw_statuses:
+                status = _parse_status(raw)
+                if status is not None:
+                    statuses.append(status)
+    return statuses
+
+
+def _parse_status(raw: Any) -> InboundStatus | None:
+    if not isinstance(raw, dict):
+        return None
+    wamid = raw.get("id")
+    status = raw.get("status")
+    if not isinstance(wamid, str) or not isinstance(status, str):
+        return None
+    timestamp = raw.get("timestamp")
+    return InboundStatus(
+        wamid=wamid, status=status, timestamp=str(timestamp) if timestamp is not None else ""
+    )

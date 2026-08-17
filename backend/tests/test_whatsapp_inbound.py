@@ -6,6 +6,7 @@ from app.channels.whatsapp_inbound import (
     InboundText,
     extract_event,
     extract_events,
+    extract_statuses,
 )
 
 
@@ -215,3 +216,74 @@ def test_non_dict_nested_button_reply_is_none_not_exception(bad_field: object) -
         "type": "interactive",
         "interactive": {"type": "button_reply", "button_reply": bad_field},
     })) is None
+
+
+def test_extract_statuses_parses_a_delivered_event() -> None:
+    payload = {
+        "entry": [{
+            "changes": [{
+                "value": {
+                    "metadata": {"phone_number_id": "123456"},
+                    "statuses": [{
+                        "id": "wamid.ABC123",
+                        "status": "delivered",
+                        "timestamp": "1755500000",
+                        "recipient_id": "919876543210",
+                    }],
+                }
+            }]
+        }]
+    }
+    statuses = extract_statuses(payload, expected_phone_number_id="123456")
+    assert len(statuses) == 1
+    assert statuses[0].wamid == "wamid.ABC123"
+    assert statuses[0].status == "delivered"
+    assert statuses[0].timestamp == "1755500000"
+
+
+def test_extract_statuses_tenant_guard_rejects_mismatched_phone_number_id() -> None:
+    payload = {
+        "entry": [{"changes": [{"value": {
+            "metadata": {"phone_number_id": "WRONG"},
+            "statuses": [{"id": "wamid.X", "status": "read", "timestamp": "1"}],
+        }}]}]
+    }
+    assert extract_statuses(payload, expected_phone_number_id="123456") == []
+
+
+def test_extract_statuses_skips_malformed_entries_never_raises() -> None:
+    payload = {
+        "entry": [{"changes": [{"value": {
+            "metadata": {"phone_number_id": "123456"},
+            "statuses": [
+                {"id": "wamid.OK", "status": "sent", "timestamp": "1"},
+                {"status": "read"},  # missing id -- unparseable, skipped
+                "not a dict",         # malformed entry -- skipped
+                {"id": "wamid.NOSTATUS"},  # missing status -- unparseable, skipped
+            ],
+        }}]}]
+    }
+    statuses = extract_statuses(payload, expected_phone_number_id="123456")
+    assert len(statuses) == 1
+    assert statuses[0].wamid == "wamid.OK"
+
+
+def test_extract_statuses_multiple_entries_and_batched_statuses() -> None:
+    payload = {
+        "entry": [{"changes": [{"value": {
+            "metadata": {"phone_number_id": "123456"},
+            "statuses": [
+                {"id": "wamid.A", "status": "sent", "timestamp": "1"},
+                {"id": "wamid.B", "status": "delivered", "timestamp": "2"},
+            ],
+        }}]}]
+    }
+    statuses = extract_statuses(payload, expected_phone_number_id="123456")
+    assert {s.wamid for s in statuses} == {"wamid.A", "wamid.B"}
+
+
+def test_extract_statuses_no_statuses_key_returns_empty() -> None:
+    payload = {"entry": [{"changes": [{"value": {
+        "metadata": {"phone_number_id": "123456"}, "messages": [],
+    }}]}]}
+    assert extract_statuses(payload, expected_phone_number_id="123456") == []

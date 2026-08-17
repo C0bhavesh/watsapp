@@ -94,3 +94,33 @@ def test_chats_js_polls_every_three_seconds(client: TestClient) -> None:
     assert resp.status_code == 200
     assert "setInterval" in resp.text
     assert "3000" in resp.text
+
+
+def test_chats_js_clears_order_number_and_products_when_no_orders(client: TestClient) -> None:
+    # Switching to a no-orders thread must wipe the previous customer's order number + products,
+    # else stale order data stays visible (wrong-customer risk). Fix 1.
+    js = client.get("/admin/ui/chats.js").text
+    assert 'el("order-number").textContent = ""' in js
+    assert 'el("order-products").innerHTML = ""' in js
+
+
+def test_chats_js_thread_entries_key_includes_status(client: TestClient) -> None:
+    # The poll diff-key must fold entry status in, else a queued -> sent/failed transition is
+    # never detected and the status label stays stuck until a manual refresh. Fix 2.
+    js = client.get("/admin/ui/chats.js").text
+    assert "e.status" in js
+
+
+def test_chats_js_poll_skips_when_hidden_and_guards_overlap(client: TestClient) -> None:
+    # The 3s poll must skip while the tab is hidden and never overlap a slow tick, to protect the
+    # shared DB pool (max_size=5). Fix 3.
+    js = client.get("/admin/ui/chats.js").text
+    assert "document.hidden" in js
+    assert "pollInFlight" in js
+
+
+def test_chats_js_normalize_order_query_strips_leading_hash(client: TestClient) -> None:
+    # The search box invites "#3589"; a leading # must be stripped before the digit test so it
+    # still normalizes to tavas3589. Fix 5.
+    js = client.get("/admin/ui/chats.js").text
+    assert 'replace(/^#/, "")' in js

@@ -114,6 +114,10 @@ function renderOrderPanel(orders) {
     empty.style.display = "block";
     select.style.display = "none";
     el("order-detail").innerHTML = "";
+    // Also clear the Task 4 order-number + products, else switching from a thread WITH orders
+    // to one WITHOUT leaves the previous customer's order data on screen (wrong-customer risk).
+    el("order-number").textContent = "";
+    el("order-products").innerHTML = "";
     return;
   }
   empty.style.display = "none";
@@ -162,8 +166,10 @@ let allThreads = [];
 
 function normalizeOrderQuery(query) {
   // Mirrors app/shopify/models.py::normalize_order_name's isdigit() branch: bare digits like
-  // "3589" should match the store's "tavas3589" order-name format.
-  return /^\d+$/.test(query) ? "tavas" + query : query;
+  // "3589" (or "#3589", matching the search box placeholder) should match the store's
+  // "tavas3589" order-name format.
+  const stripped = query.replace(/^#/, "");
+  return /^\d+$/.test(stripped) ? "tavas" + stripped : query;
 }
 
 function threadMatchesQuery(thread, query) {
@@ -235,10 +241,21 @@ function threadListKey(threads) {
 function threadEntriesKey(entries) {
   if (!entries.length) return "empty";
   const last = entries[entries.length - 1];
-  return entries.length + ":" + (last.timestamp || "");
+  // Fold every entry's status into the key so a queued -> sent/failed/undeliverable transition
+  // (which changes neither the count nor the last timestamp) is still detected by the poll diff.
+  const statuses = entries.map((e) => e.status || "").join(",");
+  return entries.length + ":" + (last.timestamp || "") + ":" + statuses;
 }
 
+let pollInFlight = false;
+
 async function pollTick() {
+  // Skip while the tab is hidden -- no point hammering the shared DB pool (max_size=5) with
+  // 3s ticks for a backgrounded admin tab that nobody is watching.
+  if (document.hidden) return;
+  // In-flight guard: a slow tick must not overlap with the next scheduled one and double the load.
+  if (pollInFlight) return;
+  pollInFlight = true;
   try {
     const threads = await api("/admin/conversations");
     const nextListKey = threadListKey(threads);
@@ -258,6 +275,8 @@ async function pollTick() {
   } catch (e) {
     // Silent -- a transient poll failure shouldn't overwrite list-status/thread-status, which are
     // reserved for explicit user-triggered load errors.
+  } finally {
+    pollInFlight = false;
   }
 }
 

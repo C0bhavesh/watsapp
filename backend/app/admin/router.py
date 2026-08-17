@@ -657,7 +657,10 @@ def _template_message_text(payload_json: str) -> str:
             return fmt.format(**body_params)
         if isinstance(body_params, list):
             return fmt.format(*body_params)
-    except (KeyError, IndexError):
+    except (KeyError, IndexError, ValueError, AttributeError, TypeError):
+        # Widened past KeyError/IndexError so a future template with a format-spec ({0:.2f}) or
+        # nested lookup ({0.name}) can't raise ValueError/AttributeError/TypeError and break this
+        # function's must-never-raise guarantee -- a malformed row degrades, it never 500s.
         return _template_sent_text(payload_json)
     return _template_sent_text(payload_json)
 

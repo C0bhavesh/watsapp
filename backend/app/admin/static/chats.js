@@ -78,8 +78,53 @@ function renderBubble(entry) {
 
 function renderOrderDetail(order) {
   el("order-number").textContent = order.order_name;
+
+  const customerContainer = el("order-customer");
+  customerContainer.innerHTML = "";
+  if (order.customer_name || order.address_line1 || order.city) {
+    const heading = document.createElement("h4");
+    heading.textContent = "Customer Details";
+    customerContainer.appendChild(heading);
+    const custFields = [
+      ["Name", order.customer_name],
+      ["Address", [order.address_line1, order.address_line2].filter(Boolean).join(", ")],
+      ["City", order.city],
+      ["State", order.state],
+      ["Pincode", order.postal_code],
+    ];
+    for (const [label, value] of custFields) {
+      if (!value) continue;
+      const row = document.createElement("div");
+      row.className = "order-field";
+      row.innerHTML = "<span class='label'>" + label + ":</span> ";
+      row.appendChild(document.createTextNode(value));
+      customerContainer.appendChild(row);
+    }
+  }
+
+  const productsContainer = el("order-products");
+  productsContainer.innerHTML = "";
+  const items = order.line_items || [];
+  if (items.length) {
+    const heading = document.createElement("h4");
+    heading.textContent = "Products";
+    productsContainer.appendChild(heading);
+    for (const li of items) {
+      const row = document.createElement("div");
+      row.className = "product-row";
+      let text = li.quantity + "× " + li.title;
+      if (li.variant_title) text += " (" + li.variant_title + ")";
+      if (li.price_amount) text += " — " + li.price_amount + " " + (li.price_currency || "");
+      row.textContent = text;
+      productsContainer.appendChild(row);
+    }
+  }
+
   const container = el("order-detail");
   container.innerHTML = "";
+  const fulfillHeading = document.createElement("h4");
+  fulfillHeading.textContent = "Fulfillment Details";
+  container.appendChild(fulfillHeading);
   const fields = [
     ["Status", order.financial_status || "-"],
     ["Fulfillment", order.fulfillment_status || "not dispatched"],
@@ -102,27 +147,10 @@ function renderOrderDetail(order) {
     link.href = order.tracking_url;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
-    link.textContent = "Track shipment";
-    link.style.fontSize = ".8rem";
+    link.textContent = order.tracking_url;
+    link.style.fontSize = ".75rem";
+    link.style.wordBreak = "break-all";
     container.appendChild(link);
-  }
-
-  const productsContainer = el("order-products");
-  productsContainer.innerHTML = "";
-  const items = order.line_items || [];
-  if (items.length) {
-    const heading = document.createElement("h4");
-    heading.textContent = "Products";
-    productsContainer.appendChild(heading);
-    for (const li of items) {
-      const row = document.createElement("div");
-      row.className = "product-row";
-      let text = li.quantity + "× " + li.title;
-      if (li.variant_title) text += " (" + li.variant_title + ")";
-      if (li.price_amount) text += " — " + li.price_amount + " " + (li.price_currency || "");
-      row.textContent = text;
-      productsContainer.appendChild(row);
-    }
   }
 }
 
@@ -134,9 +162,10 @@ function renderOrderPanel(orders) {
     empty.style.display = "block";
     select.style.display = "none";
     el("order-detail").innerHTML = "";
-    // Also clear the Task 4 order-number + products, else switching from a thread WITH orders
+    // Also clear the order-number + customer + products, else switching from a thread WITH orders
     // to one WITHOUT leaves the previous customer's order data on screen (wrong-customer risk).
     el("order-number").textContent = "";
+    el("order-customer").innerHTML = "";
     el("order-products").innerHTML = "";
     return;
   }

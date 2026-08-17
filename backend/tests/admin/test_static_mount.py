@@ -162,3 +162,17 @@ def test_chats_js_formats_bubble_timestamp_as_12h(client: TestClient) -> None:
     js = resp.text
     assert "formatBubbleTime" in js
     assert "hour12" in js or "toLocaleTimeString" in js
+
+
+def test_chats_page_has_customer_details_container(client: TestClient) -> None:
+    resp = client.get("/admin/ui/chats.html")
+    assert 'id="order-customer"' in resp.text
+    assert "Order Details" in resp.text
+
+
+def test_chats_js_renders_customer_address_fields(client: TestClient) -> None:
+    resp = client.get("/admin/ui/chats.js")
+    js = resp.text
+    assert "customer_name" in js
+    assert "address_line1" in js
+    assert "postal_code" in js

@@ -703,6 +703,47 @@ async def test_post_text_event_paused_conversation_stays_silent_but_records_mess
     assert any(m.content == "still there?" for m in messages)
 
 
+async def test_post_text_event_paused_conversation_logs_the_silent_drop(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A paused conversation used to swallow every inbound message with zero logging, so a
+    24h AI outage for a real customer was invisible until a human read the transcript. The drop
+    must now emit an info log carrying the conversation id and the paused-until timestamp."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    async def fake_active_llm(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr("app.core.conversation.active_llm", fake_active_llm)
+
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    conversation_id = await c.conversations.get_or_create("+919999999999")
+    paused_until = datetime.now(UTC) + timedelta(hours=1)
+    await c.conversations.pause_until(conversation_id, paused_until)
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.pausedlog1",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "any update?"},
+            }
+        )
+    ).encode()
+    with caplog.at_level(logging.INFO, logger="app.core.conversation"):
+        resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert "paused until" in caplog.text
+    assert str(conversation_id) in caplog.text
+
+
 async def test_post_text_event_expired_pause_lets_the_ai_resume(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

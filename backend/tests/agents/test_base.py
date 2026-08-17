@@ -1,6 +1,7 @@
 from typing import Any
 
 from app.agents.base import (
+    HANDOFF_JSON_CONTRACT,
     PERSONALITY,
     VIP_HINT,
     AgentContext,
@@ -59,6 +60,31 @@ def test_personality_carries_the_anti_prompt_injection_guardrails() -> None:
     assert "never reveal" in lowered
     assert "ignore previous instructions" in lowered
     assert "not a general-purpose assistant" in lowered
+
+
+def test_personality_narrows_handoff_offer_to_genuine_inability() -> None:
+    """A live customer was silently paused for 24h because the persona invited a handoff for
+    any imprecision ("I can't give the *exact* date"). The offer must be gated to a genuine
+    inability to help, not a merely-imprecise-but-useful answer."""
+    lowered = PERSONALITY.lower()
+    assert "genuinely cannot help" in lowered
+    assert "one exact detail" in lowered
+    # The unconditional "if you don't know something, ... connect the customer" wording is gone.
+    assert "if you don't know something" not in lowered
+
+
+def test_handoff_contract_names_the_two_owner_specified_triggers() -> None:
+    """The contract must only license the handoff promise (and the coupled flag) for an explicit
+    human request or a genuine inability to answer -- never for a single missing detail."""
+    lowered = HANDOFF_JSON_CONTRACT.lower()
+    # The coupling the docstring above the constant deliberately preserves.
+    assert '"handoff" to true' in lowered
+    # Trigger 1: explicit request for a person.
+    assert "explicitly asks to speak" in lowered
+    # Trigger 2: genuine inability to answer/resolve.
+    assert "cannot answer or resolve" in lowered
+    # The over-broad case is explicitly ruled out.
+    assert "one exact detail is missing" in lowered
 
 
 def test_personality_for_appends_brand_voice_knowledge() -> None:

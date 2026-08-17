@@ -159,6 +159,10 @@ async def _run_turn(c: Container, event: InboundText) -> None:
     paused_until = await c.conversations.get_paused_until(conversation_id)
     if paused_until is not None and now < paused_until:
         await c.conversations.append_message(conversation_id, "user", event.text)
+        logger.info(
+            "inbound message stored but not answered: conversation %s is paused until %s",
+            conversation_id, paused_until,
+        )
         return
 
     # A single cheap DB count -- unlike order resolution below, it costs no Shopify call, so

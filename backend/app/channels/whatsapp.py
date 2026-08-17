@@ -13,9 +13,11 @@ from app.channels.whatsapp_inbound import (
     InboundInteractive,
     InboundText,
     extract_events,
+    extract_statuses,
 )
 from app.channels.whatsapp_signature import verify_meta_hmac
 from app.config.crypto import VaultError
+from app.core.apply_status import apply_delivery_status
 from app.core.conversation import TURN_TIMEOUT_SECONDS, run_turn
 from app.core.order_actions import dispatch_button
 from app.deps import get_container
@@ -96,6 +98,19 @@ async def receive_webhook(request: Request) -> Response:
     # deduped independently -- dropping any (and still 200-acking) is permanent
     # data loss, since Meta will not retry an acked delivery.
     events = extract_events(payload, expected_phone_number_id=cfg.phone_number_id)
+
+    # Delivery/read status callbacks arrive in their OWN deliveries (no messages), so this must
+    # run BEFORE the no-events early return below, or a status-only webhook would never be
+    # processed. Same tenant guard as extract_events; each apply is wrapped so a status-
+    # processing failure never fails the signed webhook's 200 ack (same discipline applied to
+    # dispatch_button below).
+    statuses = extract_statuses(payload, expected_phone_number_id=cfg.phone_number_id)
+    for status in statuses:
+        try:
+            await apply_delivery_status(c, status)
+        except Exception:
+            logger.exception("delivery-status processing failed; webhook still acks 200")
+
     if not events:
         return JSONResponse({"ok": True, "ignored": True})
 

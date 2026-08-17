@@ -202,7 +202,9 @@ async def _run_turn(c: Container, event: InboundText) -> None:
         await c.conversations.pause_until(conversation_id, now + HANDOFF_PAUSE_WINDOW)
         await c.conversations.mark_handoff_attempted(conversation_id, now)
 
-    await persist_turn(c.conversations, conversation_id, event.text, reply_text)
+    assistant_message_id = await persist_turn(
+        c.conversations, conversation_id, event.text, reply_text
+    )
 
     if controls.send_mode == "shadow":
         return
@@ -217,6 +219,10 @@ async def _run_turn(c: Container, event: InboundText) -> None:
         logger.warning(
             "whatsapp send failed: status=%s error=%s", result.status_code, result.error
         )
+    elif result.wamid:
+        # Only after a genuine, successful send: attach WhatsApp's wamid to the assistant row so
+        # a later delivery/read status callback can be routed back to this message.
+        await c.conversations.set_message_wamid(assistant_message_id, result.wamid)
 
     if handoff:
         # Deliberately after the customer's reply and inside the same send_mode gating above:

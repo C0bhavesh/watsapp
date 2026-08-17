@@ -27,6 +27,8 @@ async def load_history(
 
 async def persist_turn(
     store: ConversationStore, conversation_id: int, user_text: str, assistant_reply: str
-) -> None:
+) -> int:
+    """Persist the user + assistant turn, returning the assistant message's new id so the caller
+    can attach the WhatsApp wamid to it once the reply is actually sent (delivery tracking)."""
     await store.append_message(conversation_id, "user", user_text)
-    await store.append_message(conversation_id, "assistant", assistant_reply)
+    return await store.append_message(conversation_id, "assistant", assistant_reply)

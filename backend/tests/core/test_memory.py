@@ -18,6 +18,13 @@ async def test_persist_then_load_returns_turns_in_order() -> None:
     assert [m.role for m in history] == ["user", "assistant"]
 
 
+async def test_persist_turn_returns_the_assistant_message_id() -> None:
+    store = InMemoryConversationStore()
+    conversation_id, _ = await load_history(store, "919876500060")
+    msg_id = await persist_turn(store, conversation_id, "hi", "hello there")
+    assert isinstance(msg_id, int)
+
+
 async def test_same_wa_id_reuses_conversation() -> None:
     store = InMemoryConversationStore()
     id1, _ = await load_history(store, "919999999999")

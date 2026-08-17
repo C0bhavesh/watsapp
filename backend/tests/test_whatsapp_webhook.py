@@ -1922,6 +1922,94 @@ async def test_post_text_event_wrong_digit_order_number_asks_customer_to_recheck
     assert seen["hint"] is not None
 
 
+async def _seed_sent_outbound(wamid: str, phone: str = "+911111111111") -> None:
+    """Queue an outbound row and mark it sent with a known wamid on the live container's
+    IngestStore, so a status webhook for that wamid has a real outbound_messages row to hit."""
+    from app.store.base import OutboundDraft
+
+    ingest = get_container().ingest
+    outbound_id = await ingest.enqueue_outbound(
+        OutboundDraft(
+            dedupe_key=f"order_created:{wamid}",
+            kind="order_confirmation",
+            phone_e164=phone,
+            payload_json='{"template": "cod_confirmation"}',
+        )
+    )
+    assert outbound_id is not None
+    await ingest.mark_outbound_sent(outbound_id, wamid)
+
+
+def _status_envelope(wamid: str, status: str) -> bytes:
+    return json.dumps({
+        "entry": [{"changes": [{"value": {
+            "metadata": {"phone_number_id": PHONE_NUMBER_ID},
+            "statuses": [{"id": wamid, "status": status, "timestamp": "1"}],
+        }}]}],
+    }).encode()
+
+
+async def test_webhook_status_event_updates_outbound_delivery_status() -> None:
+    await _seed_sent_outbound("wamid.SEEDED", phone="+919664290413")
+
+    body = _status_envelope("wamid.SEEDED", "delivered")
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    entries = await get_container().ingest.find_outbound_by_phone("+919664290413")
+    assert entries[-1].delivery_status == "delivered"
+
+
+async def test_webhook_status_event_updates_ai_reply_delivery_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A real inline AI reply is sent (wamid captured), then a status webhook for that same wamid
+    # must land on the messages table (not outbound_messages).
+    async def fake_send_text(http, cfg, to, body, timeout=20.0):
+        from app.channels.whatsapp_sender import SendResult
+
+        return SendResult(ok=True, status_code=200, wamid="wamid.REPLY1", error=None)
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+    from app.admin.controls import AdminControls, save_controls
+
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+
+    body = json.dumps(
+        envelope(
+            {
+                "from": "919999999999",
+                "id": "wamid.reply.turn1",
+                "timestamp": "1",
+                "type": "text",
+                "text": {"body": "where is my order"},
+            }
+        )
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+    assert resp.status_code == 200
+
+    status_body = _status_envelope("wamid.REPLY1", "delivered")
+    status_resp = await post(status_body, {"X-Hub-Signature-256": sign(status_body)})
+    assert status_resp.status_code == 200
+    # The wamid was really attached to the assistant's persisted row: routing it succeeds.
+    assert await c.conversations.apply_message_delivery_status("wamid.REPLY1", "read") is True
+
+
+async def test_webhook_status_processing_exception_still_acks_200(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def exploding_apply(c, status):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("app.channels.whatsapp.apply_delivery_status", exploding_apply)
+
+    body = _status_envelope("wamid.SEEDED", "delivered")
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+    assert resp.status_code == 200
+
+
 async def test_post_text_event_threads_history_into_router_classification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

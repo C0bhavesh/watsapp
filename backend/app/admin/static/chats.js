@@ -60,7 +60,7 @@ function renderOrderDetail(order) {
     row.appendChild(document.createTextNode(value));
     container.appendChild(row);
   }
-  if (order.tracking_url) {
+  if (order.tracking_url && /^https?:\/\//i.test(order.tracking_url)) {
     const link = document.createElement("a");
     link.href = order.tracking_url;
     link.target = "_blank";

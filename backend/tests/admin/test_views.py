@@ -1,6 +1,6 @@
 import asyncio
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
@@ -330,6 +330,72 @@ def test_conversation_thread_unknown_thread_id_returns_404(client: TestClient) -
     resp = client.get("/admin/conversations/900000000000")
 
     assert resp.status_code == 404
+
+
+def test_conversation_thread_reports_paused_until_when_paused(client: TestClient) -> None:
+    login(client)
+    normalized = "+919876500030"
+    thread_id = asyncio.run(get_container().conversations.get_or_create(normalized))
+    future = datetime.now(UTC) + timedelta(hours=24)
+    asyncio.run(get_container().conversations.pause_until(thread_id, future))
+
+    resp = client.get(f"/admin/conversations/{thread_id}")
+
+    assert resp.status_code == 200
+    paused_until = resp.json()["paused_until"]
+    assert paused_until is not None
+    assert paused_until.startswith(future.date().isoformat())
+
+
+def test_conversation_thread_paused_until_null_when_not_paused(client: TestClient) -> None:
+    login(client)
+    normalized = "+919876500031"
+    thread_id = asyncio.run(get_container().conversations.get_or_create(normalized))
+
+    resp = client.get(f"/admin/conversations/{thread_id}")
+
+    assert resp.status_code == 200
+    assert resp.json()["paused_until"] is None
+
+
+def test_resume_conversation_clears_the_pause(client: TestClient) -> None:
+    login(client)
+    normalized = "+919876500032"
+    thread_id = asyncio.run(get_container().conversations.get_or_create(normalized))
+    future = datetime.now(UTC) + timedelta(hours=24)
+    asyncio.run(get_container().conversations.pause_until(thread_id, future))
+
+    resp = client.post(f"/admin/conversations/{thread_id}/resume")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    cleared = asyncio.run(get_container().conversations.get_paused_until(thread_id))
+    assert cleared is None or cleared <= datetime.now(UTC)
+
+
+def test_resume_conversation_unknown_thread_id_returns_404(client: TestClient) -> None:
+    login(client)
+
+    resp = client.post("/admin/conversations/900000000001/resume")
+
+    assert resp.status_code == 404
+
+
+def test_resume_conversation_requires_auth(client: TestClient) -> None:
+    resp = client.post("/admin/conversations/1/resume")
+
+    assert resp.status_code == 401
+
+
+def test_resume_conversation_on_unpaused_thread_is_a_harmless_noop(client: TestClient) -> None:
+    login(client)
+    normalized = "+919876500033"
+    thread_id = asyncio.run(get_container().conversations.get_or_create(normalized))
+
+    resp = client.post(f"/admin/conversations/{thread_id}/resume")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
 
 
 def test_conversation_thread_non_dict_payload_degrades_not_500(client: TestClient) -> None:

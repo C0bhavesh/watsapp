@@ -829,4 +829,29 @@ async def get_conversation_thread(thread_id: int) -> dict[str, object]:
     orders_sorted = sorted(orders, key=lambda o: str(o.updated_at or ""), reverse=True)
     order_summaries = [_order_summary(o) for o in orders_sorted]
 
-    return {"entries": entries, "orders": order_summaries}
+    paused_until = await c.conversations.get_paused_until(thread_id)
+    return {
+        "entries": entries,
+        "orders": order_summaries,
+        "paused_until": paused_until.isoformat() if paused_until else None,
+    }
+
+
+@admin_router.post(
+    "/conversations/{thread_id}/resume", dependencies=[Depends(require_admin)]
+)
+async def resume_conversation(thread_id: int) -> dict[str, object]:
+    """Manually clear a conversation's AI handoff pause, putting the AI back in charge.
+
+    Reuses the existing pause_until/get_paused_until primitives (core/conversation.py's pause
+    check is ``now < paused_until``) -- setting ``until`` to now is equivalent to clearing the
+    pause, so no new store method is needed. A conversation that isn't currently paused is a
+    harmless no-op.
+    """
+    c = get_container()
+    user_id = await c.conversations.get_user_id(thread_id)
+    if user_id is None:
+        raise HTTPException(status_code=404, detail="thread not found")
+    await c.conversations.pause_until(thread_id, datetime.now(UTC))
+    _audit("resume_ai", "success", resource=f"thread:{thread_id}")
+    return {"ok": True}

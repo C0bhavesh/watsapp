@@ -3,8 +3,8 @@
 
 function el(id) { return document.getElementById(id); }
 
-async function api(path) {
-  const res = await fetch(path, { method: "GET", credentials: "same-origin" });
+async function api(path, method = "GET") {
+  const res = await fetch(path, { method, credentials: "same-origin" });
   if (res.status === 401) {
     window.location.href = "/admin/ui/";
     throw new Error("not authenticated");
@@ -139,7 +139,7 @@ async function loadThread(threadId, phone, silent = false) {
   document.querySelectorAll(".thread-row").forEach((row) => {
     row.classList.toggle("active", row.dataset.threadId === String(threadId));
   });
-  el("chat-header").textContent = phone || "";
+  el("chat-header-phone").textContent = phone || "";
   try {
     const data = await api("/admin/conversations/" + encodeURIComponent(threadId));
     const container = el("chat-messages");
@@ -153,6 +153,9 @@ async function loadThread(threadId, phone, silent = false) {
       container.scrollTop = container.scrollHeight;
     }
     renderOrderPanel(data.orders);
+    const resumeBtn = el("resume-ai-btn");
+    const isPaused = data.paused_until && new Date(data.paused_until) > new Date();
+    resumeBtn.style.display = isPaused ? "inline-block" : "none";
     threadSnapshotKey = threadEntriesKey(data.entries);
     if (!silent) el("thread-status").textContent = "";
   } catch (e) {
@@ -229,6 +232,12 @@ el("refresh-btn").addEventListener("click", async () => {
   if (currentThreadId !== null) {
     await loadThread(currentThreadId, currentPhone);
   }
+});
+
+el("resume-ai-btn").addEventListener("click", async () => {
+  if (currentThreadId === null) return;
+  await api("/admin/conversations/" + encodeURIComponent(currentThreadId) + "/resume", "POST");
+  await loadThread(currentThreadId, currentPhone);
 });
 
 let listSnapshotKey = "";

@@ -119,6 +119,20 @@ def test_chats_js_poll_skips_when_hidden_and_guards_overlap(client: TestClient) 
     assert "pollInFlight" in js
 
 
+def test_chats_page_has_resume_ai_button(client: TestClient) -> None:
+    resp = client.get("/admin/ui/chats.html")
+    assert resp.status_code == 200
+    assert 'id="resume-ai-btn"' in resp.text
+
+
+def test_chats_js_calls_the_resume_endpoint(client: TestClient) -> None:
+    resp = client.get("/admin/ui/chats.js")
+    assert resp.status_code == 200
+    js = resp.text
+    assert "/resume" in js
+    assert "paused_until" in js
+
+
 def test_chats_js_normalize_order_query_strips_leading_hash(client: TestClient) -> None:
     # The search box invites "#3589"; a leading # must be stripped before the digit test so it
     # still normalizes to tavas3589. Fix 5.

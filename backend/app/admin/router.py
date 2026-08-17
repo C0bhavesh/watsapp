@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import json
 import logging
 import re
 from dataclasses import asdict
@@ -20,13 +21,14 @@ from app.channels.whatsapp_config import (
     WHATSAPP_SECRET_FIELDS,
     load_whatsapp_config,
 )
+from app.core.phone import normalize_phone
 from app.deps import build_provider, get_container
 from app.knowledge.loader import KINDS, SEEDS_DIR, KnowledgeLoader
 from app.providers.base import ProviderErrorKind
 from app.providers.registry import get_provider, list_providers
 from app.providers.verify import verify_key
 from app.ratelimit import limiter
-from app.store.base import MappingView, OutboundView
+from app.store.base import ConversationSummary, MappingView, OutboundView
 
 logger = logging.getLogger("app.admin")
 
@@ -579,3 +581,75 @@ async def list_mappings(limit: int = Query(default=50, ge=1, le=500)) -> list[di
 async def list_outbox(limit: int = Query(default=50, ge=1, le=500)) -> list[dict[str, object]]:
     rows: list[OutboundView] = await get_container().ingest.recent_outbound(limit)
     return [asdict(r) for r in rows]
+
+
+def _template_sent_text(payload_json: str) -> str:
+    try:
+        data = json.loads(payload_json)
+    except (ValueError, TypeError):
+        return "(unreadable template payload)"
+    template = data.get("template", "?")
+    body_params = data.get("body_params")
+    if isinstance(body_params, dict):
+        values = ", ".join(str(v) for v in body_params.values())
+    elif isinstance(body_params, list):
+        values = ", ".join(str(v) for v in body_params)
+    else:
+        values = ""
+    return f"{template} → {values}" if values else str(template)
+
+
+def _button_tap_text(action: str, result: str) -> str:
+    return f"Tapped {action} → {result}"
+
+
+@admin_router.get("/conversations", dependencies=[Depends(require_admin)])
+async def list_conversations(
+    limit: int = Query(default=50, ge=1, le=500),
+) -> list[dict[str, object]]:
+    c = get_container()
+    summaries: list[ConversationSummary] = await c.conversations.recent_conversations(limit)
+    result: list[dict[str, object]] = []
+    for s in summaries:
+        recent = await c.conversations.find_messages_by_user_id(s.user_id, limit=1)
+        preview = recent[-1].content[:120] if recent else ""
+        result.append(
+            {"user_id": s.user_id, "last_active_at": s.last_active_at, "preview": preview}
+        )
+    return result
+
+
+@admin_router.get("/conversations/{wa_id}", dependencies=[Depends(require_admin)])
+async def get_conversation_thread(wa_id: str) -> list[dict[str, object]]:
+    c = get_container()
+    entries: list[dict[str, object]] = []
+
+    for msg in await c.conversations.find_messages_by_user_id(wa_id, limit=200):
+        entries.append({
+            "type": "customer_message" if msg.role == "user" else "ai_reply",
+            "timestamp": msg.created_at,
+            "text": msg.content,
+        })
+
+    normalized_phone = normalize_phone(wa_id)
+    if normalized_phone is not None:
+        for row in await c.ingest.find_outbound_by_phone(normalized_phone, limit=200):
+            entries.append({
+                "type": "template_sent",
+                "timestamp": row.created_at,
+                "text": f"[{row.state}] {_template_sent_text(row.payload_json)}",
+            })
+    else:
+        logger.info("conversation thread: unparseable wa_id for outbound lookup")
+
+    for action in await c.ingest.find_order_actions_by_wa_id(wa_id, limit=200):
+        entries.append({
+            "type": "button_tap",
+            "timestamp": action.created_at,
+            "text": _button_tap_text(action.action, action.result),
+        })
+
+    # Timestamps are ISO 8601 strings (or None -> ""), which sort lexicographically in
+    # chronological order. str() keeps the key type mypy-checkable (object -> str).
+    entries.sort(key=lambda e: str(e["timestamp"] or ""))
+    return entries

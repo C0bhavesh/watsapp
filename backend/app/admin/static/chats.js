@@ -45,6 +45,31 @@ function formatBubbleTime(isoTimestamp) {
     .toLowerCase();
 }
 
+function renderDeliveryMark(entry) {
+  // A tick makes sense for a template_sent entry that actually went out (status "sent"), or for
+  // any ai_reply entry (which carries no status field to gate on).
+  const eligible =
+    entry.type === "ai_reply" ||
+    (entry.type === "template_sent" && entry.status === "sent");
+  if (!eligible) return null;
+  const mark = document.createElement("span");
+  mark.className = "delivery-mark";
+  if (entry.delivery_status === "failed") {
+    mark.textContent = "!";
+    mark.classList.add("delivery-mark-failed");
+  } else if (entry.delivery_status === "read") {
+    mark.textContent = "✓✓";
+    mark.classList.add("delivery-mark-read");
+  } else if (entry.delivery_status === "delivered") {
+    mark.textContent = "✓✓";
+    mark.classList.add("delivery-mark-delivered");
+  } else {
+    mark.textContent = "✓";
+    mark.classList.add("delivery-mark-sent");
+  }
+  return mark;
+}
+
 function renderBubble(entry) {
   const div = document.createElement("div");
   const side = entry.type === "customer_message" ? "bubble-in" : "bubble-out";
@@ -57,6 +82,8 @@ function renderBubble(entry) {
   const ts = document.createElement("div");
   ts.className = "bubble-ts";
   ts.textContent = formatBubbleTime(entry.timestamp);
+  const mark = renderDeliveryMark(entry);
+  if (mark) ts.appendChild(mark);
   div.appendChild(label);
   div.appendChild(text);
   if (entry.status && entry.status !== "sent") {

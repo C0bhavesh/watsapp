@@ -176,3 +176,11 @@ def test_chats_js_renders_customer_address_fields(client: TestClient) -> None:
     assert "customer_name" in js
     assert "address_line1" in js
     assert "postal_code" in js
+
+
+def test_chats_js_renders_delivery_ticks(client: TestClient) -> None:
+    resp = client.get("/admin/ui/chats.js")
+    js = resp.text
+    assert "delivery_status" in js
+    assert "delivered" in js
+    assert "read" in js

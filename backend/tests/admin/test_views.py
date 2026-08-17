@@ -237,6 +237,66 @@ def test_conversation_thread_includes_order_summary(client: TestClient) -> None:
     assert summary["tracking_company"] is None
 
 
+def test_conversation_thread_order_summary_includes_line_items(client: TestClient) -> None:
+    login(client)
+    normalized = "+919876500001"
+    order = order_from_webhook_payload({
+        "admin_graphql_api_id": "gid://shopify/Order/lineitems1",
+        "name": "tavas600",
+        "phone": normalized,
+        "financial_status": "paid",
+        "fulfillment_status": None,
+        "cancelled_at": None,
+        "tags": "",
+        "payment_gateway_names": [],
+        "total_price": "899.00",
+        "currency": "INR",
+        "updated_at": "2026-08-17T10:00:00+05:30",
+        "line_items": [
+            {"title": "Classic Kurta", "quantity": 2, "variant_title": "Blue / L",
+             "price": "349.50", "sku": "KUR-BLU-L"},
+            {"title": "Cotton Scarf", "quantity": 1, "variant_title": None,
+             "price": None, "sku": None},
+        ],
+    })
+    assert order is not None
+    asyncio.run(get_container().ingest.upsert_order_mirror(order))
+
+    thread_id = asyncio.run(get_container().conversations.get_or_create(normalized))
+    resp = client.get(f"/admin/conversations/{thread_id}")
+
+    assert resp.status_code == 200
+    line_items = resp.json()["orders"][0]["line_items"]
+    assert len(line_items) == 2
+    assert line_items[0] == {
+        "title": "Classic Kurta", "quantity": 2, "variant_title": "Blue / L",
+        "price_amount": "349.50", "price_currency": "INR",
+    }
+    assert line_items[1] == {
+        "title": "Cotton Scarf", "quantity": 1, "variant_title": None,
+        "price_amount": None, "price_currency": None,
+    }
+
+
+def test_conversation_thread_order_summary_empty_line_items(client: TestClient) -> None:
+    login(client)
+    normalized = "+919876500002"
+    order = order_from_webhook_payload({
+        "admin_graphql_api_id": "gid://shopify/Order/nolineitems",
+        "name": "tavas601", "phone": normalized, "financial_status": "paid",
+        "fulfillment_status": None, "tags": "", "payment_gateway_names": [],
+        "total_price": "100.00", "currency": "INR",
+        "updated_at": "2026-08-17T10:00:00+05:30",
+    })
+    assert order is not None
+    asyncio.run(get_container().ingest.upsert_order_mirror(order))
+
+    thread_id = asyncio.run(get_container().conversations.get_or_create(normalized))
+    resp = client.get(f"/admin/conversations/{thread_id}")
+
+    assert resp.json()["orders"][0]["line_items"] == []
+
+
 def test_conversation_thread_no_orders_returns_empty_list(client: TestClient) -> None:
     login(client)
     _send_ai_message("+919111222333", "hi", "hello there")

@@ -699,6 +699,16 @@ def _order_summary(order: Order) -> dict[str, object]:
         "tracking_company": tracking_company,
         "tracking_number": tracking_number,
         "tracking_url": tracking_url,
+        "line_items": [
+            {
+                "title": li.title,
+                "quantity": li.quantity,
+                "variant_title": li.variant_title,
+                "price_amount": li.price.amount if li.price else None,
+                "price_currency": li.price.currency if li.price else None,
+            }
+            for li in order.line_items
+        ],
     }
 
 

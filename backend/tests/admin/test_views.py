@@ -337,3 +337,76 @@ def test_conversation_thread_multiple_orders_sorted_most_recent_first(
 
     order_names = [o["order_name"] for o in resp.json()["orders"]]
     assert order_names == ["tavas-newer", "tavas-older"]
+
+
+def test_conversations_list_includes_customer_name_and_order_names(
+    client: TestClient,
+) -> None:
+    login(client)
+    normalized = "+919876500010"
+    older = order_from_webhook_payload({
+        "admin_graphql_api_id": "gid://shopify/Order/listname-older",
+        "name": "tavas700", "phone": normalized, "financial_status": "paid",
+        "fulfillment_status": None, "tags": "", "payment_gateway_names": [],
+        "total_price": "100.00", "currency": "INR",
+        "updated_at": "2026-08-01T00:00:00+05:30",
+        "customer": {
+            "admin_graphql_api_id": "gid://shopify/Customer/1",
+            "first_name": "Priya", "last_name": "Shah",
+        },
+    })
+    newer = order_from_webhook_payload({
+        "admin_graphql_api_id": "gid://shopify/Order/listname-newer",
+        "name": "tavas701", "phone": normalized, "financial_status": "pending",
+        "fulfillment_status": None, "tags": "", "payment_gateway_names": [],
+        "total_price": "200.00", "currency": "INR",
+        "updated_at": "2026-08-15T00:00:00+05:30",
+        "customer": {
+            "admin_graphql_api_id": "gid://shopify/Customer/1",
+            "first_name": "Priya", "last_name": "Shah",
+        },
+    })
+    assert older is not None and newer is not None
+    asyncio.run(get_container().ingest.upsert_order_mirror(older))
+    asyncio.run(get_container().ingest.upsert_order_mirror(newer))
+    _send_ai_message(normalized, "hi", "hello")  # so this phone is listed at all
+
+    rows = client.get("/admin/conversations").json()
+
+    row = next(r for r in rows if r["phone"] == normalized)
+    assert row["customer_name"] == "Priya Shah"
+    assert set(row["order_names"]) == {"tavas700", "tavas701"}
+
+
+def test_conversations_list_no_orders_has_null_name_empty_order_names(
+    client: TestClient,
+) -> None:
+    login(client)
+    _send_ai_message("+919876500011", "hi", "hello")
+
+    rows = client.get("/admin/conversations").json()
+
+    row = next(r for r in rows if r["phone"] == "+919876500011")
+    assert row["customer_name"] is None
+    assert row["order_names"] == []
+
+
+def test_conversations_list_order_with_no_customer_name_parts(client: TestClient) -> None:
+    login(client)
+    normalized = "+919876500012"
+    order = order_from_webhook_payload({
+        "admin_graphql_api_id": "gid://shopify/Order/noname",
+        "name": "tavas702", "phone": normalized, "financial_status": "paid",
+        "fulfillment_status": None, "tags": "", "payment_gateway_names": [],
+        "total_price": "50.00", "currency": "INR",
+        "updated_at": "2026-08-17T00:00:00+05:30",
+    })
+    assert order is not None
+    asyncio.run(get_container().ingest.upsert_order_mirror(order))
+    _send_ai_message(normalized, "hi", "hello")
+
+    rows = client.get("/admin/conversations").json()
+
+    row = next(r for r in rows if r["phone"] == normalized)
+    assert row["customer_name"] is None
+    assert row["order_names"] == ["tavas702"]

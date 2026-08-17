@@ -671,9 +671,21 @@ async def list_conversations(
         # Prefer the latest message timestamp (immune to the get_or_create last_active bump);
         # fall back to the pre-bump conversation last_active captured above.
         last_active = recent[-1].created_at if recent else last_active_by_phone.get(norm)
+
+        orders_for_phone = await c.ingest.find_mirrored_orders_by_phone(norm)
+        orders_sorted_for_name = sorted(
+            orders_for_phone, key=lambda o: str(o.updated_at or ""), reverse=True
+        )
+        customer_name: str | None = None
+        if orders_sorted_for_name and orders_sorted_for_name[0].customer:
+            cust = orders_sorted_for_name[0].customer
+            name = " ".join(p for p in (cust.first_name, cust.last_name) if p).strip()
+            customer_name = name or None
+        order_names = [o.name for o in orders_for_phone]
+
         result.append(
             {"thread_id": thread_id, "phone": norm, "last_active_at": last_active,
-             "preview": preview}
+             "preview": preview, "customer_name": customer_name, "order_names": order_names}
         )
 
     result.sort(key=lambda r: str(r["last_active_at"] or ""), reverse=True)

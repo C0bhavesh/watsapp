@@ -324,6 +324,61 @@ def test_conversation_thread_non_template_entries_have_no_status_key(
             assert "status" not in entry
 
 
+def test_conversation_thread_template_entry_includes_delivery_status(
+    client: TestClient,
+) -> None:
+    login(client)
+    normalized = "+919876500070"
+    wamid = "wamid.dstatus1"
+    # _seed_outbound_at does not set a template_wamid, so seed inline to capture the queued row's
+    # id, mark it sent with a known wamid, then route a Meta "delivered" status by that wamid --
+    # exactly the path a real status webhook takes to populate OutboundEntry.delivery_status.
+    order_gid = "gid://shopify/Order/dstatus1"
+
+    async def _seed_delivered() -> None:
+        c = get_container()
+        mapping = MappingUpsert(
+            order_gid=order_gid, order_name="tavaschat", order_number_int=2,
+            phone_e164=normalized, customer_name="Suman", email=None, language="en",
+            financial_status_at_create="PENDING", is_cod=True,
+        )
+        draft = OutboundDraft(
+            dedupe_key=f"order_created:{order_gid}", kind="order_confirmation",
+            phone_e164=normalized,
+            payload_json=json.dumps({"template": "order_shipped", "language": "en",
+                                     "body_params": ["A", "B", "C", "D"]}),
+        )
+        result = await c.ingest.ingest_order_created(
+            f"wh-{order_gid}", "orders/create", mapping, draft
+        )
+        assert result.outbound_id is not None
+        await c.ingest.mark_outbound_sent(result.outbound_id, wamid)
+        await c.ingest.apply_outbound_delivery_status(wamid, "delivered")
+
+    asyncio.run(_seed_delivered())
+
+    thread_id = _thread_id_for(client, normalized)
+    resp = client.get(f"/admin/conversations/{thread_id}")
+
+    entry = next(e for e in resp.json()["entries"] if e["type"] == "template_sent")
+    assert entry["delivery_status"] == "delivered"
+
+
+def test_conversation_thread_ai_reply_entry_includes_delivery_status_field(
+    client: TestClient,
+) -> None:
+    login(client)
+    normalized = "+919876500071"
+    _send_ai_message(normalized, "hi", "hello there")
+
+    thread_id = _thread_id_for(client, normalized)
+    resp = client.get(f"/admin/conversations/{thread_id}")
+
+    entry = next(e for e in resp.json()["entries"] if e["type"] == "ai_reply")
+    assert "delivery_status" in entry
+    assert entry["delivery_status"] is None  # no status ever reported for this test message
+
+
 def test_conversation_thread_unknown_thread_id_returns_404(client: TestClient) -> None:
     login(client)
 

@@ -813,11 +813,16 @@ async def get_conversation_thread(thread_id: int) -> dict[str, object]:
     entries: list[dict[str, object]] = []
 
     for msg in await c.conversations.find_messages_by_user_id(user_id, limit=200):
-        entries.append({
+        entry: dict[str, object] = {
             "type": "customer_message" if msg.role == "user" else "ai_reply",
             "timestamp": msg.created_at,
             "text": msg.content,
-        })
+        }
+        # delivery_status only applies to an outbound (assistant) send; a customer_message has no
+        # send-direction, so the field is added only for ai_reply entries.
+        if msg.role == "assistant":
+            entry["delivery_status"] = msg.delivery_status
+        entries.append(entry)
 
     # user_id is the normalized E.164 phone; outbound rows are keyed on that same form.
     for row in await c.ingest.find_outbound_by_phone(user_id, limit=200):
@@ -826,6 +831,7 @@ async def get_conversation_thread(thread_id: int) -> dict[str, object]:
             "timestamp": row.created_at,
             "text": _template_message_text(row.payload_json),
             "status": row.state,
+            "delivery_status": row.delivery_status,
         })
 
     # order_actions.actor_wa_id is written RAW (no +); query with BOTH the normalized and the

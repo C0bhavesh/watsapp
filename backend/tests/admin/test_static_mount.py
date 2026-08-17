@@ -33,3 +33,21 @@ def test_old_embedded_chats_js_removed(client: TestClient) -> None:
     js = client.get("/admin/ui/admin.js").text
     assert "loadChatList" not in js
     assert "loadChatThread" not in js
+
+
+def test_chats_page_served(client: TestClient) -> None:
+    r = client.get("/admin/ui/chats.html")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert 'id="thread-list"' in r.text
+    assert 'id="chat-messages"' in r.text
+    assert 'id="order-panel"' in r.text
+
+
+def test_chats_js_served_and_calls_the_conversations_api(client: TestClient) -> None:
+    r = client.get("/admin/ui/chats.js")
+    assert r.status_code == 200
+    js = r.text
+    assert "/admin/conversations" in js
+    assert "loadThreadList" in js
+    assert "loadThread" in js

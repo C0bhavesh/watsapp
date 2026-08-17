@@ -147,7 +147,10 @@ async function loadThread(threadId, phone, silent = false) {
   document.querySelectorAll(".thread-row").forEach((row) => {
     row.classList.toggle("active", row.dataset.threadId === String(threadId));
   });
-  el("chat-header-phone").textContent = phone || "";
+  const threadMeta = allThreads.find((t) => t.thread_id === threadId);
+  const headerName = threadMeta && threadMeta.customer_name;
+  el("chat-header-phone").textContent =
+    headerName ? headerName + " (" + (phone || "") + ")" : (phone || "");
   try {
     const data = await api("/admin/conversations/" + encodeURIComponent(threadId));
     const container = el("chat-messages");
@@ -208,7 +211,7 @@ function renderThreadRows(threads) {
     ts.textContent = t.last_active_at ? t.last_active_at.slice(0, 10) : "";
     const phone = document.createElement("div");
     phone.className = "phone";
-    phone.textContent = t.customer_name ? t.customer_name + " (" + t.phone + ")" : t.phone;
+    phone.textContent = t.customer_name || t.phone;
     phone.appendChild(ts);
     const preview = document.createElement("div");
     preview.className = "preview";

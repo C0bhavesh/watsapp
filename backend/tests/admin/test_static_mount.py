@@ -148,3 +148,10 @@ def test_chats_js_normalize_order_query_strips_leading_hash(client: TestClient) 
     # still normalizes to tavas3589. Fix 5.
     js = client.get("/admin/ui/chats.js").text
     assert 'replace(/^#/, "")' in js
+
+
+def test_chats_js_thread_list_shows_name_only(client: TestClient) -> None:
+    resp = client.get("/admin/ui/chats.js")
+    js = resp.text
+    # The old "(" + phone + ")" suffix pattern must be gone from the thread-row rendering.
+    assert 'customer_name + " (" + t.phone + ")"' not in js

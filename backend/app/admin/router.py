@@ -612,6 +612,56 @@ def _template_sent_text(payload_json: str) -> str:
     return f"{template} → {values}" if values else template
 
 
+# Best-effort reconstruction of each approved template's approximate customer-facing wording, for
+# admin-display purposes only (never sent anywhere) -- Meta's literal approved copy isn't stored
+# in this codebase. Positional templates use a numbered-args format string; named templates use
+# the exact payload_json body_params keys each one is built with (see
+# docs/superpowers/specs/2026-08-15-order-type-routing-templated-replies-design.md and
+# 2026-08-16-fulfillment-lifecycle-notifications-design.md for each template's param shape).
+_TEMPLATE_MESSAGE_TEMPLATES: dict[str, str] = {
+    "cod_confirmmsg": "Hi {0}, your order {1} has been confirmed. We will ship it soon.",
+    "cod_cancel": "Hi {0}, your order {1} has been cancelled as requested.",
+    "order_shipped": "Hi {0}, your order {1} has shipped via {2}. Track it here: {3}",
+    "order_delivered": "Hi {0}, your order {1} has been delivered. Thank you for shopping with us!",
+    "cod_confirmation": (
+        "Hi {customer_name}, please confirm your Cash on Delivery order {order_id} for "
+        "{product_name} ({product_color}, {product_size}) — {product_amount}."
+    ),
+    "prepaid_order": (
+        "Hi {customer_name}, your order {order_id} for {product_name} ({product_color}, "
+        "{product_size}) — {product_amount} has been received."
+    ),
+}
+
+
+def _template_message_text(payload_json: str) -> str:
+    """Reconstruct an approximate customer-facing message for a template_sent bubble.
+
+    Falls back to _template_sent_text()'s raw "template -> params" format whenever the template
+    name isn't mapped, the payload isn't a dict, or substitution fails (wrong param count/shape)
+    -- this must never raise, a malformed row should degrade, not 500 the whole thread view.
+    """
+    try:
+        data = json.loads(payload_json)
+    except (ValueError, TypeError):
+        return _template_sent_text(payload_json)
+    if not isinstance(data, dict):
+        return _template_sent_text(payload_json)
+    template = data.get("template")
+    fmt = _TEMPLATE_MESSAGE_TEMPLATES.get(str(template)) if isinstance(template, str) else None
+    if fmt is None:
+        return _template_sent_text(payload_json)
+    body_params = data.get("body_params")
+    try:
+        if isinstance(body_params, dict):
+            return fmt.format(**body_params)
+        if isinstance(body_params, list):
+            return fmt.format(*body_params)
+    except (KeyError, IndexError):
+        return _template_sent_text(payload_json)
+    return _template_sent_text(payload_json)
+
+
 def _button_tap_text(action: str, result: str) -> str:
     return f"Tapped {action} → {result}"
 
@@ -747,7 +797,8 @@ async def get_conversation_thread(thread_id: int) -> dict[str, object]:
         entries.append({
             "type": "template_sent",
             "timestamp": row.created_at,
-            "text": f"[{row.state}] {_template_sent_text(row.payload_json)}",
+            "text": _template_message_text(row.payload_json),
+            "status": row.state,
         })
 
     # order_actions.actor_wa_id is written RAW (no +); query with BOTH the normalized and the

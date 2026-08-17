@@ -175,6 +175,94 @@ def test_conversation_thread_merges_all_three_sources(client: TestClient) -> Non
     assert "ok" in button_entry["text"]
 
 
+def test_conversation_thread_template_entry_has_clean_text_and_status(
+    client: TestClient,
+) -> None:
+    login(client)
+    normalized = "+919876500020"
+    _seed_outbound_at(
+        normalized, "gid://shopify/Order/cleanbubble",
+        json.dumps({
+            "template": "order_shipped", "language": "en",
+            "body_params": ["Chiranjiv", "tavas4029", "Delhivery Surface",
+                             "https://ad2ship.com/track-order/57143610408612"],
+        }),
+    )
+
+    thread_id = _thread_id_for(client, normalized)
+    resp = client.get(f"/admin/conversations/{thread_id}")
+
+    entry = next(e for e in resp.json()["entries"] if e["type"] == "template_sent")
+    assert entry["status"] == "queued"
+    assert "Chiranjiv" in entry["text"]
+    assert "tavas4029" in entry["text"]
+    assert "Delhivery Surface" in entry["text"]
+    assert "https://ad2ship.com/track-order/57143610408612" in entry["text"]
+    # The raw internal dump format ("template → param1, param2") must be gone.
+    assert "→" not in entry["text"]
+    assert "order_shipped" not in entry["text"]
+
+
+def test_conversation_thread_unmapped_template_falls_back_cleanly(
+    client: TestClient,
+) -> None:
+    login(client)
+    normalized = "+919876500021"
+    _seed_outbound_at(
+        normalized, "gid://shopify/Order/unmapped",
+        json.dumps({
+            "template": "some_future_template", "language": "en",
+            "body_params": ["a", "b"],
+        }),
+    )
+
+    thread_id = _thread_id_for(client, normalized)
+    resp = client.get(f"/admin/conversations/{thread_id}")
+
+    entry = next(e for e in resp.json()["entries"] if e["type"] == "template_sent")
+    assert entry["status"] == "queued"
+    # Falls back to the pre-existing "template → params" format, still correct/non-crashing.
+    assert entry["text"] == "some_future_template → a, b"
+
+
+def test_conversation_thread_template_param_count_mismatch_falls_back(
+    client: TestClient,
+) -> None:
+    login(client)
+    normalized = "+919876500022"
+    # order_shipped's map expects 4 positional params; this payload supplies only 1.
+    _seed_outbound_at(
+        normalized, "gid://shopify/Order/mismatch",
+        json.dumps({
+            "template": "order_shipped", "language": "en",
+            "body_params": ["OnlyOneParam"],
+        }),
+    )
+
+    thread_id = _thread_id_for(client, normalized)
+    resp = client.get(f"/admin/conversations/{thread_id}")
+
+    entry = next(e for e in resp.json()["entries"] if e["type"] == "template_sent")
+    assert entry["text"] == "order_shipped → OnlyOneParam"
+
+
+def test_conversation_thread_non_template_entries_have_no_status_key(
+    client: TestClient,
+) -> None:
+    login(client)
+    normalized = "+919876500023"
+    raw_wa_id = normalized.lstrip("+")
+    _send_ai_message(normalized, "where is my order", "let me check")
+    _record_button_tap("gid://shopify/Order/nostatus", raw_wa_id)
+
+    thread_id = _thread_id_for(client, normalized)
+    resp = client.get(f"/admin/conversations/{thread_id}")
+
+    for entry in resp.json()["entries"]:
+        if entry["type"] != "template_sent":
+            assert "status" not in entry
+
+
 def test_conversation_thread_unknown_thread_id_returns_404(client: TestClient) -> None:
     login(client)
 

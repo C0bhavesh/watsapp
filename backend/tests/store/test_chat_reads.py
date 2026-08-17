@@ -112,6 +112,45 @@ async def test_find_outbound_by_phone_no_match_returns_empty() -> None:
     assert rows == []
 
 
+# --- IngestStore outbound delivery-status tracking (Task 3) ---
+
+async def _send_outbound(store: InMemoryIngestStore, gid: str, phone: str, wamid: str) -> None:
+    await _seed_outbound(store, gid, phone)
+    (claim,) = await store.claim_queued_outbound()
+    await store.mark_outbound_sent(claim.id, wamid)
+
+
+async def test_apply_outbound_delivery_status_updates_by_wamid() -> None:
+    store = InMemoryIngestStore()
+    await _send_outbound(store, "gid://shopify/Order/1", "+919664290413", "wamid.OUT123")
+
+    applied = await store.apply_outbound_delivery_status("wamid.OUT123", "delivered")
+
+    assert applied is True
+    entries = await store.find_outbound_by_phone("+919664290413")
+    assert entries[-1].delivery_status == "delivered"
+
+
+async def test_apply_outbound_delivery_status_unknown_wamid_returns_false() -> None:
+    store = InMemoryIngestStore()
+    applied = await store.apply_outbound_delivery_status("wamid.NEVER_SEEN", "delivered")
+    assert applied is False
+
+
+async def test_apply_outbound_delivery_status_respects_ordering_guard() -> None:
+    store = InMemoryIngestStore()
+    await _send_outbound(store, "gid://shopify/Order/1", "+919664290413", "wamid.OUT456")
+    await store.apply_outbound_delivery_status("wamid.OUT456", "read")
+
+    regressed = await store.apply_outbound_delivery_status("wamid.OUT456", "delivered")
+
+    # found != applied: the wamid IS in this table (True, Task 5's routing signal) but the
+    # ordering guard blocks the read->delivered regression, so the stored value stays "read".
+    assert regressed is True
+    entries = await store.find_outbound_by_phone("+919664290413")
+    assert entries[-1].delivery_status == "read"
+
+
 # --- IngestStore.find_order_actions_by_wa_ids (multi-key) ---
 
 async def test_find_order_actions_by_wa_ids_returns_matching_rows() -> None:

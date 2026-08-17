@@ -665,7 +665,7 @@ class PostgresIngestStore:
     ) -> list[OutboundEntry]:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT dedupe_key, kind, state, payload_json, created_at"
+                "SELECT dedupe_key, kind, state, payload_json, created_at, delivery_status"
                 " FROM outbound_messages WHERE phone_e164 = $1"
                 " ORDER BY created_at DESC LIMIT $2",
                 phone_e164, limit,
@@ -677,6 +677,9 @@ class PostgresIngestStore:
                 state=str(r["state"]),
                 payload_json=str(r["payload_json"]),
                 created_at=r["created_at"].isoformat() if r["created_at"] else None,
+                delivery_status=(
+                    None if r["delivery_status"] is None else str(r["delivery_status"])
+                ),
             )
             for r in rows
         ]
@@ -1057,6 +1060,24 @@ class PostgresIngestStore:
                 id,
                 wamid,
             )
+
+    async def apply_outbound_delivery_status(self, wamid: str, status: str) -> bool:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, delivery_status FROM outbound_messages WHERE template_wamid = $1",
+                wamid,
+            )
+            if row is None:
+                return False
+            if should_apply_delivery_status(
+                None if row["delivery_status"] is None else str(row["delivery_status"]), status
+            ):
+                await conn.execute(
+                    "UPDATE outbound_messages SET delivery_status = $2, updated_at = now()"
+                    " WHERE id = $1",
+                    row["id"], status,
+                )
+        return True
 
     async def mark_outbound_suppressed(self, id: int) -> None:
         async with self._pool.acquire() as conn:

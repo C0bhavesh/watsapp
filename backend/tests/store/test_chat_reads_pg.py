@@ -176,6 +176,60 @@ async def test_distinct_order_action_wa_ids_recency_pg(pool: LazyPool) -> None:
     assert all(ts is not None for _, ts in seen)
 
 
+async def _send_outbound_pg(
+    store: PostgresIngestStore, phone: str, wamid: str
+) -> None:
+    gid = f"gid://shopify/Order/{uuid.uuid4()}"
+    mapping = MappingUpsert(
+        order_gid=gid, order_name="tavaspg2", order_number_int=1,
+        phone_e164=phone, customer_name="A", email=None, language="en",
+        financial_status_at_create="PENDING", is_cod=True,
+    )
+    draft = OutboundDraft(
+        dedupe_key=f"order_created:{gid}", kind="order_confirmation",
+        phone_e164=phone, payload_json='{"template": "cod_confirmation"}',
+    )
+    result = await store.ingest_order_created(f"wh-{uuid.uuid4()}", "orders/create", mapping, draft)
+    assert result.outbound_id is not None
+    await store.mark_outbound_sent(result.outbound_id, wamid)
+
+
+async def test_apply_outbound_delivery_status_updates_by_wamid_pg(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    phone = f"+91{uuid.uuid4().int % 10**10:010d}"
+    wamid = f"wamid.{uuid.uuid4()}"
+    await _send_outbound_pg(store, phone, wamid)
+
+    applied = await store.apply_outbound_delivery_status(wamid, "delivered")
+
+    assert applied is True
+    entries = await store.find_outbound_by_phone(phone)
+    assert entries[-1].delivery_status == "delivered"
+
+
+async def test_apply_outbound_delivery_status_unknown_wamid_returns_false_pg(
+    pool: LazyPool,
+) -> None:
+    store = PostgresIngestStore(pool)
+    applied = await store.apply_outbound_delivery_status(f"wamid.{uuid.uuid4()}", "delivered")
+    assert applied is False
+
+
+async def test_apply_outbound_delivery_status_respects_ordering_guard_pg(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    phone = f"+91{uuid.uuid4().int % 10**10:010d}"
+    wamid = f"wamid.{uuid.uuid4()}"
+    await _send_outbound_pg(store, phone, wamid)
+    await store.apply_outbound_delivery_status(wamid, "read")
+
+    # found != applied: the row IS in this table (True) but the guard blocks the regression.
+    regressed = await store.apply_outbound_delivery_status(wamid, "delivered")
+
+    assert regressed is True
+    entries = await store.find_outbound_by_phone(phone)
+    assert entries[-1].delivery_status == "read"
+
+
 async def test_find_outbound_by_phone_pg(pool: LazyPool) -> None:
     store = PostgresIngestStore(pool)
     gid = f"gid://shopify/Order/{uuid.uuid4()}"

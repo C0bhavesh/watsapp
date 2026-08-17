@@ -86,6 +86,9 @@ class _OutboundRow:
     attempts: int
     last_error_code: str | None
     template_wamid: str | None
+    # Latest Meta delivery/read status for the template send (None until a status webhook lands).
+    # The in-memory analogue of outbound_messages.delivery_status.
+    delivery_status: str | None
     # Stamp of the last state transition — the in-memory analogue of the Postgres `updated_at`
     # column. Used only to decide whether a 'processing' row is stale enough to reclaim.
     updated_at: datetime
@@ -187,6 +190,7 @@ class InMemoryIngestStore:
             attempts=0,
             last_error_code=None,
             template_wamid=None,
+            delivery_status=None,
             updated_at=now,
             created_at=now,
         )
@@ -338,6 +342,7 @@ class InMemoryIngestStore:
                 state=self._outbound_meta[dedupe_key].state,
                 payload_json=draft.payload_json,
                 created_at=self._outbound_meta[dedupe_key].updated_at.isoformat(),
+                delivery_status=self._outbound_meta[dedupe_key].delivery_status,
             )
             for dedupe_key, draft in matches[-limit:]
         ]
@@ -582,6 +587,17 @@ class InMemoryIngestStore:
         if meta is not None:
             meta.state = "sent"
             meta.template_wamid = wamid
+
+    async def apply_outbound_delivery_status(self, wamid: str, status: str) -> bool:
+        # Route a Meta delivery/read status by template_wamid. Return True whenever the wamid
+        # belongs to THIS table (whether or not the ordering guard actually advances the state) so
+        # the webhook handler knows not to also probe messages; False means "not this table."
+        for meta in self._outbound_meta.values():
+            if meta.template_wamid == wamid:
+                if should_apply_delivery_status(meta.delivery_status, status):
+                    meta.delivery_status = status
+                return True
+        return False
 
     async def mark_outbound_suppressed(self, id: int) -> None:
         meta = self._meta_by_id(id)

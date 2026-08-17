@@ -97,6 +97,7 @@ class OutboundEntry:
     state: str
     payload_json: str
     created_at: str | None
+    delivery_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -181,6 +182,12 @@ class IngestStore(Protocol):
     async def claim_outbound_by_id(self, id: int) -> OutboundClaim | None: ...
 
     async def mark_outbound_sent(self, id: int, wamid: str | None) -> None: ...
+
+    # Applies a Meta delivery/read status update, found by template_wamid, through the ordering
+    # guard in app.core.delivery_status. Returns True if a matching row was found (whether or not
+    # the ordering guard actually changed anything) so the webhook handler can decide whether to
+    # also try the messages table -- False means "not this table, try the other one."
+    async def apply_outbound_delivery_status(self, wamid: str, status: str) -> bool: ...
 
     async def mark_outbound_suppressed(self, id: int) -> None: ...
 

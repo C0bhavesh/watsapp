@@ -87,3 +87,10 @@ def test_chats_js_filters_threads_by_name_phone_and_order_number(client: TestCli
     assert "customer_name" in resp.text
     assert "order_names" in resp.text
     assert "normalize_order_name" in resp.text or "tavas" in resp.text
+
+
+def test_chats_js_polls_every_three_seconds(client: TestClient) -> None:
+    resp = client.get("/admin/ui/chats.js")
+    assert resp.status_code == 200
+    assert "setInterval" in resp.text
+    assert "3000" in resp.text

@@ -149,6 +149,7 @@ async function loadThread(threadId, phone) {
       container.scrollTop = container.scrollHeight;
     }
     renderOrderPanel(data.orders);
+    threadSnapshotKey = threadEntriesKey(data.entries);
     el("thread-status").textContent = "";
   } catch (e) {
     el("thread-status").textContent = e.message;
@@ -204,6 +205,7 @@ async function loadThreadList() {
   try {
     allThreads = await api("/admin/conversations");
     renderThreadRows(allThreads.filter((t) => threadMatchesQuery(t, el("thread-search").value)));
+    listSnapshotKey = threadListKey(allThreads);
     el("list-status").textContent = "";
   } catch (e) {
     el("list-status").textContent = e.message;
@@ -220,5 +222,43 @@ el("refresh-btn").addEventListener("click", async () => {
     await loadThread(currentThreadId, currentPhone);
   }
 });
+
+let listSnapshotKey = "";
+let threadSnapshotKey = "";
+
+function threadListKey(threads) {
+  return threads.map((t) => t.thread_id + ":" + (t.last_active_at || "")).join("|");
+}
+
+function threadEntriesKey(entries) {
+  if (!entries.length) return "empty";
+  const last = entries[entries.length - 1];
+  return entries.length + ":" + (last.timestamp || "");
+}
+
+async function pollTick() {
+  try {
+    const threads = await api("/admin/conversations");
+    const nextListKey = threadListKey(threads);
+    if (nextListKey !== listSnapshotKey) {
+      allThreads = threads;
+      listSnapshotKey = nextListKey;
+      renderThreadRows(allThreads.filter((t) => threadMatchesQuery(t, el("thread-search").value)));
+    }
+    if (currentThreadId !== null) {
+      const data = await api("/admin/conversations/" + encodeURIComponent(currentThreadId));
+      const nextThreadKey = threadEntriesKey(data.entries);
+      if (nextThreadKey !== threadSnapshotKey) {
+        threadSnapshotKey = nextThreadKey;
+        await loadThread(currentThreadId, currentPhone);
+      }
+    }
+  } catch (e) {
+    // Silent -- a transient poll failure shouldn't overwrite list-status/thread-status, which are
+    // reserved for explicit user-triggered load errors.
+  }
+}
+
+setInterval(pollTick, 3000);
 
 loadThreadList();

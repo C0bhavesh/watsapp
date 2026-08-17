@@ -215,10 +215,17 @@ class IngestStore(Protocol):
 
     # Distinct enumeration for the unified thread LIST: the list unions phones/wa_ids across all
     # three sources (conversations, outbound_messages, order_actions), so a customer who only ever
-    # received an order confirmation (no conversation row) still surfaces as a thread.
-    async def distinct_outbound_phones(self, limit: int = 100) -> list[str]: ...
+    # received an order confirmation (no conversation row) still surfaces as a thread. Each entry is
+    # (identifier, latest_iso) ordered by MAX(created_at) DESC -- so the LIMIT keeps the most
+    # RECENTLY-active customers (not a lexicographic slice) and the router can sort the union on the
+    # real last-active stamp instead of treating these two sources as always-oldest.
+    async def distinct_outbound_phones(
+        self, limit: int = 100
+    ) -> list[tuple[str, str | None]]: ...
 
-    async def distinct_order_action_wa_ids(self, limit: int = 100) -> list[str]: ...
+    async def distinct_order_action_wa_ids(
+        self, limit: int = 100
+    ) -> list[tuple[str, str | None]]: ...
 
     # Atomically CLAIMS the returned orders: each is flipped out of 'cancel_requested' to a
     # transient in-progress state so two overlapping reconcile runs cannot both claim the same

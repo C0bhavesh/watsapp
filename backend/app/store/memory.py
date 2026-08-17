@@ -62,6 +62,10 @@ class _OutboundRow:
     # Stamp of the last state transition — the in-memory analogue of the Postgres `updated_at`
     # column. Used only to decide whether a 'processing' row is stale enough to reclaim.
     updated_at: datetime
+    # Immutable enqueue time — the in-memory analogue of outbound_messages.created_at (never
+    # re-stamped on a state transition, unlike updated_at). distinct_outbound_phones orders on it
+    # so the recency ranking matches the Postgres MAX(created_at) DESC.
+    created_at: datetime
 
 
 class InMemoryConfigRepo:
@@ -149,13 +153,15 @@ class InMemoryIngestStore:
         if outbound.dedupe_key in self.outbound:
             return None
         self.outbound[outbound.dedupe_key] = outbound
+        now = datetime.now(UTC)
         row = _OutboundRow(
             id=self._outbound_next_id,
             state="queued",
             attempts=0,
             last_error_code=None,
             template_wamid=None,
-            updated_at=datetime.now(UTC),
+            updated_at=now,
+            created_at=now,
         )
         self._outbound_meta[outbound.dedupe_key] = row
         self._outbound_by_id[row.id] = outbound.dedupe_key
@@ -324,20 +330,35 @@ class InMemoryIngestStore:
             for row in matches[-limit:]
         ]
 
-    async def distinct_outbound_phones(self, limit: int = 100) -> list[str]:
-        seen: list[str] = []
-        for draft in self.outbound.values():
-            if draft.phone_e164 not in seen:
-                seen.append(draft.phone_e164)
-        return seen[:limit]
+    async def distinct_outbound_phones(self, limit: int = 100) -> list[tuple[str, str | None]]:
+        # Recency-ordered (MAX(created_at) DESC) to mirror the Postgres impl: the LIMIT must keep
+        # the most-recently-active phones, not an insertion/lexicographic-first slice. Insertion
+        # order alone is not enough -- a test (or a real re-enqueue) can produce phones whose newest
+        # outbound is not their first, so group by phone taking the latest created_at, then sort.
+        latest: dict[str, datetime] = {}
+        for key, draft in self.outbound.items():
+            created = self._outbound_meta[key].created_at
+            if draft.phone_e164 not in latest or created > latest[draft.phone_e164]:
+                latest[draft.phone_e164] = created
+        ordered = sorted(latest.items(), key=lambda kv: kv[1], reverse=True)
+        return [(phone, ts.isoformat()) for phone, ts in ordered[:limit]]
 
-    async def distinct_order_action_wa_ids(self, limit: int = 100) -> list[str]:
-        seen: list[str] = []
+    async def distinct_order_action_wa_ids(
+        self, limit: int = 100
+    ) -> list[tuple[str, str | None]]:
+        # Same recency ordering as the Postgres impl (MAX(created_at) DESC). order_actions rows
+        # carry an ISO created_at string; compare as datetimes (a zero-microsecond stamp serializes
+        # shorter, so a naive string compare could misorder). None wa_id / bad stamp is skipped.
+        latest: dict[str, datetime] = {}
         for row in self.order_actions:
             wa_id = row.get("actor_wa_id")
-            if isinstance(wa_id, str) and wa_id not in seen:
-                seen.append(wa_id)
-        return seen[:limit]
+            created = _parse_iso(row.get("created_at"))
+            if not isinstance(wa_id, str) or created is None:
+                continue
+            if wa_id not in latest or created > latest[wa_id]:
+                latest[wa_id] = created
+        ordered = sorted(latest.items(), key=lambda kv: kv[1], reverse=True)
+        return [(wa_id, ts.isoformat()) for wa_id, ts in ordered[:limit]]
 
     async def find_stale_template_sent(
         self, older_than_minutes: int, max_age_minutes: int

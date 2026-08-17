@@ -1,5 +1,7 @@
 """New read-only chat-aggregation methods: ConversationStore + IngestStore additions."""
 
+from datetime import UTC, datetime, timedelta
+
 from app.store.base import MappingUpsert, OutboundDraft
 from app.store.memory import InMemoryConversationStore, InMemoryIngestStore
 
@@ -137,7 +139,31 @@ async def test_distinct_outbound_phones_dedupes() -> None:
 
     phones = await store.distinct_outbound_phones(limit=10)
 
-    assert set(phones) == {"+919664290413", "+911111111111"}
+    # (phone, latest_iso) pairs; each pair carries a real recency stamp (never None here).
+    assert {phone for phone, _ in phones} == {"+919664290413", "+911111111111"}
+    assert all(ts is not None for _, ts in phones)
+
+
+async def test_distinct_outbound_phones_ordered_by_recency_not_alphabetical() -> None:
+    # Seed so alphabetical(phone) != recency, proving the LIMIT keeps the MOST RECENT phones
+    # (Postgres MAX(created_at) DESC) rather than a lexicographic-first slice (the reported bug).
+    store = InMemoryIngestStore()
+    await _seed_outbound(store, "gid://shopify/Order/a", "+911111111111")  # alpha-first
+    await _seed_outbound(store, "gid://shopify/Order/b", "+915555555555")  # alpha-middle
+    await _seed_outbound(store, "gid://shopify/Order/c", "+919664290413")  # alpha-last
+    base = datetime(2026, 8, 17, tzinfo=UTC)
+    meta = store._outbound_meta
+    meta["order_created:gid://shopify/Order/a"].created_at = base + timedelta(hours=1)
+    meta["order_created:gid://shopify/Order/b"].created_at = base + timedelta(hours=3)
+    meta["order_created:gid://shopify/Order/c"].created_at = base + timedelta(hours=2)
+
+    result = await store.distinct_outbound_phones(limit=10)
+
+    # Recency DESC (b@3h, c@2h, a@1h) -- NOT alphabetical (which would be 1.., 5.., 9..).
+    assert [phone for phone, _ in result] == ["+915555555555", "+919664290413", "+911111111111"]
+    # The LIMIT must drop the OLDEST (alphabetically-first) phone, not keep it.
+    top2 = await store.distinct_outbound_phones(limit=2)
+    assert [phone for phone, _ in top2] == ["+915555555555", "+919664290413"]
 
 
 async def test_distinct_order_action_wa_ids_dedupes_and_skips_none() -> None:
@@ -148,7 +174,25 @@ async def test_distinct_order_action_wa_ids_dedupes_and_skips_none() -> None:
 
     wa_ids = await store.distinct_order_action_wa_ids(limit=10)
 
-    assert set(wa_ids) == {"919664290413"}
+    assert {wa for wa, _ in wa_ids} == {"919664290413"}
+    assert all(ts is not None for _, ts in wa_ids)
+
+
+async def test_distinct_order_action_wa_ids_ordered_by_recency_not_alphabetical() -> None:
+    store = InMemoryIngestStore()
+    await store.record_order_action("gid://o/a", "confirm", "911111111111", "m1", "ok", None)
+    await store.record_order_action("gid://o/b", "confirm", "915555555555", "m2", "ok", None)
+    await store.record_order_action("gid://o/c", "confirm", "919664290413", "m3", "ok", None)
+    base = datetime(2026, 8, 17, tzinfo=UTC)
+    store.order_actions[0]["created_at"] = (base + timedelta(hours=1)).isoformat()
+    store.order_actions[1]["created_at"] = (base + timedelta(hours=3)).isoformat()
+    store.order_actions[2]["created_at"] = (base + timedelta(hours=2)).isoformat()
+
+    result = await store.distinct_order_action_wa_ids(limit=10)
+
+    assert [wa for wa, _ in result] == ["915555555555", "919664290413", "911111111111"]
+    top2 = await store.distinct_order_action_wa_ids(limit=2)
+    assert [wa for wa, _ in top2] == ["915555555555", "919664290413"]
 
 
 # --- ConversationStore.get_user_id ---

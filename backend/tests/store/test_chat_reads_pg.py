@@ -61,6 +61,46 @@ async def test_find_order_actions_by_wa_ids_dual_key_pg(pool: LazyPool) -> None:
     assert any(r.order_gid == gid for r in rows)
 
 
+async def test_distinct_outbound_phones_recency_pg(pool: LazyPool) -> None:
+    # Two phones enqueued oldest-first; the newer one must lead (MAX(created_at) DESC), and each
+    # returned pair carries a real ISO recency stamp -- not the identifier-string ordering.
+    store = PostgresIngestStore(pool)
+    older = f"+91{uuid.uuid4().int % 10**10:010d}"
+    newer = f"+91{uuid.uuid4().int % 10**10:010d}"
+    for phone in (older, newer):
+        gid = f"gid://shopify/Order/{uuid.uuid4()}"
+        mapping = MappingUpsert(
+            order_gid=gid, order_name="tavaspg", order_number_int=1,
+            phone_e164=phone, customer_name="A", email=None, language="en",
+            financial_status_at_create="PENDING", is_cod=True,
+        )
+        draft = OutboundDraft(
+            dedupe_key=f"order_created:{gid}", kind="order_confirmation",
+            phone_e164=phone, payload_json="{}",
+        )
+        await store.ingest_order_created(f"wh-{uuid.uuid4()}", "orders/create", mapping, draft)
+
+    rows = await store.distinct_outbound_phones(limit=100)
+    seen = [(p, ts) for p, ts in rows if p in (older, newer)]
+    ranks = {p: i for i, (p, _) in enumerate(seen)}
+    assert ranks[newer] < ranks[older]
+    assert all(ts is not None for _, ts in seen)
+
+
+async def test_distinct_order_action_wa_ids_recency_pg(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    older = f"91{uuid.uuid4().int % 10**10:010d}"
+    newer = f"91{uuid.uuid4().int % 10**10:010d}"
+    await store.record_order_action(f"gid://o/{uuid.uuid4()}", "confirm", older, "m1", "ok", None)
+    await store.record_order_action(f"gid://o/{uuid.uuid4()}", "confirm", newer, "m2", "ok", None)
+
+    rows = await store.distinct_order_action_wa_ids(limit=100)
+    seen = [(w, ts) for w, ts in rows if w in (older, newer)]
+    ranks = {w: i for i, (w, _) in enumerate(seen)}
+    assert ranks[newer] < ranks[older]
+    assert all(ts is not None for _, ts in seen)
+
+
 async def test_find_outbound_by_phone_pg(pool: LazyPool) -> None:
     store = PostgresIngestStore(pool)
     gid = f"gid://shopify/Order/{uuid.uuid4()}"

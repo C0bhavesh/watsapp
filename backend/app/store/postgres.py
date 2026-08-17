@@ -701,23 +701,40 @@ class PostgresIngestStore:
             for r in rows
         ]
 
-    async def distinct_outbound_phones(self, limit: int = 100) -> list[str]:
+    async def distinct_outbound_phones(self, limit: int = 100) -> list[tuple[str, str | None]]:
+        # Order by RECENCY (MAX(created_at) DESC), not the phone string: the LIMIT must keep the
+        # most-recently-active customers, not a lexicographic-first slice -- once a real day's
+        # order volume yields more distinct outbound-only phones than `limit`, a phone-string
+        # ORDER BY would truncate to the wrong (alphabetical) subset before the router ever sorts.
+        # Return each phone with its latest stamp so the router sorts the union on real recency.
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT DISTINCT phone_e164 FROM outbound_messages"
-                " ORDER BY phone_e164 LIMIT $1",
+                "SELECT phone_e164, MAX(created_at) AS latest FROM outbound_messages"
+                " GROUP BY phone_e164 ORDER BY latest DESC LIMIT $1",
                 limit,
             )
-        return [str(r["phone_e164"]) for r in rows]
+        return [
+            (str(r["phone_e164"]), r["latest"].isoformat() if r["latest"] else None)
+            for r in rows
+        ]
 
-    async def distinct_order_action_wa_ids(self, limit: int = 100) -> list[str]:
+    async def distinct_order_action_wa_ids(
+        self, limit: int = 100
+    ) -> list[tuple[str, str | None]]:
+        # Same recency ordering rationale as distinct_outbound_phones (MAX(created_at) DESC): keep
+        # the most-recently-active button-tappers within the LIMIT, and carry each one's latest
+        # stamp back so the router's union sort has real data. The IS NOT NULL guard stays.
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT DISTINCT actor_wa_id FROM order_actions"
-                " WHERE actor_wa_id IS NOT NULL ORDER BY actor_wa_id LIMIT $1",
+                "SELECT actor_wa_id, MAX(created_at) AS latest FROM order_actions"
+                " WHERE actor_wa_id IS NOT NULL"
+                " GROUP BY actor_wa_id ORDER BY latest DESC LIMIT $1",
                 limit,
             )
-        return [str(r["actor_wa_id"]) for r in rows]
+        return [
+            (str(r["actor_wa_id"]), r["latest"].isoformat() if r["latest"] else None)
+            for r in rows
+        ]
 
     async def find_stale_template_sent(
         self, older_than_minutes: int, max_age_minutes: int

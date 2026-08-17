@@ -644,15 +644,18 @@ async def list_conversations(
     summaries: list[ConversationSummary] = await c.conversations.recent_conversations(limit)
     for s in summaries:
         _add(s.user_id, s.last_active_at)
-    for phone in await c.ingest.distinct_outbound_phones(limit):
-        _add(phone, None)
-    for wa in await c.ingest.distinct_order_action_wa_ids(limit):
-        _add(wa, None)
+    # Each source returns (identifier, latest_iso) ordered by recency, so an outbound-only or
+    # tap-only customer carries its REAL last-active stamp into the union sort below (not None) --
+    # and each source's own LIMIT already keeps its most-recent, not a lexicographic-first, slice.
+    for phone, last_active in await c.ingest.distinct_outbound_phones(limit):
+        _add(phone, last_active)
+    for wa, last_active in await c.ingest.distinct_order_action_wa_ids(limit):
+        _add(wa, last_active)
 
     # Truncate to `limit` BEFORE the per-thread queries so the union (up to 3*limit candidates)
     # cannot amplify the preview/get_or_create work beyond `limit` rows. Order by the captured
-    # (pre-bump) last_active so the most-recently-active threads are the ones we materialize;
-    # candidates with unknown recency (outbound/tap-only) sort last but still surface when few.
+    # (pre-bump) last_active so the most-recently-active threads are the ones we materialize; every
+    # source now supplies a real recency stamp, so no source is artificially forced to sort last.
     ordered_phones.sort(key=lambda p: str(last_active_by_phone.get(p) or ""), reverse=True)
     ordered_phones = ordered_phones[:limit]
 

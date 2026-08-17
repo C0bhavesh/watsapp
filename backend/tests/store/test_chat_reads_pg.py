@@ -49,6 +49,34 @@ async def test_get_user_id_pg(pool: LazyPool) -> None:
     assert await store.get_user_id(-1) is None
 
 
+async def _last_active_pg(store: PostgresConversationStore, user_id: str) -> str | None:
+    for s in await store.recent_conversations(limit=1000):
+        if s.user_id == user_id:
+            return s.last_active_at
+    return None
+
+
+async def test_get_or_create_no_bump_then_touch_pg(pool: LazyPool) -> None:
+    store = PostgresConversationStore(pool)
+    user_id = f"+91{uuid.uuid4().int % 10**10:010d}"
+    await store.get_or_create(user_id)
+    first = await _last_active_pg(store, user_id)
+
+    # Second get_or_create is a display-only lookup -- must NOT bump last_active_at.
+    await store.get_or_create(user_id)
+    assert await _last_active_pg(store, user_id) == first
+
+    # touch() is genuine activity -- it MUST bump last_active_at.
+    await store.touch(user_id)
+    assert await _last_active_pg(store, user_id) != first
+
+
+async def test_touch_missing_conversation_is_noop_pg(pool: LazyPool) -> None:
+    store = PostgresConversationStore(pool)
+    # Touching a non-existent user must not raise or create a row.
+    await store.touch(f"no-such-{uuid.uuid4()}")
+
+
 async def test_find_order_actions_by_wa_ids_dual_key_pg(pool: LazyPool) -> None:
     store = PostgresIngestStore(pool)
     gid = f"gid://shopify/Order/{uuid.uuid4()}"

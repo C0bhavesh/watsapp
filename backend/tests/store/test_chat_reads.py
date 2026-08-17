@@ -34,12 +34,45 @@ async def test_recent_conversations_ordered_by_last_active_desc() -> None:
     store = InMemoryConversationStore()
     await store.get_or_create("919664290413")
     await store.get_or_create("917000000000")
-    # Touch the FIRST one again so it becomes the most recently active.
-    await store.get_or_create("919664290413")
+    # touch() (genuine activity) bumps the FIRST one so it becomes the most recently active.
+    await store.touch("919664290413")
 
     summaries = await store.recent_conversations(limit=10)
 
     assert [s.user_id for s in summaries] == ["919664290413", "917000000000"]
+
+
+async def test_get_or_create_does_not_bump_last_active_on_existing() -> None:
+    # The bug: get_or_create used to bump last_active_at on every call (even an already-existing
+    # row), so the display-only admin thread-list lookup corrupted recency on every page load.
+    store = InMemoryConversationStore()
+    await store.get_or_create("919664290413")
+    first = (await store.recent_conversations())[0].last_active_at
+
+    await store.get_or_create("919664290413")  # a genuine no-op for recency now
+    second = (await store.recent_conversations())[0].last_active_at
+
+    assert first is not None and first == second
+
+
+async def test_touch_bumps_last_active_on_existing() -> None:
+    store = InMemoryConversationStore()
+    conv_id = await store.get_or_create("919664290413")
+    # Pin an old stamp so the assertion is deterministic on coarse clocks (two now() calls can
+    # otherwise land in the same tick and compare equal).
+    store._last_active_at[conv_id] = datetime(2020, 1, 1, tzinfo=UTC)  # type: ignore[attr-defined]
+    before = (await store.recent_conversations())[0].last_active_at
+
+    await store.touch("919664290413")
+    after = (await store.recent_conversations())[0].last_active_at
+
+    assert before is not None and after is not None and after > before
+
+
+async def test_touch_missing_conversation_is_noop() -> None:
+    store = InMemoryConversationStore()
+    await store.touch("no-such-user")  # must not raise or create a row
+    assert "no-such-user" not in store._conversations  # type: ignore[attr-defined]
 
 
 # --- IngestStore.find_outbound_by_phone ---

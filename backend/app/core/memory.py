@@ -10,6 +10,11 @@ async def load_history(
     """Return (conversation_id, recent turns as provider Message objects), creating the
     conversation on first contact. Only user/assistant turns are replayed into the prompt."""
     conversation_id = await store.get_or_create(wa_id)
+    # A real inbound message IS genuine activity -- bump recency explicitly. get_or_create no longer
+    # bumps on an existing row (so display-only lookups don't corrupt recency), so the real-message
+    # path restores "recent activity floats to the top" via touch. Fires exactly once per inbound
+    # message: load_history is called once per turn in core/conversation.handle_message.
+    await store.touch(wa_id)
     stored = await store.recent_messages(conversation_id, window)
     history: list[Message] = []
     for m in stored:

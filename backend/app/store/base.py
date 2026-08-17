@@ -268,6 +268,13 @@ class ConversationStore(Protocol):
 
     async def get_or_create(self, user_id: str) -> int: ...
 
+    # Explicit "genuine customer activity just happened" bump. This is the ONLY place
+    # last_active_at is written to now() after the row is first created -- get_or_create no longer
+    # bumps on an already-existing row, so a display-only lookup (e.g. the admin thread list
+    # materializing a thread_id) can call get_or_create without corrupting recency. No-op if the
+    # conversation does not exist yet.
+    async def touch(self, user_id: str) -> None: ...
+
     # Read-only reverse lookup: thread id -> the conversation's user_id (the normalized phone).
     # Returns None for an unknown id (the unified thread view maps that to a 404). MUST NOT create.
     async def get_user_id(self, conversation_id: int) -> str | None: ...

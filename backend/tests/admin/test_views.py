@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
@@ -139,6 +140,66 @@ def test_conversations_list_includes_outbound_only_customer(client: TestClient) 
 
     outbound_thread = next(r for r in rows if r["phone"] == "+918888888888")
     assert isinstance(outbound_thread["thread_id"], int)
+
+
+def test_conversations_list_does_not_corrupt_recency_on_reload(client: TestClient) -> None:
+    # Regression: GET /admin/conversations used to bump every listed conversation's last_active_at
+    # (via get_or_create) on EVERY page load, silently rewriting recency with no real activity.
+    # Two back-to-back loads (no writes in between) must return byte-identical order AND leave every
+    # conversation's last_active_at untouched.
+    login(client)
+    _send_ai_message("+919664290413", "hi", "hello there")
+    _seed_outbound_at("+918888888888", "gid://shopify/Order/idem", "{}")
+    c = get_container()
+
+    # Warm-up load: the first-ever view legitimately CREATES the outbound-only thread's
+    # conversation row (the intended one-time materialization, stamped DEFAULT now()). The bug
+    # under test is recency being rewritten on EVERY subsequent load, so compare two steady-state
+    # loads after the rows already exist.
+    client.get("/admin/conversations")
+
+    first = client.get("/admin/conversations").json()
+    before = {
+        s.user_id: s.last_active_at
+        for s in asyncio.run(c.conversations.recent_conversations(1000))
+    }
+    second = client.get("/admin/conversations").json()
+    after = {
+        s.user_id: s.last_active_at
+        for s in asyncio.run(c.conversations.recent_conversations(1000))
+    }
+
+    assert first == second
+    assert before == after
+
+
+def test_conversations_list_uses_max_last_active_not_first_wins(client: TestClient) -> None:
+    # _add() must take the MAX last_active across sources, not first-non-None-wins: a stale
+    # conversations.last_active_at must not mask a fresher outbound_messages stamp for the SAME
+    # phone. P has a stale conversation row (2020) + a fresh outbound (05:00); Q is outbound-only at
+    # 03:00. With MAX capture P outranks Q; first-wins would rank P by 2020 -> below Q.
+    login(client)
+    c = get_container()
+    p = "+919000000001"
+    q = "+919000000002"
+
+    async def _stale_conv() -> None:
+        conv_id = await c.conversations.get_or_create(p)
+        c.conversations._last_active_at[conv_id] = datetime(2020, 1, 1, tzinfo=UTC)  # type: ignore[attr-defined]
+
+    asyncio.run(_stale_conv())
+    _seed_outbound_at(p, "gid://shopify/Order/pfresh", "{}")
+    _seed_outbound_at(q, "gid://shopify/Order/qmid", "{}")
+    meta = c.ingest._outbound_meta  # type: ignore[attr-defined]
+    fresh = datetime(2026, 8, 17, 5, tzinfo=UTC)
+    middle = datetime(2026, 8, 17, 3, tzinfo=UTC)
+    meta["order_created:gid://shopify/Order/pfresh"].created_at = fresh
+    meta["order_created:gid://shopify/Order/qmid"].created_at = middle
+
+    rows = client.get("/admin/conversations").json()
+    order = [r["phone"] for r in rows if r["phone"] in (p, q)]
+
+    assert order == [p, q]
 
 
 def test_conversation_thread_merges_all_three_sources(client: TestClient) -> None:

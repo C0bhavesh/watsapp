@@ -679,8 +679,8 @@ async def list_conversations(
 
     # Union distinct phones across all THREE sources so a customer who only ever received an order
     # confirmation (no conversation row) still appears. Normalize every candidate to E.164 before
-    # deduping so one customer is never listed twice under two formats. last_active is captured
-    # from recent_conversations BEFORE the get_or_create bump below, so display stays truthful.
+    # deduping so one customer is never listed twice under two formats. get_or_create below is a
+    # display-only lookup and no longer bumps last_active_at, so captured recency stays truthful.
     last_active_by_phone: dict[str, str | None] = {}
     ordered_phones: list[str] = []
     seen: set[str] = set()
@@ -692,8 +692,14 @@ async def list_conversations(
         if norm not in seen:
             seen.add(norm)
             ordered_phones.append(norm)
-        if last_active is not None and last_active_by_phone.get(norm) is None:
-            last_active_by_phone[norm] = last_active
+        # Take the MAXIMUM stamp across all three sources for a phone, not first-non-None-wins:
+        # a stale conversations.last_active_at must never mask a genuinely more-recent
+        # outbound_messages/order_actions timestamp for the same phone. ISO-8601 strings compare
+        # lexicographically in timestamp order (same convention the sorts below rely on).
+        if last_active is not None:
+            existing = last_active_by_phone.get(norm)
+            if existing is None or last_active > existing:
+                last_active_by_phone[norm] = last_active
 
     summaries: list[ConversationSummary] = await c.conversations.recent_conversations(limit)
     for s in summaries:
@@ -708,8 +714,8 @@ async def list_conversations(
 
     # Truncate to `limit` BEFORE the per-thread queries so the union (up to 3*limit candidates)
     # cannot amplify the preview/get_or_create work beyond `limit` rows. Order by the captured
-    # (pre-bump) last_active so the most-recently-active threads are the ones we materialize; every
-    # source now supplies a real recency stamp, so no source is artificially forced to sort last.
+    # (MAX-across-sources) last_active so the most-recently-active threads are the ones we
+    # materialize; every source supplies a real recency stamp, so no source sorts artificially last.
     ordered_phones.sort(key=lambda p: str(last_active_by_phone.get(p) or ""), reverse=True)
     ordered_phones = ordered_phones[:limit]
 
@@ -721,8 +727,8 @@ async def list_conversations(
         thread_id = await c.conversations.get_or_create(norm)
         recent = await c.conversations.find_messages_by_user_id(norm, limit=1)
         preview = recent[-1].content[:120] if recent else ""
-        # Prefer the latest message timestamp (immune to the get_or_create last_active bump);
-        # fall back to the pre-bump conversation last_active captured above.
+        # Prefer the latest message timestamp; fall back to the MAX-across-sources last_active
+        # captured above (used for outbound-only / tap-only threads that have no messages).
         last_active = recent[-1].created_at if recent else last_active_by_phone.get(norm)
 
         orders_for_phone = await c.ingest.find_mirrored_orders_by_phone(norm)

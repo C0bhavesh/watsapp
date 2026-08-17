@@ -1189,14 +1189,29 @@ class PostgresConversationStore:
         # of SELECT-then-INSERT: two concurrent first-contact messages from the same sender
         # can otherwise both miss the SELECT and both INSERT, splitting history across two
         # conversation ids. ON CONFLICT makes this one round trip with no race window.
+        # The conflict branch is a self-assignment (last_active_at = its own value): it does NOT
+        # bump recency, it only lets RETURNING hand back the existing row's id. Bumping here
+        # corrupted recency -- the admin thread list calls get_or_create purely to materialize a
+        # thread_id for display, so every page load used to rewrite up to 50 rows' last_active_at
+        # to now(). Genuine activity now bumps via touch() instead. New rows still get
+        # DEFAULT now() (schema.sql) on insert.
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "INSERT INTO conversations (user_id) VALUES ($1)"
-                " ON CONFLICT (user_id) DO UPDATE SET last_active_at = now()"
+                " ON CONFLICT (user_id) DO UPDATE SET last_active_at = conversations.last_active_at"
                 " RETURNING id",
                 user_id,
             )
         return int(row["id"])
+
+    async def touch(self, user_id: str) -> None:
+        # Explicit recency bump for genuine customer activity (a real inbound message). The only
+        # place last_active_at is set to now() after row creation. No-op if the row is absent.
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE conversations SET last_active_at = now() WHERE user_id = $1",
+                user_id,
+            )
 
     async def get_user_id(self, conversation_id: int) -> str | None:
         # Read-only reverse lookup (id -> user_id) for the unified thread view; None on unknown id.

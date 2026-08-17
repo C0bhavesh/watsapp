@@ -655,9 +655,11 @@ class InMemoryConversationStore:
         self._messages: dict[int, list[StoredMessage]] = {}
         self._paused_until: dict[int, datetime] = {}
         self._handoff_attempted_at: dict[int, datetime] = {}
-        # Mirrors conversations.last_active_at (Postgres bumps this on every get_or_create, even
-        # an already-exists ON CONFLICT hit -- not just on first creation). Needed so
-        # recent_conversations can order threads by recency, same as the Postgres index does.
+        # Mirrors conversations.last_active_at. Stamped once at row creation (the Postgres column
+        # DEFAULT now()); thereafter only touch() bumps it -- get_or_create on an already-existing
+        # row must NOT bump (a display-only lookup like the admin thread list would otherwise
+        # corrupt recency). Needed so recent_conversations can order threads by recency, same as
+        # the Postgres index does.
         self._last_active_at: dict[int, datetime] = {}
         self._next_id = 1
 
@@ -669,10 +671,18 @@ class InMemoryConversationStore:
         if user_id not in self._conversations:
             self._conversations[user_id] = self._next_id
             self._messages[self._next_id] = []
+            # First-creation stamp only (mirrors the Postgres DEFAULT now()); an existing row is
+            # left untouched so a display-only lookup never bumps recency.
+            self._last_active_at[self._next_id] = datetime.now(UTC)
             self._next_id += 1
-        conversation_id = self._conversations[user_id]
-        self._last_active_at[conversation_id] = datetime.now(UTC)
-        return conversation_id
+        return self._conversations[user_id]
+
+    async def touch(self, user_id: str) -> None:
+        # Explicit recency bump for genuine customer activity. The only place last_active_at is
+        # set to now() after row creation. No-op if the conversation does not exist yet.
+        conversation_id = self._conversations.get(user_id)
+        if conversation_id is not None:
+            self._last_active_at[conversation_id] = datetime.now(UTC)
 
     async def get_user_id(self, conversation_id: int) -> str | None:
         for user_id, conv_id in self._conversations.items():

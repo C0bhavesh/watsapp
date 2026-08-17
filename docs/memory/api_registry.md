@@ -124,3 +124,22 @@
   (`ORDERS_CREATE, ORDERS_UPDATED, CUSTOMERS_UPDATE, FULFILLMENTS_CREATE, FULFILLMENTS_UPDATE`) — it
   is now purely receiver-side data: `app/channels/shopify_webhook.py` derives its `HANDLED_TOPICS`
   set from it, and Admin-created webhooks must be registered for exactly these topics.
+
+## [internal] Admin chat-thread view (read-only, 2026-08-17)
+- **Caller/UI:** backend/app/admin/static/{index.html,admin.js} (`loadChatList`/`loadChatThread`).
+- **Endpoints (both `Depends(require_admin)`, session-cookie authed like every other `/admin/*`):**
+  - `GET /admin/conversations?limit=1..500` (default 50) → `list[{user_id, last_active_at, preview}]`
+    — one row per WhatsApp sender, ordered most-recently-active first (`recent_conversations` +
+    a 1-message `find_messages_by_user_id` for the preview, truncated to 120 chars).
+  - `GET /admin/conversations/{wa_id}` → `list[{type, timestamp, text}]` sorted chronologically
+    ascending. `type ∈ {customer_message, ai_reply, template_sent, button_tap}`. Merges three
+    previously-unconnected sources per customer: AI messages (`find_messages_by_user_id(wa_id)`),
+    template sends (`find_outbound_by_phone(normalize_phone(wa_id))` — text `[state] template →
+    body_params`), and Confirm/Cancel taps (`find_order_actions_by_wa_id(wa_id)` — text `Tapped
+    {action} → {result}`). Unknown wa_id → `[]` (never creates a conversation row). No mutation,
+    no writes anywhere; only NEW read methods on the stores. Sort key is `str(timestamp or "")`
+    so ISO-8601 strings sort chronologically and null/absent timestamps sort first.
+- **Notes:** Cloud API-only WhatsApp number is "headless" (not visible in the WhatsApp app / Meta
+  Business Suite Inbox), so this admin view is the only place to see the full per-customer thread.
+  Sub-project 1 of 3 (chat view → manual send → tags). `order_actions` is READ ONLY here —
+  `app/core/order_actions.py` is byte-identical throughout the feature.

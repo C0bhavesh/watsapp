@@ -3,6 +3,7 @@ import json
 
 from fastapi.testclient import TestClient
 
+from app.channels.shopify_orders import order_from_webhook_payload
 from app.deps import get_container
 from app.store.base import MappingUpsert, OutboundDraft
 
@@ -159,7 +160,7 @@ def test_conversation_thread_merges_all_three_sources(client: TestClient) -> Non
     resp = client.get(f"/admin/conversations/{thread_id}")
 
     assert resp.status_code == 200
-    entries = resp.json()
+    entries = resp.json()["entries"]
     types = [e["type"] for e in entries]
     # All three sources surface in ONE thread even though order_actions is keyed RAW while the
     # AI chat + outbound are keyed NORMALIZED -- the dual-format lookup is what proves finding #1.
@@ -193,5 +194,86 @@ def test_conversation_thread_non_dict_payload_degrades_not_500(client: TestClien
     resp = client.get(f"/admin/conversations/{thread_id}")
 
     assert resp.status_code == 200
-    template_entry = next(e for e in resp.json() if e["type"] == "template_sent")
+    template_entry = next(e for e in resp.json()["entries"] if e["type"] == "template_sent")
     assert "unreadable template payload" in template_entry["text"]
+
+
+def test_conversation_thread_includes_order_summary(client: TestClient) -> None:
+    login(client)
+    normalized = "+919876543210"
+    order = order_from_webhook_payload({
+        "admin_graphql_api_id": "gid://shopify/Order/orders1",
+        "name": "tavas500",
+        "phone": normalized,
+        "financial_status": "paid",
+        "fulfillment_status": "fulfilled",
+        "cancelled_at": None,
+        "tags": "vip, repeat",
+        "payment_gateway_names": ["Cash on Delivery (COD)"],
+        "total_price": "1299.00",
+        "currency": "INR",
+        "updated_at": "2026-08-17T10:00:00+05:30",
+    })
+    assert order is not None
+    asyncio.run(get_container().ingest.upsert_order_mirror(order))
+
+    # A mirrored-order-only customer is NOT surfaced by /admin/conversations (that list unions
+    # conversations + outbound + order_actions, never mirrored orders), so materialize the thread
+    # id directly rather than resolving it via _thread_id_for.
+    thread_id = asyncio.run(get_container().conversations.get_or_create(normalized))
+    resp = client.get(f"/admin/conversations/{thread_id}")
+
+    assert resp.status_code == 200
+    orders = resp.json()["orders"]
+    assert len(orders) == 1
+    summary = orders[0]
+    assert summary["order_name"] == "tavas500"
+    assert summary["financial_status"] == "paid"
+    assert summary["fulfillment_status"] == "fulfilled"
+    assert summary["is_cod"] is True
+    assert summary["total_amount"] == "1299.00"
+    assert summary["total_currency"] == "INR"
+    assert "vip" in summary["tags"]
+    assert summary["tracking_company"] is None
+
+
+def test_conversation_thread_no_orders_returns_empty_list(client: TestClient) -> None:
+    login(client)
+    _send_ai_message("+919111222333", "hi", "hello there")
+
+    thread_id = _thread_id_for(client, "+919111222333")
+    resp = client.get(f"/admin/conversations/{thread_id}")
+
+    assert resp.status_code == 200
+    assert resp.json()["orders"] == []
+
+
+def test_conversation_thread_multiple_orders_sorted_most_recent_first(
+    client: TestClient,
+) -> None:
+    login(client)
+    normalized = "+919555666777"
+
+    older = order_from_webhook_payload({
+        "admin_graphql_api_id": "gid://shopify/Order/older",
+        "name": "tavas-older", "phone": normalized, "financial_status": "paid",
+        "fulfillment_status": None, "tags": "", "payment_gateway_names": [],
+        "total_price": "500.00", "currency": "INR", "updated_at": "2026-08-01T00:00:00+05:30",
+    })
+    newer = order_from_webhook_payload({
+        "admin_graphql_api_id": "gid://shopify/Order/newer",
+        "name": "tavas-newer", "phone": normalized, "financial_status": "pending",
+        "fulfillment_status": None, "tags": "", "payment_gateway_names": [],
+        "total_price": "700.00", "currency": "INR", "updated_at": "2026-08-15T00:00:00+05:30",
+    })
+    assert older is not None and newer is not None
+    asyncio.run(get_container().ingest.upsert_order_mirror(older))
+    asyncio.run(get_container().ingest.upsert_order_mirror(newer))
+
+    # See test_conversation_thread_includes_order_summary: mirrored-order-only customers are not in
+    # the conversations list, so materialize the thread id directly.
+    thread_id = asyncio.run(get_container().conversations.get_or_create(normalized))
+    resp = client.get(f"/admin/conversations/{thread_id}")
+
+    order_names = [o["order_name"] for o in resp.json()["orders"]]
+    assert order_names == ["tavas-newer", "tavas-older"]

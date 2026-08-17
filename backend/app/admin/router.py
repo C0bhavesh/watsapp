@@ -28,6 +28,7 @@ from app.providers.base import ProviderErrorKind
 from app.providers.registry import get_provider, list_providers
 from app.providers.verify import verify_key
 from app.ratelimit import limiter
+from app.shopify.models import Order
 from app.store.base import ConversationSummary, MappingView, OutboundView
 
 logger = logging.getLogger("app.admin")
@@ -679,8 +680,30 @@ async def list_conversations(
     return result
 
 
+def _order_summary(order: Order) -> dict[str, object]:
+    tracking_company = tracking_number = tracking_url = None
+    if order.fulfillments:
+        first = order.fulfillments[0]
+        tracking_company = first.tracking_company
+        tracking_number = first.tracking_number
+        tracking_url = first.tracking_url
+    return {
+        "order_name": order.name,
+        "financial_status": order.financial_status,
+        "fulfillment_status": order.fulfillment_status,
+        "cancelled_at": order.cancelled_at,
+        "is_cod": order.is_cod(),
+        "total_amount": order.total.amount if order.total else None,
+        "total_currency": order.total.currency if order.total else None,
+        "tags": list(order.tags),
+        "tracking_company": tracking_company,
+        "tracking_number": tracking_number,
+        "tracking_url": tracking_url,
+    }
+
+
 @admin_router.get("/conversations/{thread_id}", dependencies=[Depends(require_admin)])
-async def get_conversation_thread(thread_id: int) -> list[dict[str, object]]:
+async def get_conversation_thread(thread_id: int) -> dict[str, object]:
     c = get_container()
     # Resolve the conversation's normalized phone from the opaque id; a bad literal id genuinely
     # does not exist -> 404 (distinct from "no messages yet", which is a real empty thread).
@@ -719,4 +742,9 @@ async def get_conversation_thread(thread_id: int) -> list[dict[str, object]]:
     # Timestamps are ISO 8601 strings (or None -> ""), which sort lexicographically in
     # chronological order. str() keeps the key type mypy-checkable (object -> str).
     entries.sort(key=lambda e: str(e["timestamp"] or ""))
-    return entries
+
+    orders = await c.ingest.find_mirrored_orders_by_phone(user_id)
+    orders_sorted = sorted(orders, key=lambda o: str(o.updated_at or ""), reverse=True)
+    order_summaries = [_order_summary(o) for o in orders_sorted]
+
+    return {"entries": entries, "orders": order_summaries}

@@ -129,7 +129,7 @@ function renderOrderPanel(orders) {
   renderOrderDetail(orders[0]);
 }
 
-async function loadThread(threadId, phone) {
+async function loadThread(threadId, phone, silent = false) {
   currentThreadId = threadId;
   currentPhone = phone;
   document.querySelectorAll(".thread-row").forEach((row) => {
@@ -150,9 +150,11 @@ async function loadThread(threadId, phone) {
     }
     renderOrderPanel(data.orders);
     threadSnapshotKey = threadEntriesKey(data.entries);
-    el("thread-status").textContent = "";
+    if (!silent) el("thread-status").textContent = "";
   } catch (e) {
-    el("thread-status").textContent = e.message;
+    // A poll-triggered load (silent) must never write thread-status, which is reserved for
+    // explicit user-triggered load errors.
+    if (!silent) el("thread-status").textContent = e.message;
   }
 }
 
@@ -250,7 +252,7 @@ async function pollTick() {
       const nextThreadKey = threadEntriesKey(data.entries);
       if (nextThreadKey !== threadSnapshotKey) {
         threadSnapshotKey = nextThreadKey;
-        await loadThread(currentThreadId, currentPhone);
+        await loadThread(currentThreadId, currentPhone, true);
       }
     }
   } catch (e) {

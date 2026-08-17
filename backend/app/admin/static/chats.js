@@ -41,6 +41,7 @@ function renderBubble(entry) {
 }
 
 function renderOrderDetail(order) {
+  el("order-number").textContent = order.order_name;
   const container = el("order-detail");
   container.innerHTML = "";
   const fields = [
@@ -68,6 +69,24 @@ function renderOrderDetail(order) {
     link.textContent = "Track shipment";
     link.style.fontSize = ".8rem";
     container.appendChild(link);
+  }
+
+  const productsContainer = el("order-products");
+  productsContainer.innerHTML = "";
+  const items = order.line_items || [];
+  if (items.length) {
+    const heading = document.createElement("h4");
+    heading.textContent = "Products";
+    productsContainer.appendChild(heading);
+    for (const li of items) {
+      const row = document.createElement("div");
+      row.className = "product-row";
+      let text = li.quantity + "× " + li.title;
+      if (li.variant_title) text += " (" + li.variant_title + ")";
+      if (li.price_amount) text += " — " + li.price_amount + " " + (li.price_currency || "");
+      row.textContent = text;
+      productsContainer.appendChild(row);
+    }
   }
 }
 

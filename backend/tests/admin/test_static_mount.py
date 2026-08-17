@@ -51,3 +51,18 @@ def test_chats_js_served_and_calls_the_conversations_api(client: TestClient) -> 
     assert "/admin/conversations" in js
     assert "loadThreadList" in js
     assert "loadThread" in js
+
+
+def test_chats_page_has_order_number_and_products_containers(client: TestClient) -> None:
+    resp = client.get("/admin/ui/chats.html")
+    assert resp.status_code == 200
+    assert 'id="order-number"' in resp.text
+    assert 'id="order-products"' in resp.text
+
+
+def test_chats_js_renders_order_number_and_line_items(client: TestClient) -> None:
+    resp = client.get("/admin/ui/chats.js")
+    assert resp.status_code == 200
+    assert "order-number" in resp.text
+    assert "order-products" in resp.text
+    assert "line_items" in resp.text

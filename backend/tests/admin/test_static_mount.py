@@ -23,15 +23,13 @@ def test_controls_panel_js_sends_retention_days(client: TestClient) -> None:
     assert "c-retention" in js
 
 
-def test_chats_panel_present(client: TestClient) -> None:
+def test_old_embedded_chats_card_removed(client: TestClient) -> None:
     html = client.get("/admin/ui/").text
-    assert 'id="chats-card"' in html
-    assert 'id="chats-list-table"' in html
-    assert 'id="chat-thread"' in html
+    assert 'id="chats-card"' not in html
+    assert 'id="chats-list-table"' not in html
 
 
-def test_chats_panel_js_calls_the_new_endpoints(client: TestClient) -> None:
+def test_old_embedded_chats_js_removed(client: TestClient) -> None:
     js = client.get("/admin/ui/admin.js").text
-    assert "/admin/conversations" in js
-    assert "loadChatList" in js
-    assert "loadChatThread" in js
+    assert "loadChatList" not in js
+    assert "loadChatThread" not in js

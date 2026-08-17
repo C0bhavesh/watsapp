@@ -41,16 +41,6 @@
     .tabs button.active { background: #4f46e5; color: #fff; }
     .kn-pane { display: none; } .kn-pane.active { display: block; }
     .scroll { overflow-x: auto; }
-    #chat-header { margin-top: .6rem; font-size: .82rem; color: #71717a; }
-    #chat-thread { margin-top: .8rem; max-height: 460px; overflow-y: auto;
-      display: flex; flex-direction: column; }
-    .bubble { padding: .4rem .6rem; margin: .3rem 0; border-radius: 8px; max-width: 72%;
-      font-size: .82rem; word-break: break-word; }
-    .bubble-in { background: #f1f5f9; color: #18181b; align-self: flex-start; }
-    .bubble-out { background: #e0e7ff; color: #18181b; align-self: flex-end; }
-    .bubble-label { font-size: .68rem; font-weight: 500; text-transform: uppercase;
-      letter-spacing: .02em; color: #71717a; margin-bottom: .15rem; }
-    .bubble-ts { font-size: .66rem; color: #a1a1aa; margin-top: .15rem; }
   </style>
 </head>
 <body>
@@ -214,17 +204,6 @@
         <thead><tr><th>Key</th><th>State</th><th>Kind</th><th>Phone</th><th>Attempts</th><th>Error</th></tr></thead>
         <tbody></tbody></table></div>
       <div class="status" id="views-status"></div>
-    </div>
-
-    <div class="card" id="chats-card">
-      <h2>Chats</h2>
-      <button class="small" id="chats-refresh">Refresh threads</button>
-      <div class="scroll"><table id="chats-list-table">
-        <thead><tr><th>Phone</th><th>Last active</th><th>Preview</th></tr></thead>
-        <tbody></tbody></table></div>
-      <div id="chat-header"></div>
-      <div id="chat-thread"></div>
-      <div class="status" id="chats-status"></div>
     </div>
   </div>
   <script src="admin.js"></script>

@@ -37,6 +37,14 @@ const STATUS_LABELS = {
   queued: "Queued",
 };
 
+function formatBubbleTime(isoTimestamp) {
+  if (!isoTimestamp) return "";
+  const d = new Date(isoTimestamp);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })
+    .toLowerCase();
+}
+
 function renderBubble(entry) {
   const div = document.createElement("div");
   const side = entry.type === "customer_message" ? "bubble-in" : "bubble-out";
@@ -48,13 +56,17 @@ function renderBubble(entry) {
   text.textContent = entry.text;
   const ts = document.createElement("div");
   ts.className = "bubble-ts";
-  ts.textContent = entry.timestamp || "";
+  ts.textContent = formatBubbleTime(entry.timestamp);
   div.appendChild(label);
   div.appendChild(text);
   if (entry.status && entry.status !== "sent") {
     const status = document.createElement("div");
     status.className = "bubble-status";
-    if (entry.status === "failed" || entry.status === "undeliverable") {
+    if (
+      entry.status === "failed" ||
+      entry.status === "undeliverable" ||
+      entry.status === "suppressed"
+    ) {
       status.classList.add("bubble-status-error");
     }
     status.textContent = STATUS_LABELS[entry.status] || entry.status;

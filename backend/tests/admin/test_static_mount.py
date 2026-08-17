@@ -155,3 +155,10 @@ def test_chats_js_thread_list_shows_name_only(client: TestClient) -> None:
     js = resp.text
     # The old "(" + phone + ")" suffix pattern must be gone from the thread-row rendering.
     assert 'customer_name + " (" + t.phone + ")"' not in js
+
+
+def test_chats_js_formats_bubble_timestamp_as_12h(client: TestClient) -> None:
+    resp = client.get("/admin/ui/chats.js")
+    js = resp.text
+    assert "formatBubbleTime" in js
+    assert "hour12" in js or "toLocaleTimeString" in js

@@ -4,7 +4,15 @@
 function el(id) { return document.getElementById(id); }
 
 async function api(path, method = "GET") {
-  const res = await fetch(path, { method, credentials: "same-origin" });
+  const opts = { method, credentials: "same-origin" };
+  if (method !== "GET") {
+    // A bodyless POST sends no Content-Length, which Vercel's edge rejects with a 411 before the
+    // request reaches the app. Attach an empty JSON body so the edge lets it through; the FastAPI
+    // route ignores the body.
+    opts.headers = { "Content-Type": "application/json" };
+    opts.body = "{}";
+  }
+  const res = await fetch(path, opts);
   if (res.status === 401) {
     window.location.href = "/admin/ui/";
     throw new Error("not authenticated");

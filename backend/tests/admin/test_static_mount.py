@@ -133,6 +133,16 @@ def test_chats_js_calls_the_resume_endpoint(client: TestClient) -> None:
     assert "paused_until" in js
 
 
+def test_chats_js_sends_json_body_on_non_get_requests(client: TestClient) -> None:
+    # A bodyless POST from fetch() sends no Content-Length, which Vercel's edge rejects with a
+    # 411 Length Required before it reaches the app -- breaking the Resume AI button in a real
+    # browser (invisible to TestClient, which never traverses Vercel's edge). The api() helper
+    # must attach a Content-Type: application/json header and a body on any non-GET call.
+    js = client.get("/admin/ui/chats.js").text
+    assert "application/json" in js
+    assert "body" in js
+
+
 def test_chats_js_normalize_order_query_strips_leading_hash(client: TestClient) -> None:
     # The search box invites "#3589"; a leading # must be stripped before the digit test so it
     # still normalizes to tavas3589. Fix 5.

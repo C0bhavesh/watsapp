@@ -206,9 +206,19 @@ class IngestStore(Protocol):
         self, phone_e164: str, limit: int = 100
     ) -> list[OutboundEntry]: ...
 
-    async def find_order_actions_by_wa_id(
-        self, wa_id: str, limit: int = 100
+    # actor_wa_id is written RAW (no leading +, see core/order_actions.py). The unified chat
+    # view resolves a thread from the NORMALIZED phone, so it must query with BOTH the normalized
+    # and the raw/digits-only candidate keys -- hence a multi-key (ANY) lookup, not a single key.
+    async def find_order_actions_by_wa_ids(
+        self, wa_ids: list[str], limit: int = 100
     ) -> list[OrderActionEntry]: ...
+
+    # Distinct enumeration for the unified thread LIST: the list unions phones/wa_ids across all
+    # three sources (conversations, outbound_messages, order_actions), so a customer who only ever
+    # received an order confirmation (no conversation row) still surfaces as a thread.
+    async def distinct_outbound_phones(self, limit: int = 100) -> list[str]: ...
+
+    async def distinct_order_action_wa_ids(self, limit: int = 100) -> list[str]: ...
 
     # Atomically CLAIMS the returned orders: each is flipped out of 'cancel_requested' to a
     # transient in-progress state so two overlapping reconcile runs cannot both claim the same
@@ -250,6 +260,10 @@ class ConversationStore(Protocol):
     """Windowed chat history + handoff state per WhatsApp sender."""
 
     async def get_or_create(self, user_id: str) -> int: ...
+
+    # Read-only reverse lookup: thread id -> the conversation's user_id (the normalized phone).
+    # Returns None for an unknown id (the unified thread view maps that to a 404). MUST NOT create.
+    async def get_user_id(self, conversation_id: int) -> str | None: ...
 
     # Genuinely read-only: unlike get_or_create, MUST NOT create a conversation row on a miss.
     # A miss (no conversation for this user_id) returns an empty list.

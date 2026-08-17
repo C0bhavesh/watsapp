@@ -583,20 +583,32 @@ async def list_outbox(limit: int = Query(default=50, ge=1, le=500)) -> list[dict
     return [asdict(r) for r in rows]
 
 
+# body_params values trace back to Shopify webhook data (signed but attacker-typed under this
+# repo's threat model). Cap each value and the joined total so one oversized param cannot inflate
+# the response/DOM, matching list_conversations' existing 120-char preview truncation posture.
+_TEMPLATE_VALUE_MAX = 200
+_TEMPLATE_TEXT_MAX = 500
+
+
 def _template_sent_text(payload_json: str) -> str:
     try:
         data = json.loads(payload_json)
     except (ValueError, TypeError):
         return "(unreadable template payload)"
-    template = data.get("template", "?")
+    # json.loads("null"/"42"/"[]") parses successfully to a non-dict -- guard before .get so a
+    # valid-but-non-dict payload degrades to the fallback instead of raising AttributeError (500).
+    if not isinstance(data, dict):
+        return "(unreadable template payload)"
+    template = str(data.get("template", "?"))[:_TEMPLATE_VALUE_MAX]
     body_params = data.get("body_params")
     if isinstance(body_params, dict):
-        values = ", ".join(str(v) for v in body_params.values())
+        raw_values: list[object] = list(body_params.values())
     elif isinstance(body_params, list):
-        values = ", ".join(str(v) for v in body_params)
+        raw_values = body_params
     else:
-        values = ""
-    return f"{template} → {values}" if values else str(template)
+        raw_values = []
+    values = ", ".join(str(v)[:_TEMPLATE_VALUE_MAX] for v in raw_values)[:_TEMPLATE_TEXT_MAX]
+    return f"{template} → {values}" if values else template
 
 
 def _button_tap_text(action: str, result: str) -> str:
@@ -605,44 +617,96 @@ def _button_tap_text(action: str, result: str) -> str:
 
 @admin_router.get("/conversations", dependencies=[Depends(require_admin)])
 async def list_conversations(
-    limit: int = Query(default=50, ge=1, le=500),
+    # Max lowered 500 -> 100 (each displayed thread costs one find_messages preview query, so a
+    # high limit is a per-request N+1 amplifier on the shared pool; admin-only, so a cap suffices).
+    limit: int = Query(default=50, ge=1, le=100),
 ) -> list[dict[str, object]]:
     c = get_container()
+
+    # Union distinct phones across all THREE sources so a customer who only ever received an order
+    # confirmation (no conversation row) still appears. Normalize every candidate to E.164 before
+    # deduping so one customer is never listed twice under two formats. last_active is captured
+    # from recent_conversations BEFORE the get_or_create bump below, so display stays truthful.
+    last_active_by_phone: dict[str, str | None] = {}
+    ordered_phones: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: str, last_active: str | None) -> None:
+        norm = normalize_phone(raw)
+        if norm is None:
+            return
+        if norm not in seen:
+            seen.add(norm)
+            ordered_phones.append(norm)
+        if last_active is not None and last_active_by_phone.get(norm) is None:
+            last_active_by_phone[norm] = last_active
+
     summaries: list[ConversationSummary] = await c.conversations.recent_conversations(limit)
-    result: list[dict[str, object]] = []
     for s in summaries:
-        recent = await c.conversations.find_messages_by_user_id(s.user_id, limit=1)
+        _add(s.user_id, s.last_active_at)
+    for phone in await c.ingest.distinct_outbound_phones(limit):
+        _add(phone, None)
+    for wa in await c.ingest.distinct_order_action_wa_ids(limit):
+        _add(wa, None)
+
+    # Truncate to `limit` BEFORE the per-thread queries so the union (up to 3*limit candidates)
+    # cannot amplify the preview/get_or_create work beyond `limit` rows. Order by the captured
+    # (pre-bump) last_active so the most-recently-active threads are the ones we materialize;
+    # candidates with unknown recency (outbound/tap-only) sort last but still surface when few.
+    ordered_phones.sort(key=lambda p: str(last_active_by_phone.get(p) or ""), reverse=True)
+    ordered_phones = ordered_phones[:limit]
+
+    result: list[dict[str, object]] = []
+    for norm in ordered_phones:
+        # Materialize a stable conversation.id for the thread (idempotent -- repeated list views
+        # fetch the existing id, they do not create duplicates). This is the one place a create-on-
+        # miss is intended: the next sub-project (manual send) needs every thread to have an id.
+        thread_id = await c.conversations.get_or_create(norm)
+        recent = await c.conversations.find_messages_by_user_id(norm, limit=1)
         preview = recent[-1].content[:120] if recent else ""
+        # Prefer the latest message timestamp (immune to the get_or_create last_active bump);
+        # fall back to the pre-bump conversation last_active captured above.
+        last_active = recent[-1].created_at if recent else last_active_by_phone.get(norm)
         result.append(
-            {"user_id": s.user_id, "last_active_at": s.last_active_at, "preview": preview}
+            {"thread_id": thread_id, "phone": norm, "last_active_at": last_active,
+             "preview": preview}
         )
+
+    result.sort(key=lambda r: str(r["last_active_at"] or ""), reverse=True)
     return result
 
 
-@admin_router.get("/conversations/{wa_id}", dependencies=[Depends(require_admin)])
-async def get_conversation_thread(wa_id: str) -> list[dict[str, object]]:
+@admin_router.get("/conversations/{thread_id}", dependencies=[Depends(require_admin)])
+async def get_conversation_thread(thread_id: int) -> list[dict[str, object]]:
     c = get_container()
+    # Resolve the conversation's normalized phone from the opaque id; a bad literal id genuinely
+    # does not exist -> 404 (distinct from "no messages yet", which is a real empty thread).
+    user_id = await c.conversations.get_user_id(thread_id)
+    if user_id is None:
+        raise HTTPException(status_code=404, detail="thread not found")
+
     entries: list[dict[str, object]] = []
 
-    for msg in await c.conversations.find_messages_by_user_id(wa_id, limit=200):
+    for msg in await c.conversations.find_messages_by_user_id(user_id, limit=200):
         entries.append({
             "type": "customer_message" if msg.role == "user" else "ai_reply",
             "timestamp": msg.created_at,
             "text": msg.content,
         })
 
-    normalized_phone = normalize_phone(wa_id)
-    if normalized_phone is not None:
-        for row in await c.ingest.find_outbound_by_phone(normalized_phone, limit=200):
-            entries.append({
-                "type": "template_sent",
-                "timestamp": row.created_at,
-                "text": f"[{row.state}] {_template_sent_text(row.payload_json)}",
-            })
-    else:
-        logger.info("conversation thread: unparseable wa_id for outbound lookup")
+    # user_id is the normalized E.164 phone; outbound rows are keyed on that same form.
+    for row in await c.ingest.find_outbound_by_phone(user_id, limit=200):
+        entries.append({
+            "type": "template_sent",
+            "timestamp": row.created_at,
+            "text": f"[{row.state}] {_template_sent_text(row.payload_json)}",
+        })
 
-    for action in await c.ingest.find_order_actions_by_wa_id(wa_id, limit=200):
+    # order_actions.actor_wa_id is written RAW (no +); query with BOTH the normalized and the
+    # digits-only candidate so button taps merge into the same thread (read-side fix for finding
+    # #1 -- the write format in core/order_actions.py is deliberately left untouched).
+    candidate_wa_ids = list({user_id, user_id.lstrip("+")})
+    for action in await c.ingest.find_order_actions_by_wa_ids(candidate_wa_ids, limit=200):
         entries.append({
             "type": "button_tap",
             "timestamp": action.created_at,

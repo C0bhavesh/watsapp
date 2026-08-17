@@ -64,21 +64,47 @@ def test_limit_validated(client: TestClient) -> None:
     assert client.get("/admin/mappings?limit=501").status_code == 422
 
 
-def _record_button_tap(order_gid: str, wa_id: str) -> None:
+def _record_button_tap(order_gid: str, actor_wa_id: str) -> None:
+    # Production writes actor_wa_id RAW (event.wa_id, no leading +) -- callers pass the raw form.
     asyncio.run(
         get_container().ingest.record_order_action(
-            order_gid, "confirm", wa_id, "wamid.1", "ok", None
+            order_gid, "confirm", actor_wa_id, "wamid.1", "ok", None
         )
     )
 
 
-def _send_ai_message(wa_id: str, user_text: str, ai_text: str) -> None:
+def _send_ai_message(phone_e164: str, user_text: str, ai_text: str) -> None:
+    # Production keys the conversation on the NORMALIZED phone (core/conversation.py stores via
+    # get_or_create(normalize_phone(event.wa_id))) -- callers pass the +-prefixed E.164 form.
     async def _do() -> None:
-        conv_id = await get_container().conversations.get_or_create(wa_id)
+        conv_id = await get_container().conversations.get_or_create(phone_e164)
         await get_container().conversations.append_message(conv_id, "user", user_text)
         await get_container().conversations.append_message(conv_id, "assistant", ai_text)
 
     asyncio.run(_do())
+
+
+def _seed_outbound_at(phone_e164: str, order_gid: str, payload_json: str) -> None:
+    mapping = MappingUpsert(
+        order_gid=order_gid, order_name="tavaschat", order_number_int=2,
+        phone_e164=phone_e164, customer_name="Suman", email=None, language="en",
+        financial_status_at_create="PENDING", is_cod=True,
+    )
+    draft = OutboundDraft(
+        dedupe_key=f"order_created:{order_gid}", kind="order_confirmation",
+        phone_e164=phone_e164, payload_json=payload_json,
+    )
+    asyncio.run(
+        get_container().ingest.ingest_order_created(
+            f"wh-{order_gid}", "orders/create", mapping, draft
+        )
+    )
+
+
+def _thread_id_for(client: TestClient, phone_e164: str) -> int:
+    rows = client.get("/admin/conversations").json()
+    match = next(r for r in rows if r["phone"] == phone_e164)
+    return int(match["thread_id"])
 
 
 def test_conversations_list_requires_auth(client: TestClient) -> None:
@@ -86,53 +112,57 @@ def test_conversations_list_requires_auth(client: TestClient) -> None:
 
 
 def test_conversations_thread_requires_auth(client: TestClient) -> None:
-    assert client.get("/admin/conversations/919664290413").status_code == 401
+    assert client.get("/admin/conversations/1").status_code == 401
 
 
 def test_conversations_list_shows_recent_threads(client: TestClient) -> None:
     login(client)
-    _send_ai_message("919664290413", "hi", "hello there")
+    _send_ai_message("+919664290413", "hi", "hello there")
 
     resp = client.get("/admin/conversations")
 
     assert resp.status_code == 200
     rows = resp.json()
-    assert any(r["user_id"] == "919664290413" for r in rows)
+    row = next(r for r in rows if r["phone"] == "+919664290413")
+    assert isinstance(row["thread_id"], int)
+    assert row["preview"]
+
+
+def test_conversations_list_includes_outbound_only_customer(client: TestClient) -> None:
+    # A customer who ONLY ever received an order confirmation (no conversation row, no button tap)
+    # must still surface as a thread -- the list unions all three sources, not just conversations.
+    login(client)
+    _seed_outbound_at("+918888888888", "gid://shopify/Order/outonly", "{}")
+
+    rows = client.get("/admin/conversations").json()
+
+    outbound_thread = next(r for r in rows if r["phone"] == "+918888888888")
+    assert isinstance(outbound_thread["thread_id"], int)
 
 
 def test_conversation_thread_merges_all_three_sources(client: TestClient) -> None:
     login(client)
-    wa_id = "919664290413"
-    order_gid = "gid://shopify/Order/chat1"
-    _ingest_one(order_gid)  # existing helper -- seeds an order_created outbound at +919999999999
-    # Re-seed at the SAME phone this test's wa_id normalizes to, so the outbound row matches.
-    # MappingUpsert/OutboundDraft are already imported at the top of this file.
-    mapping = MappingUpsert(
-        order_gid="gid://shopify/Order/chat2", order_name="tavaschat", order_number_int=2,
-        phone_e164="+919664290413", customer_name="Suman", email=None, language="en",
-        financial_status_at_create="PENDING", is_cod=True,
-    )
-    draft = OutboundDraft(
-        dedupe_key="order_created:gid://shopify/Order/chat2", kind="order_confirmation",
-        phone_e164="+919664290413",
-        payload_json=json.dumps({
+    normalized = "+919664290413"
+    raw_wa_id = "919664290413"  # how core/order_actions.py writes actor_wa_id (no +)
+    _ingest_one("gid://shopify/Order/chat1")  # unrelated order at +919999999999
+    _seed_outbound_at(
+        normalized, "gid://shopify/Order/chat2",
+        json.dumps({
             "template": "cod_confirmation", "language": "en",
             "body_params": {"customer_name": "Suman", "order_id": "tavaschat"},
         }),
     )
-    asyncio.run(
-        get_container().ingest.ingest_order_created(
-            "wh-chat2", "orders/create", mapping, draft
-        )
-    )
-    _send_ai_message(wa_id, "where is my order", "let me check for you")
-    _record_button_tap("gid://shopify/Order/chat2", wa_id)
+    _send_ai_message(normalized, "where is my order", "let me check for you")
+    _record_button_tap("gid://shopify/Order/chat2", raw_wa_id)
 
-    resp = client.get(f"/admin/conversations/{wa_id}")
+    thread_id = _thread_id_for(client, normalized)
+    resp = client.get(f"/admin/conversations/{thread_id}")
 
     assert resp.status_code == 200
     entries = resp.json()
     types = [e["type"] for e in entries]
+    # All three sources surface in ONE thread even though order_actions is keyed RAW while the
+    # AI chat + outbound are keyed NORMALIZED -- the dual-format lookup is what proves finding #1.
     assert "template_sent" in types
     assert "customer_message" in types
     assert "ai_reply" in types
@@ -144,10 +174,24 @@ def test_conversation_thread_merges_all_three_sources(client: TestClient) -> Non
     assert "ok" in button_entry["text"]
 
 
-def test_conversation_thread_unknown_wa_id_returns_empty_list(client: TestClient) -> None:
+def test_conversation_thread_unknown_thread_id_returns_404(client: TestClient) -> None:
     login(client)
 
     resp = client.get("/admin/conversations/900000000000")
 
+    assert resp.status_code == 404
+
+
+def test_conversation_thread_non_dict_payload_degrades_not_500(client: TestClient) -> None:
+    # A valid-but-non-dict payload_json ("null"/"42"/"[]") parses successfully but has no .get --
+    # the thread must still return 200 with a degraded text for that one entry, not a 500.
+    login(client)
+    normalized = "+917777777777"
+    _seed_outbound_at(normalized, "gid://shopify/Order/nondict", "null")
+
+    thread_id = _thread_id_for(client, normalized)
+    resp = client.get(f"/admin/conversations/{thread_id}")
+
     assert resp.status_code == 200
-    assert resp.json() == []
+    template_entry = next(e for e in resp.json() if e["type"] == "template_sent")
+    assert "unreadable template payload" in template_entry["text"]

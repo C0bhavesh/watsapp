@@ -41,6 +41,7 @@
     .tabs button.active { background: #4f46e5; color: #fff; }
     .kn-pane { display: none; } .kn-pane.active { display: block; }
     .scroll { overflow-x: auto; }
+    #chat-header { margin-top: .6rem; font-size: .82rem; color: #71717a; }
     #chat-thread { margin-top: .8rem; max-height: 460px; overflow-y: auto;
       display: flex; flex-direction: column; }
     .bubble { padding: .4rem .6rem; margin: .3rem 0; border-radius: 8px; max-width: 72%;
@@ -221,6 +222,7 @@
       <div class="scroll"><table id="chats-list-table">
         <thead><tr><th>Phone</th><th>Last active</th><th>Preview</th></tr></thead>
         <tbody></tbody></table></div>
+      <div id="chat-header"></div>
       <div id="chat-thread"></div>
       <div class="status" id="chats-status"></div>
     </div>

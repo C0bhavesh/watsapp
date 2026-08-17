@@ -309,10 +309,11 @@ class InMemoryIngestStore:
             for dedupe_key, draft in matches[-limit:]
         ]
 
-    async def find_order_actions_by_wa_id(
-        self, wa_id: str, limit: int = 100
+    async def find_order_actions_by_wa_ids(
+        self, wa_ids: list[str], limit: int = 100
     ) -> list[OrderActionEntry]:
-        matches = [row for row in self.order_actions if row.get("actor_wa_id") == wa_id]
+        candidates = set(wa_ids)
+        matches = [row for row in self.order_actions if row.get("actor_wa_id") in candidates]
         return [
             OrderActionEntry(
                 order_gid=str(row["order_gid"]),
@@ -322,6 +323,21 @@ class InMemoryIngestStore:
             )
             for row in matches[-limit:]
         ]
+
+    async def distinct_outbound_phones(self, limit: int = 100) -> list[str]:
+        seen: list[str] = []
+        for draft in self.outbound.values():
+            if draft.phone_e164 not in seen:
+                seen.append(draft.phone_e164)
+        return seen[:limit]
+
+    async def distinct_order_action_wa_ids(self, limit: int = 100) -> list[str]:
+        seen: list[str] = []
+        for row in self.order_actions:
+            wa_id = row.get("actor_wa_id")
+            if isinstance(wa_id, str) and wa_id not in seen:
+                seen.append(wa_id)
+        return seen[:limit]
 
     async def find_stale_template_sent(
         self, older_than_minutes: int, max_age_minutes: int
@@ -637,12 +653,20 @@ class InMemoryConversationStore:
         self._last_active_at[conversation_id] = datetime.now(UTC)
         return conversation_id
 
+    async def get_user_id(self, conversation_id: int) -> str | None:
+        for user_id, conv_id in self._conversations.items():
+            if conv_id == conversation_id:
+                return user_id
+        return None
+
     async def recent_messages(self, conversation_id: int, limit: int) -> list[StoredMessage]:
         return self._messages.get(conversation_id, [])[-limit:]
 
     async def append_message(self, conversation_id: int, role: str, content: str) -> None:
+        # Stamp created_at (Postgres stamps a real timestamp via the column default) so the two
+        # implementations stay behaviorally equivalent for the chat-thread timeline ordering.
         self._messages.setdefault(conversation_id, []).append(
-            StoredMessage(role=role, content=content, created_at=None)
+            StoredMessage(role=role, content=content, created_at=datetime.now(UTC).isoformat())
         )
 
     async def find_messages_by_user_id(

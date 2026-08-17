@@ -680,14 +680,16 @@ class PostgresIngestStore:
             for r in rows
         ]
 
-    async def find_order_actions_by_wa_id(
-        self, wa_id: str, limit: int = 100
+    async def find_order_actions_by_wa_ids(
+        self, wa_ids: list[str], limit: int = 100
     ) -> list[OrderActionEntry]:
+        # actor_wa_id is written RAW (no +); the caller passes both the normalized and the raw
+        # candidate keys, so an ANY match merges the button-tap history into the right thread.
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT order_gid, action, result, created_at FROM order_actions"
-                " WHERE actor_wa_id = $1 ORDER BY created_at DESC LIMIT $2",
-                wa_id, limit,
+                " WHERE actor_wa_id = ANY($1) ORDER BY created_at DESC LIMIT $2",
+                wa_ids, limit,
             )
         return [
             OrderActionEntry(
@@ -698,6 +700,24 @@ class PostgresIngestStore:
             )
             for r in rows
         ]
+
+    async def distinct_outbound_phones(self, limit: int = 100) -> list[str]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT DISTINCT phone_e164 FROM outbound_messages"
+                " ORDER BY phone_e164 LIMIT $1",
+                limit,
+            )
+        return [str(r["phone_e164"]) for r in rows]
+
+    async def distinct_order_action_wa_ids(self, limit: int = 100) -> list[str]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT DISTINCT actor_wa_id FROM order_actions"
+                " WHERE actor_wa_id IS NOT NULL ORDER BY actor_wa_id LIMIT $1",
+                limit,
+            )
+        return [str(r["actor_wa_id"]) for r in rows]
 
     async def find_stale_template_sent(
         self, older_than_minutes: int, max_age_minutes: int
@@ -1160,6 +1180,14 @@ class PostgresConversationStore:
                 user_id,
             )
         return int(row["id"])
+
+    async def get_user_id(self, conversation_id: int) -> str | None:
+        # Read-only reverse lookup (id -> user_id) for the unified thread view; None on unknown id.
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT user_id FROM conversations WHERE id = $1", conversation_id
+            )
+        return None if row is None else str(row["user_id"])
 
     async def recent_messages(self, conversation_id: int, limit: int) -> list[StoredMessage]:
         async with self._pool.acquire() as conn:

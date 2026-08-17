@@ -127,19 +127,30 @@
 
 ## [internal] Admin chat-thread view (read-only, 2026-08-17)
 - **Caller/UI:** backend/app/admin/static/{index.html,admin.js} (`loadChatList`/`loadChatThread`).
-- **Endpoints (both `Depends(require_admin)`, session-cookie authed like every other `/admin/*`):**
-  - `GET /admin/conversations?limit=1..500` (default 50) → `list[{user_id, last_active_at, preview}]`
-    — one row per WhatsApp sender, ordered most-recently-active first (`recent_conversations` +
-    a 1-message `find_messages_by_user_id` for the preview, truncated to 120 chars).
-  - `GET /admin/conversations/{wa_id}` → `list[{type, timestamp, text}]` sorted chronologically
-    ascending. `type ∈ {customer_message, ai_reply, template_sent, button_tap}`. Merges three
-    previously-unconnected sources per customer: AI messages (`find_messages_by_user_id(wa_id)`),
-    template sends (`find_outbound_by_phone(normalize_phone(wa_id))` — text `[state] template →
-    body_params`), and Confirm/Cancel taps (`find_order_actions_by_wa_id(wa_id)` — text `Tapped
-    {action} → {result}`). Unknown wa_id → `[]` (never creates a conversation row). No mutation,
-    no writes anywhere; only NEW read methods on the stores. Sort key is `str(timestamp or "")`
-    so ISO-8601 strings sort chronologically and null/absent timestamps sort first.
+- **Endpoints (both `Depends(require_admin)`, session-cookie authed like every other `/admin/*`).**
+  **Redesigned 2026-08-17 (review-fix round): opaque thread id, union-of-3 list, dual-format lookup.**
+  - `GET /admin/conversations?limit=1..100` (default 50; max lowered 500→100 as the N+1-preview
+    mitigation) → `list[{thread_id:int, phone:str, last_active_at, preview}]`. UNIONS distinct
+    phones across ALL THREE sources — `recent_conversations` + `distinct_outbound_phones` +
+    `distinct_order_action_wa_ids` — normalizing every candidate through `normalize_phone` before
+    deduping, so a customer with only an outbound send (no conversation row) still appears.
+    `get_or_create(norm)` materializes a stable `thread_id` per row (the ONE intended create-on-miss;
+    idempotent). `phone` is shown to staff but never placed in a URL. Ordered most-recently-active
+    first (latest message `created_at`, falling back to pre-`get_or_create`-bump `last_active_at`).
+  - `GET /admin/conversations/{thread_id}` (INT path param; was `{wa_id}`) → `list[{type, timestamp,
+    text}]` sorted chronologically ascending. `type ∈ {customer_message, ai_reply, template_sent,
+    button_tap}`. Resolves the normalized phone via `get_user_id(thread_id)` — **unknown id → 404**
+    (a bad literal id genuinely does not exist; distinct from a real empty thread). Merges three
+    sources per customer: AI messages (`find_messages_by_user_id(user_id)`), template sends
+    (`find_outbound_by_phone(user_id)` — text `[state] template → body_params`, each value capped
+    200 chars / joined total 500, non-dict `payload_json` degrades to `(unreadable template
+    payload)` instead of 500), and Confirm/Cancel taps (`find_order_actions_by_wa_ids([user_id,
+    user_id.lstrip("+")])` — dual-format because `actor_wa_id` is written RAW while the thread is
+    keyed NORMALIZED — text `Tapped {action} → {result}`). No mutation, no writes to business
+    tables (the list's `get_or_create` is the only write, a thread-id materialization). Sort key is
+    `str(timestamp or "")`.
 - **Notes:** Cloud API-only WhatsApp number is "headless" (not visible in the WhatsApp app / Meta
   Business Suite Inbox), so this admin view is the only place to see the full per-customer thread.
   Sub-project 1 of 3 (chat view → manual send → tags). `order_actions` is READ ONLY here —
-  `app/core/order_actions.py` is byte-identical throughout the feature.
+  `app/core/order_actions.py` is byte-identical throughout the feature. Phone-in-URL removed
+  (opaque thread id) to keep customer phones out of URLs/logs, matching `/admin/erasure`'s posture.

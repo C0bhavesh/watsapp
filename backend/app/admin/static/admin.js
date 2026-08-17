@@ -349,9 +349,10 @@ function renderChatEntry(entry) {
   return div;
 }
 
-async function loadChatThread(waId) {
+async function loadChatThread(threadId, phone) {
   try {
-    const entries = await api("GET", "/admin/conversations/" + encodeURIComponent(waId));
+    const entries = await api("GET", "/admin/conversations/" + encodeURIComponent(threadId));
+    el("chat-header").textContent = phone ? "Thread: " + phone : "";
     const container = el("chat-thread");
     container.innerHTML = "";
     for (const entry of entries) {
@@ -369,8 +370,9 @@ async function loadChatList() {
     for (const t of threads) {
       const tr = document.createElement("tr");
       tr.style.cursor = "pointer";
-      tr.addEventListener("click", () => loadChatThread(t.user_id));
-      for (const val of [t.user_id, t.last_active_at || "", t.preview || ""]) {
+      // Load the thread by its opaque id; keep the phone OUT of the URL. Phone is still shown.
+      tr.addEventListener("click", () => loadChatThread(t.thread_id, t.phone));
+      for (const val of [t.phone, t.last_active_at || "", t.preview || ""]) {
         const td = document.createElement("td");
         td.textContent = val;
         tr.appendChild(td);

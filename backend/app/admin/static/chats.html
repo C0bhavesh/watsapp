@@ -16,6 +16,8 @@
       align-items: center; }
     #thread-list-header button { background: rgba(255,255,255,.18); color: #fff; border: none;
       border-radius: 6px; padding: .3rem .7rem; font-size: .78rem; cursor: pointer; }
+    #thread-search { border: none; border-bottom: 1px solid #e9edef; padding: .6rem 1rem;
+      font-size: .82rem; outline: none; }
     #thread-list { flex: 1; overflow-y: auto; }
     .thread-row { padding: .7rem 1rem; border-bottom: 1px solid #f0f2f5; cursor: pointer; }
     .thread-row:hover { background: #f5f6f6; }
@@ -65,6 +67,7 @@
         <span>Chats</span>
         <button id="refresh-btn">Refresh</button>
       </div>
+      <input id="thread-search" type="text" placeholder="Search name, phone, or order #" />
       <div id="thread-list"></div>
       <div class="status" id="list-status"></div>
     </div>

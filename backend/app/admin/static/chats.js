@@ -155,35 +155,64 @@ async function loadThread(threadId, phone) {
   }
 }
 
+let allThreads = [];
+
+function normalizeOrderQuery(query) {
+  // Mirrors app/shopify/models.py::normalize_order_name's isdigit() branch: bare digits like
+  // "3589" should match the store's "tavas3589" order-name format.
+  return /^\d+$/.test(query) ? "tavas" + query : query;
+}
+
+function threadMatchesQuery(thread, query) {
+  if (!query) return true;
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  if ((thread.phone || "").toLowerCase().includes(q)) return true;
+  if ((thread.customer_name || "").toLowerCase().includes(q)) return true;
+  const orderNames = (thread.order_names || []).map((n) => n.toLowerCase());
+  if (orderNames.some((n) => n.includes(q))) return true;
+  const normalized = normalizeOrderQuery(q);
+  return orderNames.some((n) => n.includes(normalized));
+}
+
+function renderThreadRows(threads) {
+  const list = el("thread-list");
+  list.innerHTML = "";
+  for (const t of threads) {
+    const row = document.createElement("div");
+    row.className = "thread-row";
+    row.dataset.threadId = String(t.thread_id);
+    if (t.thread_id === currentThreadId) row.classList.add("active");
+    const ts = document.createElement("span");
+    ts.className = "ts";
+    ts.textContent = t.last_active_at ? t.last_active_at.slice(0, 10) : "";
+    const phone = document.createElement("div");
+    phone.className = "phone";
+    phone.textContent = t.customer_name ? t.customer_name + " (" + t.phone + ")" : t.phone;
+    phone.appendChild(ts);
+    const preview = document.createElement("div");
+    preview.className = "preview";
+    preview.textContent = t.preview || "";
+    row.appendChild(phone);
+    row.appendChild(preview);
+    row.addEventListener("click", () => loadThread(t.thread_id, t.phone));
+    list.appendChild(row);
+  }
+}
+
 async function loadThreadList() {
   try {
-    const threads = await api("/admin/conversations");
-    const list = el("thread-list");
-    list.innerHTML = "";
-    for (const t of threads) {
-      const row = document.createElement("div");
-      row.className = "thread-row";
-      row.dataset.threadId = String(t.thread_id);
-      const ts = document.createElement("span");
-      ts.className = "ts";
-      ts.textContent = t.last_active_at ? t.last_active_at.slice(0, 10) : "";
-      const phone = document.createElement("div");
-      phone.className = "phone";
-      phone.textContent = t.phone;
-      phone.appendChild(ts);
-      const preview = document.createElement("div");
-      preview.className = "preview";
-      preview.textContent = t.preview || "";
-      row.appendChild(phone);
-      row.appendChild(preview);
-      row.addEventListener("click", () => loadThread(t.thread_id, t.phone));
-      list.appendChild(row);
-    }
+    allThreads = await api("/admin/conversations");
+    renderThreadRows(allThreads.filter((t) => threadMatchesQuery(t, el("thread-search").value)));
     el("list-status").textContent = "";
   } catch (e) {
     el("list-status").textContent = e.message;
   }
 }
+
+el("thread-search").addEventListener("input", () => {
+  renderThreadRows(allThreads.filter((t) => threadMatchesQuery(t, el("thread-search").value)));
+});
 
 el("refresh-btn").addEventListener("click", async () => {
   await loadThreadList();

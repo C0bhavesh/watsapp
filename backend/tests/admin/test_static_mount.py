@@ -73,3 +73,17 @@ def test_chats_js_renders_bubble_status_label(client: TestClient) -> None:
     assert resp.status_code == 200
     assert "entry.status" in resp.text
     assert "bubble-status" in resp.text
+
+
+def test_chats_page_has_search_input(client: TestClient) -> None:
+    resp = client.get("/admin/ui/chats.html")
+    assert resp.status_code == 200
+    assert 'id="thread-search"' in resp.text
+
+
+def test_chats_js_filters_threads_by_name_phone_and_order_number(client: TestClient) -> None:
+    resp = client.get("/admin/ui/chats.js")
+    assert resp.status_code == 200
+    assert "customer_name" in resp.text
+    assert "order_names" in resp.text
+    assert "normalize_order_name" in resp.text or "tavas" in resp.text

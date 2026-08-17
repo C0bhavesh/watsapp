@@ -22,6 +22,13 @@ let currentThreadId = null;
 let currentPhone = null;
 let currentOrders = [];
 
+const STATUS_LABELS = {
+  suppressed: "Not delivered — skipped by send policy",
+  failed: "Failed to send",
+  undeliverable: "Undeliverable",
+  queued: "Queued",
+};
+
 function renderBubble(entry) {
   const div = document.createElement("div");
   const side = entry.type === "customer_message" ? "bubble-in" : "bubble-out";
@@ -36,6 +43,15 @@ function renderBubble(entry) {
   ts.textContent = entry.timestamp || "";
   div.appendChild(label);
   div.appendChild(text);
+  if (entry.status && entry.status !== "sent") {
+    const status = document.createElement("div");
+    status.className = "bubble-status";
+    if (entry.status === "failed" || entry.status === "undeliverable") {
+      status.classList.add("bubble-status-error");
+    }
+    status.textContent = STATUS_LABELS[entry.status] || entry.status;
+    div.appendChild(status);
+  }
   div.appendChild(ts);
   return div;
 }

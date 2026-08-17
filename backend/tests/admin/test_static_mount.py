@@ -66,3 +66,10 @@ def test_chats_js_renders_order_number_and_line_items(client: TestClient) -> Non
     assert "order-number" in resp.text
     assert "order-products" in resp.text
     assert "line_items" in resp.text
+
+
+def test_chats_js_renders_bubble_status_label(client: TestClient) -> None:
+    resp = client.get("/admin/ui/chats.js")
+    assert resp.status_code == 200
+    assert "entry.status" in resp.text
+    assert "bubble-status" in resp.text

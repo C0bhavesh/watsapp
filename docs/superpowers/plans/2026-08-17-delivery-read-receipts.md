@@ -174,6 +174,10 @@ async def test_apply_message_delivery_status_unknown_wamid_returns_false(store) 
 
 
 async def test_apply_message_delivery_status_respects_ordering_guard(store) -> None:
+    # Return value means "was this wamid found in THIS table" (routing signal for the two-table
+    # lookup chain in Task 5's orchestrator) -- NOT "did the update get applied". A found-but-
+    # guard-rejected call still returns True (the row IS in this table); the stored value is what
+    # proves the guard actually blocked the regression.
     conv_id = await store.get_or_create("+919876500052")
     msg_id = await store.append_message(conv_id, "assistant", "hi")
     await store.set_message_wamid(msg_id, "wamid.TEST456")
@@ -181,9 +185,9 @@ async def test_apply_message_delivery_status_respects_ordering_guard(store) -> N
 
     regressed = await store.apply_message_delivery_status("wamid.TEST456", "delivered")
 
-    assert regressed is False
+    assert regressed is True  # found in this table -- the guard rejected the WRITE, not the lookup
     messages = await store.find_messages_by_user_id("+919876500052")
-    assert messages[-1].delivery_status == "read"
+    assert messages[-1].delivery_status == "read"  # value unchanged: guard blocked the regression
 
 
 async def test_user_role_messages_unaffected_by_delivery_status_default(store) -> None:
@@ -335,15 +339,18 @@ async def test_apply_outbound_delivery_status_unknown_wamid_returns_false(store)
 
 
 async def test_apply_outbound_delivery_status_respects_ordering_guard(store) -> None:
+    # Same return-value semantics as Task 2's apply_message_delivery_status: True means "found in
+    # this table" (the routing signal Task 5's orchestrator uses), not "update was applied". A
+    # found-but-guard-rejected call still returns True; the stored value proves the guard worked.
     ...
     await store.mark_outbound_sent(row_id, "wamid.OUT456")
     await store.apply_outbound_delivery_status("wamid.OUT456", "read")
 
     regressed = await store.apply_outbound_delivery_status("wamid.OUT456", "delivered")
 
-    assert regressed is False
+    assert regressed is True  # found in this table -- the guard rejected the WRITE, not the lookup
     entries = await store.find_outbound_by_phone(phone_e164)
-    assert entries[-1].delivery_status == "read"
+    assert entries[-1].delivery_status == "read"  # value unchanged: guard blocked the regression
 ```
 
 (The `...` sections need the exact existing helper this test file already uses to enqueue+claim+mark-sent an outbound row — read the file and use it verbatim, do not invent a new fixture pattern.)

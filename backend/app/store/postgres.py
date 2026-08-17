@@ -5,6 +5,7 @@ from datetime import datetime
 
 import asyncpg
 
+from app.core.delivery_status import should_apply_delivery_status
 from app.core.phone import normalize_phone
 from app.shopify.models import (
     Customer,
@@ -1224,8 +1225,8 @@ class PostgresConversationStore:
     async def recent_messages(self, conversation_id: int, limit: int) -> list[StoredMessage]:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT role, content, created_at FROM messages WHERE conversation_id = $1"
-                " ORDER BY created_at DESC LIMIT $2",
+                "SELECT role, content, created_at, delivery_status FROM messages"
+                " WHERE conversation_id = $1 ORDER BY created_at DESC LIMIT $2",
                 conversation_id,
                 limit,
             )
@@ -1235,6 +1236,7 @@ class PostgresConversationStore:
                 role=str(r["role"]),
                 content=str(r["content"]),
                 created_at=r["created_at"].isoformat() if r["created_at"] else None,
+                delivery_status=r["delivery_status"],
             )
             for r in ordered
         ]
@@ -1246,7 +1248,7 @@ class PostgresConversationStore:
         # user_id yet) returns an empty list via the JOIN yielding zero rows, never creates one.
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT m.role, m.content, m.created_at FROM messages m"
+                "SELECT m.role, m.content, m.created_at, m.delivery_status FROM messages m"
                 " JOIN conversations c ON c.id = m.conversation_id"
                 " WHERE c.user_id = $1 ORDER BY m.created_at DESC LIMIT $2",
                 user_id, limit,
@@ -1257,6 +1259,7 @@ class PostgresConversationStore:
                 role=str(r["role"]),
                 content=str(r["content"]),
                 created_at=r["created_at"].isoformat() if r["created_at"] else None,
+                delivery_status=r["delivery_status"],
             )
             for r in ordered
         ]
@@ -1276,14 +1279,37 @@ class PostgresConversationStore:
             for r in rows
         ]
 
-    async def append_message(self, conversation_id: int, role: str, content: str) -> None:
+    async def append_message(self, conversation_id: int, role: str, content: str) -> int:
         async with self._pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO messages (conversation_id, role, content) VALUES ($1, $2, $3)",
+            row = await conn.fetchrow(
+                "INSERT INTO messages (conversation_id, role, content) VALUES ($1, $2, $3)"
+                " RETURNING id",
                 conversation_id,
                 role,
                 content,
             )
+        return int(row["id"])
+
+    async def set_message_wamid(self, message_id: int, wamid: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE messages SET wamid = $2 WHERE id = $1", message_id, wamid
+            )
+
+    async def apply_message_delivery_status(self, wamid: str, status: str) -> bool:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, delivery_status FROM messages WHERE wamid = $1", wamid
+            )
+            if row is None:
+                return False
+            if should_apply_delivery_status(
+                None if row["delivery_status"] is None else str(row["delivery_status"]), status
+            ):
+                await conn.execute(
+                    "UPDATE messages SET delivery_status = $2 WHERE id = $1", row["id"], status
+                )
+        return True
 
     async def pause_until(self, conversation_id: int, until: datetime) -> None:
         async with self._pool.acquire() as conn:

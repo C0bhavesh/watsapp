@@ -1,6 +1,7 @@
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
+from app.core.delivery_status import should_apply_delivery_status
 from app.shopify.models import Customer, Fulfillment, LineItem, Order, normalize_order_name
 from app.store.base import (
     ConversationSummary,
@@ -48,6 +49,32 @@ _PROCESSING_STALE = timedelta(minutes=10)
 # the shared pool (matches the sibling capped reads: find_mappings_by_phone LIMIT 20, mirror LIMIT
 # 10) — a leftover stale row is just picked up on the next tick.
 _STALE_SWEEP_LIMIT = 25
+
+
+@dataclass
+class _MessageRow:
+    """Mutable per-message state (id, wamid, delivery_status) tracked internally, exactly as
+    ``_OutboundRow`` backs the frozen ``OutboundDraft``. The frozen ``StoredMessage`` is only the
+    read-boundary VIEW (``_message_view``): it carries the public fields (role/content/created_at/
+    delivery_status) and hides the internal id + wamid, mirroring how ``OutboundView`` hides the
+    internal row's bookkeeping."""
+
+    id: int
+    role: str
+    content: str
+    created_at: str | None
+    wamid: str | None
+    delivery_status: str | None
+
+
+def _message_view(row: _MessageRow) -> StoredMessage:
+    """Convert an internal mutable row to its frozen public view at the read boundary."""
+    return StoredMessage(
+        role=row.role,
+        content=row.content,
+        created_at=row.created_at,
+        delivery_status=row.delivery_status,
+    )
 
 
 @dataclass
@@ -652,7 +679,14 @@ class InMemoryMessageStore:
 class InMemoryConversationStore:
     def __init__(self) -> None:
         self._conversations: dict[str, int] = {}
-        self._messages: dict[int, list[StoredMessage]] = {}
+        # Internal mutable rows (not the frozen StoredMessage): per-conversation ordered list, plus
+        # id- and wamid-indexed lookups for O(1) set_message_wamid / delivery-status routing. Same
+        # split as the outbound side (_outbound_meta + _outbound_by_id). Converted to the frozen
+        # StoredMessage view only at the recent_messages / find_messages_by_user_id read boundary.
+        self._messages: dict[int, list[_MessageRow]] = {}
+        self._messages_by_id: dict[int, _MessageRow] = {}
+        self._message_by_wamid: dict[str, _MessageRow] = {}
+        self._message_next_id = 1
         self._paused_until: dict[int, datetime] = {}
         self._handoff_attempted_at: dict[int, datetime] = {}
         # Mirrors conversations.last_active_at. Stamped once at row creation (the Postgres column
@@ -691,14 +725,42 @@ class InMemoryConversationStore:
         return None
 
     async def recent_messages(self, conversation_id: int, limit: int) -> list[StoredMessage]:
-        return self._messages.get(conversation_id, [])[-limit:]
+        return [_message_view(r) for r in self._messages.get(conversation_id, [])[-limit:]]
 
-    async def append_message(self, conversation_id: int, role: str, content: str) -> None:
+    async def append_message(self, conversation_id: int, role: str, content: str) -> int:
         # Stamp created_at (Postgres stamps a real timestamp via the column default) so the two
         # implementations stay behaviorally equivalent for the chat-thread timeline ordering.
-        self._messages.setdefault(conversation_id, []).append(
-            StoredMessage(role=role, content=content, created_at=datetime.now(UTC).isoformat())
+        row = _MessageRow(
+            id=self._message_next_id,
+            role=role,
+            content=content,
+            created_at=datetime.now(UTC).isoformat(),
+            wamid=None,
+            delivery_status=None,
         )
+        self._message_next_id += 1
+        self._messages.setdefault(conversation_id, []).append(row)
+        self._messages_by_id[row.id] = row
+        return row.id
+
+    async def set_message_wamid(self, message_id: int, wamid: str) -> None:
+        # Attach WhatsApp's message id to an already-persisted row (no-op if the id is unknown,
+        # defensive only). Index it by wamid so the status-webhook routing is an O(1) lookup.
+        row = self._messages_by_id.get(message_id)
+        if row is not None:
+            row.wamid = wamid
+            self._message_by_wamid[wamid] = row
+
+    async def apply_message_delivery_status(self, wamid: str, status: str) -> bool:
+        # Route a Meta delivery/read status by wamid. Return True whenever the wamid belongs to
+        # THIS table (whether or not the ordering guard actually advances the state) so the webhook
+        # handler knows not to also probe outbound_messages; False means "not this table."
+        row = self._message_by_wamid.get(wamid)
+        if row is None:
+            return False
+        if should_apply_delivery_status(row.delivery_status, status):
+            row.delivery_status = status
+        return True
 
     async def find_messages_by_user_id(
         self, user_id: str, limit: int = 100
@@ -706,7 +768,7 @@ class InMemoryConversationStore:
         conversation_id = self._conversations.get(user_id)
         if conversation_id is None:
             return []
-        return self._messages.get(conversation_id, [])[-limit:]
+        return [_message_view(r) for r in self._messages.get(conversation_id, [])[-limit:]]
 
     async def recent_conversations(self, limit: int = 50) -> list[ConversationSummary]:
         ordered = sorted(

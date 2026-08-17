@@ -261,6 +261,7 @@ class StoredMessage:
     role: str
     content: str
     created_at: str | None
+    delivery_status: str | None = None
 
 
 class ConversationStore(Protocol):
@@ -289,7 +290,18 @@ class ConversationStore(Protocol):
 
     async def recent_messages(self, conversation_id: int, limit: int) -> list[StoredMessage]: ...
 
-    async def append_message(self, conversation_id: int, role: str, content: str) -> None: ...
+    async def append_message(self, conversation_id: int, role: str, content: str) -> int: ...
+
+    # Attaches WhatsApp's message id to an already-persisted message row, once the actual send
+    # (which happens AFTER persist_turn writes the row) succeeds and returns a wamid. No-op if the
+    # message id doesn't exist (should not happen in practice, defensive only).
+    async def set_message_wamid(self, message_id: int, wamid: str) -> None: ...
+
+    # Applies a Meta delivery/read status update, found by wamid, through the ordering guard in
+    # app.core.delivery_status. Returns True if a matching row was found (whether or not the
+    # ordering guard actually changed anything) so the webhook handler can decide whether to also
+    # try the outbound_messages table -- False means "not this table, try the other one."
+    async def apply_message_delivery_status(self, wamid: str, status: str) -> bool: ...
 
     async def pause_until(self, conversation_id: int, until: datetime) -> None: ...
 

@@ -253,3 +253,56 @@ async def test_append_message_stamps_created_at() -> None:
     messages = await store.find_messages_by_user_id("+919664290413", limit=10)
 
     assert messages[0].created_at is not None
+
+
+# --- ConversationStore wamid + delivery-status tracking (Task 2) ---
+
+async def test_append_message_returns_the_new_message_id() -> None:
+    store = InMemoryConversationStore()
+    conv_id = await store.get_or_create("+919876500050")
+    msg_id = await store.append_message(conv_id, "assistant", "hello")
+    assert isinstance(msg_id, int)
+
+
+async def test_set_message_wamid_then_apply_delivery_status() -> None:
+    store = InMemoryConversationStore()
+    conv_id = await store.get_or_create("+919876500051")
+    msg_id = await store.append_message(conv_id, "assistant", "your order shipped")
+    await store.set_message_wamid(msg_id, "wamid.TEST123")
+
+    applied = await store.apply_message_delivery_status("wamid.TEST123", "delivered")
+
+    assert applied is True
+    messages = await store.find_messages_by_user_id("+919876500051")
+    assert messages[-1].delivery_status == "delivered"
+
+
+async def test_apply_message_delivery_status_unknown_wamid_returns_false() -> None:
+    store = InMemoryConversationStore()
+    applied = await store.apply_message_delivery_status("wamid.NEVER_SEEN", "delivered")
+    assert applied is False
+
+
+async def test_apply_message_delivery_status_respects_ordering_guard() -> None:
+    store = InMemoryConversationStore()
+    conv_id = await store.get_or_create("+919876500052")
+    msg_id = await store.append_message(conv_id, "assistant", "hi")
+    await store.set_message_wamid(msg_id, "wamid.TEST456")
+    await store.apply_message_delivery_status("wamid.TEST456", "read")
+
+    regressed = await store.apply_message_delivery_status("wamid.TEST456", "delivered")
+
+    # The return value reports "was this wamid found in THIS table" (Task 5's routing signal),
+    # NOT "did an update get applied" -- so it stays True even though the ordering guard blocks
+    # the actual write (found != applied). The stored value proves the guard did its job.
+    assert regressed is True
+    messages = await store.find_messages_by_user_id("+919876500052")
+    assert messages[-1].delivery_status == "read"
+
+
+async def test_user_role_messages_unaffected_by_delivery_status_default() -> None:
+    store = InMemoryConversationStore()
+    conv_id = await store.get_or_create("+919876500053")
+    await store.append_message(conv_id, "user", "hi")
+    messages = await store.find_messages_by_user_id("+919876500053")
+    assert messages[-1].delivery_status is None

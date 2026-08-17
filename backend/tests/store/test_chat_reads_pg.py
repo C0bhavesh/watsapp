@@ -40,6 +40,53 @@ async def test_find_messages_by_user_id_unknown_pg(pool: LazyPool) -> None:
     assert messages == []
 
 
+# --- ConversationStore wamid + delivery-status tracking (Task 2) ---
+
+async def test_append_message_returns_id_pg(pool: LazyPool) -> None:
+    store = PostgresConversationStore(pool)
+    conv_id = await store.get_or_create(f"+91{uuid.uuid4().int % 10**10:010d}")
+    msg_id = await store.append_message(conv_id, "assistant", "hello")
+    assert isinstance(msg_id, int)
+
+
+async def test_set_wamid_then_apply_delivery_status_pg(pool: LazyPool) -> None:
+    store = PostgresConversationStore(pool)
+    user_id = f"+91{uuid.uuid4().int % 10**10:010d}"
+    conv_id = await store.get_or_create(user_id)
+    msg_id = await store.append_message(conv_id, "assistant", "your order shipped")
+    wamid = f"wamid.{uuid.uuid4()}"
+    await store.set_message_wamid(msg_id, wamid)
+
+    applied = await store.apply_message_delivery_status(wamid, "delivered")
+
+    assert applied is True
+    messages = await store.find_messages_by_user_id(user_id)
+    assert messages[-1].delivery_status == "delivered"
+
+
+async def test_apply_delivery_status_unknown_wamid_returns_false_pg(pool: LazyPool) -> None:
+    store = PostgresConversationStore(pool)
+    applied = await store.apply_message_delivery_status(f"wamid.{uuid.uuid4()}", "delivered")
+    assert applied is False
+
+
+async def test_apply_delivery_status_respects_ordering_guard_pg(pool: LazyPool) -> None:
+    store = PostgresConversationStore(pool)
+    user_id = f"+91{uuid.uuid4().int % 10**10:010d}"
+    conv_id = await store.get_or_create(user_id)
+    msg_id = await store.append_message(conv_id, "assistant", "hi")
+    wamid = f"wamid.{uuid.uuid4()}"
+    await store.set_message_wamid(msg_id, wamid)
+    await store.apply_message_delivery_status(wamid, "read")
+
+    # found != applied: the row IS in this table (returns True) but the guard blocks the regression.
+    regressed = await store.apply_message_delivery_status(wamid, "delivered")
+
+    assert regressed is True
+    messages = await store.find_messages_by_user_id(user_id)
+    assert messages[-1].delivery_status == "read"
+
+
 async def test_get_user_id_pg(pool: LazyPool) -> None:
     store = PostgresConversationStore(pool)
     user_id = f"+91{uuid.uuid4().int % 10**10:010d}"

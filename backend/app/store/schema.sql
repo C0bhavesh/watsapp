@@ -111,6 +111,17 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages (conversation_id, created_at);
 
+-- WhatsApp message id + per-message delivery/read state for AI-reply messages (delivery/read
+-- receipts). wamid is captured after the outbound send returns (set_message_wamid);
+-- delivery_status is advanced by Meta status webhooks, routed by wamid, through the ordering
+-- guard in app.core.delivery_status. Additive + idempotent (mirrors the same pattern used for
+-- conversations.handoff_attempted_at above), so no live migration is required.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS wamid text;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS delivery_status text;
+-- Partial index: the status-webhook lookup is WHERE wamid = $1, and only AI-reply rows that were
+-- actually sent carry a wamid (user-role and not-yet-sent rows are NULL), so index just those.
+CREATE INDEX IF NOT EXISTS idx_messages_wamid ON messages (wamid) WHERE wamid IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS knowledge_overrides (
     kind        text PRIMARY KEY,
     content     text NOT NULL,

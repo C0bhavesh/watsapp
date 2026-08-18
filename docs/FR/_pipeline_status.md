@@ -234,6 +234,8 @@
   
   **Status: PENDING — deployment of any admin-manual-reply feature code is blocked until the owner confirms this migration has been applied to production.**
 
+  **Task 2 of 3 (backend endpoint `POST /admin/conversations/{thread_id}/messages`) — BUILT, REVIEW-READY (2026-08-18), uncommitted on local `main`.** TDD (7 new tests, all green): `backend/app/admin/router.py` (`ManualReplyRequest`, `send_manual_reply`), `backend/tests/admin/test_views.py`. Full suite 1014 passed / 69 skipped; ruff + mypy strict (67 files) clean; secrets/print/bare-except grep on `router.py` empty (only the pre-existing `_phone_fingerprint` substring false-match); `git diff -- app/core/order_actions.py` empty. See `docs/memory/api_registry.md` + `component_registry.md` for the full contract, including one deliberate deviation from the design doc's illustrative code (send-failure responses use `response.status_code = 502` + a plain `{"ok": false, "error": ...}` return instead of `raise HTTPException`, so failure and success share one response shape; plus a `wa_cfg is None → 503` guard the design sample omitted, required for mypy strict). **Still blocked from deploy by the Task-1 migration CHECKPOINT above. Task 3 (frontend message box in `chats.html`/`chats.js`) not yet started. Next: code-reviewer → security-reviewer (mandatory, outbound-send path) → Task 3.**
+
 - ~~Q16 (2026-08-12) — phone-match scope for the database-first order-Q&A lookup.~~ **ANSWERED
   + IMPLEMENTED (2026-08-12): use the shipping mobile number.** Matches a real data constraint —
   checkout doesn't always capture the buyer's own phone on the order record, but shipping phone is

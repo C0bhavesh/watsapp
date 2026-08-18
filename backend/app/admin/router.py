@@ -21,6 +21,8 @@ from app.channels.whatsapp_config import (
     WHATSAPP_SECRET_FIELDS,
     load_whatsapp_config,
 )
+from app.channels.whatsapp_sender import SendResult, WhatsAppSendError, send_text
+from app.core.conversation import HANDOFF_PAUSE_WINDOW
 from app.core.phone import normalize_phone
 from app.deps import build_provider, get_container
 from app.knowledge.loader import KINDS, SEEDS_DIR, KnowledgeLoader
@@ -542,6 +544,12 @@ async def put_controls(controls: AdminControls) -> dict[str, bool]:
     return {"ok": True}
 
 
+class ManualReplyRequest(BaseModel):
+    """Free-text message the admin types to send directly to a customer's WhatsApp."""
+
+    text: str = Field(max_length=4096)
+
+
 class ErasureRequest(BaseModel):
     """DPDP right-to-erasure by phone number (E.164). The phone is PII — never logged.
 
@@ -822,6 +830,7 @@ async def get_conversation_thread(thread_id: int) -> dict[str, object]:
         # send-direction, so the field is added only for ai_reply entries.
         if msg.role == "assistant":
             entry["delivery_status"] = msg.delivery_status
+            entry["sender"] = msg.sender
         entries.append(entry)
 
     # user_id is the normalized E.164 phone; outbound rows are keyed on that same form.
@@ -879,3 +888,67 @@ async def resume_conversation(thread_id: int) -> dict[str, object]:
     await c.conversations.pause_until(thread_id, datetime.now(UTC))
     _audit("resume_ai", "success", resource=f"thread:{thread_id}")
     return {"ok": True}
+
+
+@admin_router.post(
+    "/conversations/{thread_id}/messages", dependencies=[Depends(require_admin)]
+)
+async def send_manual_reply(
+    thread_id: int, body: ManualReplyRequest, response: Response
+) -> dict[str, object]:
+    """Send a free-text WhatsApp message typed by the admin, mirroring core/conversation.py's
+    AI-reply send path so the same delivery-status tick marks and auto-retry machinery apply
+    for free (both key off a wamid on a `messages` row, regardless of how the row was created).
+
+    Deliberately bypasses send_decision/send_mode/allowlist_phones -- a manual, targeted admin
+    reply is not what the kill switch exists to stop (design decision, see
+    docs/superpowers/specs/2026-08-18-admin-manual-reply-design.md). Persisted with
+    role="assistant" (so it stays in the AI's memory window and stays eligible for
+    delivery_retry.py's role='assistant' filter) and sender="admin" (display-only marker, never
+    read by memory/retry logic).
+
+    Send-failure paths return {"ok": false, "error": ...} with a non-2xx status set directly on
+    the response object (rather than raising HTTPException) -- the admin UI reads a uniform
+    {"ok": bool, ...} body for this endpoint regardless of outcome, unlike the rest of this
+    router's error responses.
+    """
+    c = get_container()
+    user_id = await c.conversations.get_user_id(thread_id)
+    if user_id is None:
+        raise HTTPException(status_code=404, detail="thread not found")
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text must not be empty")
+
+    message_id = await c.conversations.append_message(
+        thread_id, "assistant", text, sender="admin"
+    )
+
+    wa_cfg = await load_whatsapp_config(c.config)
+    if wa_cfg is None:
+        _audit("admin_manual_reply", "failure", resource=f"thread:{thread_id}")
+        raise HTTPException(status_code=503, detail="whatsapp not configured")
+
+    try:
+        result: SendResult = await send_text(c.http, wa_cfg, user_id, text)
+    except WhatsAppSendError:
+        await c.conversations.pause_until(thread_id, datetime.now(UTC) + HANDOFF_PAUSE_WINDOW)
+        _audit("admin_manual_reply", "failure", resource=f"thread:{thread_id}")
+        response.status_code = 502
+        return {"ok": False, "error": "failed to send message"}
+
+    await c.conversations.pause_until(thread_id, datetime.now(UTC) + HANDOFF_PAUSE_WINDOW)
+
+    if not result.ok:
+        _audit("admin_manual_reply", "failure", resource=f"thread:{thread_id}")
+        response.status_code = 502
+        return {"ok": False, "error": result.error or "send failed"}
+
+    if result.wamid:
+        try:
+            await c.conversations.set_message_wamid(message_id, result.wamid)
+        except Exception:
+            logger.exception("failed to record wamid for manual admin reply")
+
+    _audit("admin_manual_reply", "success", resource=f"thread:{thread_id}")
+    return {"ok": True, "wamid": result.wamid}

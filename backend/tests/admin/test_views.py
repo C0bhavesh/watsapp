@@ -2,8 +2,10 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 
+from app.admin.controls import AdminControls
 from app.channels.shopify_orders import order_from_webhook_payload
 from app.deps import get_container
 from app.store.base import MappingUpsert, OutboundDraft
@@ -742,3 +744,156 @@ def test_conversation_thread_order_summary_no_customer_has_null_address(client: 
     assert summary["customer_name"] is None
     assert summary["address_line1"] is None
     assert summary["city"] is None
+
+
+class _FakeTextSender:
+    def __init__(self, result: object) -> None:
+        self.calls: list[dict[str, object]] = []
+        self._result = result
+
+    async def __call__(self, http, cfg, to, body, timeout=20.0):
+        self.calls.append({"to": to, "body": body, "timeout": timeout})
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
+
+
+def _seed_whatsapp_config() -> None:
+    c = get_container()
+    asyncio.run(c.config.set_secret("whatsapp:access_token", "tok"))
+    asyncio.run(c.config.set_secret("whatsapp:app_secret", "sec"))
+    asyncio.run(c.config.set_secret("whatsapp:verify_token", "ver"))
+    asyncio.run(c.config.set_plain("whatsapp:phone_number_id", "1298805403309058"))
+    asyncio.run(c.config.set_plain("whatsapp:waba_id", "2454816495000045"))
+    asyncio.run(c.config.set_plain("whatsapp:api_version", "v23.0"))
+
+
+def test_manual_reply_requires_auth(client: TestClient) -> None:
+    resp = client.post("/admin/conversations/1/messages", json={"text": "hi"})
+    assert resp.status_code == 401
+
+
+def test_manual_reply_unknown_thread_id_returns_404(client: TestClient, monkeypatch) -> None:
+    login(client)
+    _seed_whatsapp_config()
+    resp = client.post("/admin/conversations/900000000002/messages", json={"text": "hi"})
+    assert resp.status_code == 404
+
+
+def test_manual_reply_rejects_empty_text(client: TestClient) -> None:
+    login(client)
+    _seed_whatsapp_config()
+    normalized = "+919876500040"
+    thread_id = asyncio.run(get_container().conversations.get_or_create(normalized))
+    resp = client.post(f"/admin/conversations/{thread_id}/messages", json={"text": "   "})
+    assert resp.status_code == 400
+
+
+def test_manual_reply_sends_persists_and_pauses_ai(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.channels.whatsapp_sender import SendResult
+
+    login(client)
+    _seed_whatsapp_config()
+    normalized = "+919876500041"
+    thread_id = asyncio.run(get_container().conversations.get_or_create(normalized))
+
+    fake = _FakeTextSender(SendResult(ok=True, status_code=200, wamid="wamid.MANUAL1", error=None))
+    monkeypatch.setattr("app.admin.router.send_text", fake)
+
+    resp = client.post(f"/admin/conversations/{thread_id}/messages", json={"text": "On its way!"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "wamid": "wamid.MANUAL1"}
+    assert fake.calls == [{"to": normalized, "body": "On its way!", "timeout": 20.0}]
+
+    messages = asyncio.run(
+        get_container().conversations.find_messages_by_user_id(normalized, limit=10)
+    )
+    assert messages[-1].role == "assistant"
+    assert messages[-1].content == "On its way!"
+    assert messages[-1].sender == "admin"
+
+    paused_until = asyncio.run(get_container().conversations.get_paused_until(thread_id))
+    assert paused_until is not None
+    assert paused_until > datetime.now(UTC) + timedelta(hours=23)
+
+
+def test_manual_reply_send_mode_off_still_sends(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A manual admin reply deliberately bypasses the send_mode kill switch (design decision)."""
+    from app.channels.whatsapp_sender import SendResult
+
+    login(client)
+    _seed_whatsapp_config()
+    normalized = "+919876500042"
+    thread_id = asyncio.run(get_container().conversations.get_or_create(normalized))
+
+    from app.admin.controls import save_controls
+
+    asyncio.run(
+        save_controls(
+            get_container().config,
+            AdminControls(
+                send_mode="off",
+                allowlist_phones=[],
+                owner_alert_number="",
+                default_language="en",
+            ),
+        )
+    )
+
+    fake = _FakeTextSender(SendResult(ok=True, status_code=200, wamid="wamid.MANUAL2", error=None))
+    monkeypatch.setattr("app.admin.router.send_text", fake)
+
+    resp = client.post(f"/admin/conversations/{thread_id}/messages", json={"text": "hello"})
+
+    assert resp.status_code == 200
+    assert len(fake.calls) == 1
+
+
+def test_manual_reply_reports_send_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.channels.whatsapp_sender import WhatsAppSendError
+
+    login(client)
+    _seed_whatsapp_config()
+    normalized = "+919876500043"
+    thread_id = asyncio.run(get_container().conversations.get_or_create(normalized))
+
+    fake = _FakeTextSender(WhatsAppSendError("timeout"))
+    monkeypatch.setattr("app.admin.router.send_text", fake)
+
+    resp = client.post(f"/admin/conversations/{thread_id}/messages", json={"text": "hello"})
+
+    assert resp.status_code == 502
+    assert resp.json()["ok"] is False
+
+    messages = asyncio.run(
+        get_container().conversations.find_messages_by_user_id(normalized, limit=10)
+    )
+    assert messages[-1].content == "hello"
+    assert messages[-1].sender == "admin"
+
+    paused_until = asyncio.run(get_container().conversations.get_paused_until(thread_id))
+    assert paused_until is not None
+
+
+def test_conversation_thread_reports_sender_on_manual_reply(client: TestClient) -> None:
+    login(client)
+    normalized = "+919876500044"
+    thread_id = asyncio.run(get_container().conversations.get_or_create(normalized))
+    asyncio.run(
+        get_container().conversations.append_message(
+            thread_id, "assistant", "manual text", sender="admin"
+        )
+    )
+
+    resp = client.get(f"/admin/conversations/{thread_id}")
+
+    assert resp.status_code == 200
+    ai_entries = [e for e in resp.json()["entries"] if e["type"] == "ai_reply"]
+    assert ai_entries[-1]["sender"] == "admin"

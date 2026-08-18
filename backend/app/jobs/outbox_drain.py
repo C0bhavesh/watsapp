@@ -95,7 +95,7 @@ _REQUIRED_PAYLOAD_KEYS = ("template", "language")
 
 
 @dataclass(frozen=True)
-class _TemplatePayload:
+class TemplatePayload:
     template: str
     language: str
     body_params: dict[str, str] | list[str]
@@ -121,7 +121,7 @@ def _gid_from_dedupe_key(dedupe_key: str) -> str | None:
     return None
 
 
-def _parse_payload(payload_json: str) -> _TemplatePayload | None:
+def parse_payload(payload_json: str) -> TemplatePayload | None:
     """Parse the generic outbox payload envelope; None on any bad/missing/malformed field.
 
     None -> the row is marked undeliverable (it can never render), which also terminally drops any
@@ -166,7 +166,7 @@ def _parse_payload(payload_json: str) -> _TemplatePayload | None:
         if isinstance(raw_buttons, list) and all(isinstance(b, str) for b in raw_buttons)
         else []
     )
-    return _TemplatePayload(
+    return TemplatePayload(
         template=fields["template"],
         language=fields["language"],
         body_params=body_params,
@@ -230,7 +230,7 @@ async def send_one_outbound(
         await c.ingest.mark_outbound_suppressed(row.id)
         return OUTCOME_SUPPRESSED
 
-    payload = _parse_payload(row.payload_json)
+    payload = parse_payload(row.payload_json)
     if payload is None:
         # Observability (not new behaviour): a None parse is either a corrupt payload or a legacy
         # pre-deploy row (old order_confirmation_cod shape) that can no longer render on the WABA.
@@ -246,7 +246,7 @@ async def send_one_outbound(
     # buttons/body_params now come straight from the payload envelope (Task 1's generalization) --
     # no per-template string check here anymore. Any template with no Confirm/Cancel component on
     # the WABA (prepaid_order, order_shipped, order_delivered) simply carries an empty/absent
-    # "buttons" list, which _parse_payload already normalized to [].
+    # "buttons" list, which parse_payload already normalized to [].
     buttons = payload.buttons
     body_params = payload.body_params
     async def _send(header_image_url: str | None) -> SendResult:

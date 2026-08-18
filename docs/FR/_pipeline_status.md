@@ -225,7 +225,11 @@
   Both features are now pushed to `main` and deployed to production (`thetavas-bot.vercel.app`,
   `/health` verified `ok` post-deploy). See the sub-project 1c and 1e rows below for what shipped.
 
-- [CHECKPOINT] Admin Manual Reply (Task 1: messages.sender) — schema migration must be confirmed run before deployment. The new `messages.sender` column is read **unconditionally** in `PostgresConversationStore.recent_messages` (a hot path: `core/memory.py::load_history` → `core/conversation.py::run_turn`, which wraps its body in a blanket `except Exception`). If this code is deployed to production BEFORE the owner runs the migration, every customer turn will raise `UndefinedColumnError`, the exception will be silently swallowed, the webhook still 200s, and the customer receives ZERO bot replies — silent total outage. See `error_learnings.md` [2026-08-18] entry for the full incident pattern.
+- [CHECKPOINT] Admin Manual Reply (Task 1: messages.sender) — schema migration must be confirmed run before deployment. The new `messages.sender` column is touched on BOTH the read and write paths, unconditionally for EVERY message (not just admin replies):
+  - **Read path:** `PostgresConversationStore.recent_messages`/`find_messages_by_user_id` `SELECT ... sender ...` unconditionally (a hot path: `core/memory.py::load_history` → `core/conversation.py::run_turn`, which wraps its body in a blanket `except Exception`).
+  - **Write path:** `PostgresConversationStore.append_message` now does `INSERT INTO messages (conversation_id, role, content, sender)` unconditionally for every persisted message — customer inbounds and AI replies included, not only `sender="admin"` rows. So `core/memory.py::persist_turn` itself would raise `UndefinedColumnError` inside `run_turn`'s blanket handler, meaning NOTHING persists at all (a broader outage than "just history reads fail").
+
+  If this code is deployed to production BEFORE the owner runs the migration, every customer turn will raise `UndefinedColumnError` (on the read select AND the insert), the exception will be silently swallowed, the webhook still 200s, and the customer receives ZERO bot replies with no conversation persisted — silent total outage. See `error_learnings.md` [2026-08-18] entry for the full incident pattern.
   
   Required SQL (documented in `backend/app/store/schema.sql`):
   ```sql

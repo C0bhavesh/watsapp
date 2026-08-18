@@ -116,7 +116,7 @@ Built by: resolve `user_id` from `thread_id` (404 if unknown, same as every othe
 5. `button_payloads = (f"order:confirm:{order.gid}", f"order:cancel:{order.gid}")` if `has_confirm_cancel_buttons`, else `()`.
 6. Build an `OutboundDraft` (`dedupe_key=f"admin_resend:{template_key}:{order.gid}:{uuid4()}"` — a fresh key every send, since this is a deliberate repeat, not a dedupe-guarded automatic trigger) and `enqueue_outbound` + `send_inline_outbound`, mirroring `_enqueue_and_send_fulfillment_notification`'s exact shape.
 7. `_audit("admin_template_resend", ...)`, return `{"ok": true}` / `{"ok": false, "error": ...}` matching the manual-reply endpoint's response contract.
-8. Deliberately bypasses `send_decision`/`send_mode` — same rationale as the manual-reply endpoint (owner-approved, restated here rather than re-litigated).
+8. **Respects `send_decision`/`send_mode`/`allowlist_phones` — does NOT bypass the kill switch**, unlike the free-text manual-reply endpoint. This is a deliberate difference: `send_inline_outbound` internally checks `send_mode` and cannot be told to ignore it without reimplementing its claim/finalize logic, and a template resend is architecturally the same category of message as every other automatic template send this codebase already gates behind `send_mode` (order confirmation, shipped, delivered) — respecting the same gate is the consistent, safer choice, unlike ad hoc free text where no existing gated pipeline applies. When `send_mode == "off"`, the resend is left queued for the backstop `outbox_drain` job rather than sent immediately or lost.
 
 ### 3. Frontend
 
@@ -143,5 +143,5 @@ Built by: resolve `user_id` from `thread_id` (404 if unknown, same as every othe
 - `core/order_actions.py` untouched.
 - Admin-only surface — `require_admin` unchanged, no new auth mechanism.
 - The order `gid` used for button payloads is ALWAYS resolved server-side from the thread's own mirrored orders — never accepted from the request body.
-- Deliberately bypasses `send_decision`/`send_mode`/`allowlist_phones`, same documented exception as the manual-reply feature.
+- The template-resend endpoint respects `send_decision`/`send_mode`/`allowlist_phones` (via `send_inline_outbound`'s existing gating) — unlike the manual-reply endpoint's free text, it does NOT bypass the kill switch. See "Design" section 2, point 8 for the reasoning.
 - This touches an outbound-send path with mutation-adjacent button payloads — a `security-reviewer` pass is required after `code-reviewer`, same as every other send-path feature.

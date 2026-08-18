@@ -23,12 +23,32 @@
   `TEMPLATE_CATALOG: dict[str, TemplateDef]` (keys: `cod_confirmation`, `prepaid_order`,
   `order_shipped`, `order_delivered`), `resolve_template_defaults(order: Order) -> dict[str, str]`
   (always returns every key, `""` when unavailable — no presence check needed by callers).
-- **Used in:** not yet wired to any route (Task 1 of a 3-task feature; consumed by Task 2's admin
-  endpoints next).
+- **Used in:** `app/admin/router.py::list_templates`/`send_admin_template` (Task 2, 2026-08-19 —
+  `GET`/`POST /admin/conversations/{thread_id}/templates`, see api_registry.md). Task 3
+  (frontend emoji picker) not yet built.
 - **Notes:** adding a future Meta-approved template is a one-entry addition to `TEMPLATE_CATALOG`,
   no frontend/send_template change needed (both are generic over the registry per the design doc).
   Depends on `split_variant_options` (now public, see below) and `Order`/`LineItem`/`Fulfillment`/
   `Customer` from `app/shopify/models.py`, unchanged.
+
+## Admin template resend send path (Task 2 of 3, 2026-08-19)
+- **File:** app/admin/router.py (`list_templates`, `send_admin_template`, `TemplateSendRequest`);
+  app/jobs/outbox_drain.py (`_ADMIN_RESEND_DEDUPE_PREFIXES`).
+- **Purpose:** admin-triggered resend of one of the store's 4 approved templates for a specific
+  order, with admin-editable field values, for the chat page's emoji/template picker.
+- **Public API:** `TemplateSendRequest{order_name: str, template: str, values: dict[str,str]}`;
+  `list_templates(thread_id) -> {"orders": [...]}` (read-only); `send_admin_template(request,
+  thread_id, body, response) -> {"ok": bool, "error"?: str}`.
+- **Used in:** admin chat page (frontend Task 3, not yet built).
+- **Notes:** goes through the SAME `enqueue_outbound` + `send_inline_outbound` pipeline as every
+  automatic template send (order confirmation/shipped/delivered) — respects `send_mode`/
+  `allowlist_phones` exactly like those, deliberately UNLIKE the sibling `send_manual_reply` (free
+  text), which bypasses the kill switch by design. `cod_confirmation`'s Confirm/Cancel button
+  payloads are built from `order.gid` resolved server-side via `find_mirrored_orders_by_phone` —
+  never from the request body. `dedupe_key = f"admin_resend:{order.gid}:{template}:{uuid4()}"` —
+  the `admin_resend:` prefix must stay registered in `outbox_drain.py`'s `_DEDUPE_PREFIXES`
+  (same family as `_FULFILLMENT_DEDUPE_PREFIXES`, no `order_mappings.status` side effect) or every
+  resend silently fails `bad_dedupe_key`.
 
 ## split_variant_options (public, was `_split_variant_options`, 2026-08-19)
 - **File:** app/channels/shopify_orders.py

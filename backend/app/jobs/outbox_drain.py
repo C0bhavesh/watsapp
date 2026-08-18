@@ -47,7 +47,16 @@ logger = logging.getLogger("app.jobs.outbox_drain")
 # send_one_outbound. Fulfillment notifications (Task 3) share none of that state machine.
 _ORDER_CONFIRMATION_DEDUPE_PREFIXES = ("order_created:", "order_reminder:")
 _FULFILLMENT_DEDUPE_PREFIXES = ("fulfillment_shipped:", "fulfillment_delivered:")
-_DEDUPE_PREFIXES = _ORDER_CONFIRMATION_DEDUPE_PREFIXES + _FULFILLMENT_DEDUPE_PREFIXES
+# Admin-initiated template resends (Task 2 of the admin emoji/template-picker feature) share the
+# fulfillment family's "opaque validity check only" posture -- an admin resend must never touch
+# order_mappings.status, only the order-confirmation family does that (see the dedupe-family gate
+# near the end of send_one_outbound).
+_ADMIN_RESEND_DEDUPE_PREFIXES = ("admin_resend:",)
+_DEDUPE_PREFIXES = (
+    _ORDER_CONFIRMATION_DEDUPE_PREFIXES
+    + _FULFILLMENT_DEDUPE_PREFIXES
+    + _ADMIN_RESEND_DEDUPE_PREFIXES
+)
 # Rows claimed per cron tick. Kept small so a run comfortably fits inside any reasonable
 # per-invocation time budget: send_template's per-call timeout is 20s, and Vercel's platform
 # timeout on this legacy-`builds` config may be as low as the ~10-15s default (maxDuration unset).

@@ -838,3 +838,10 @@ async def test_transport_error_bumps_and_continues(monkeypatch: pytest.MonkeyPat
     assert views[f"order_created:{first_gid}"].state == "queued"
     assert views[f"order_created:{first_gid}"].attempts == 1
     assert views[f"order_created:{second_gid}"].state == "sent"
+
+
+def test_gid_from_dedupe_key_accepts_admin_resend_prefix() -> None:
+    from app.jobs.outbox_drain import _gid_from_dedupe_key
+
+    result = _gid_from_dedupe_key("admin_resend:gid://shopify/Order/123:cod_confirmation:abc-uuid")
+    assert result == "gid://shopify/Order/123:cod_confirmation:abc-uuid"

@@ -40,12 +40,14 @@ async def apply_delivery_status(
     # they are safe to log verbatim. Only a genuinely NEW failure ("applied") drives a resend.
     if status.status == "failed":
         logger.warning("whatsapp delivery failed for wamid=%s", status.wamid)
-        if outbound_result == "applied":
+        # Both retry branches need the same AdminControls (send mode + allowlist + owner alert
+        # number), so load it once here rather than duplicating the call inside each branch.
+        if outbound_result == "applied" or message_result == "applied":
             controls = await load_controls(c.config)
-            await retry_failed_outbound(c, wa_cfg, controls, status.wamid)
-        elif message_result == "applied":
-            controls = await load_controls(c.config)
-            await retry_failed_message(c, wa_cfg, controls, status.wamid)
+            if outbound_result == "applied":
+                await retry_failed_outbound(c, wa_cfg, controls, status.wamid)
+            else:
+                await retry_failed_message(c, wa_cfg, controls, status.wamid)
     elif outbound_result == "not_found" and message_result == "not_found":
         logger.debug(
             "delivery status update for unknown wamid=%s (status=%s)",

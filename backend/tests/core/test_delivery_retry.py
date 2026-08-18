@@ -59,6 +59,7 @@ class FakeTemplateSender:
                 "body_params": body_params,
                 "button_payloads": list(button_payloads),
                 "header_image_url": header_image_url,
+                "timeout": timeout,
             }
         )
         if isinstance(self._result, Exception):
@@ -83,7 +84,7 @@ class FakeTextSender:
         self._results = list(results) if results is not None else None
 
     async def __call__(self, http, cfg, to, body, timeout=20.0) -> SendResult:
-        self.calls.append({"to": to, "body": body})
+        self.calls.append({"to": to, "body": body, "timeout": timeout})
         if self._results is not None:
             item: object = self._results.pop(0) if self._results else None
         else:
@@ -240,12 +241,13 @@ async def test_retry_failed_outbound_respects_send_mode_kill_switch(
     # Suppressed by send_decision -> no Meta template call at all.
     assert template.calls == []
     # A suppressed resend still burns a retry attempt (it can never earn a future wamid to hang the
-    # next retry off), and the owner is paged since that resend will never land.
+    # next retry off).
     info = await c.ingest.get_outbound_retry_info("wamid.ORIGINAL")
     assert info is not None
     assert info.retry_count == 1
-    assert len(text.calls) == 1
-    assert text.calls[0]["to"] == "+919999999999"
+    # send_mode="off" is the incident kill switch: it must suppress the OWNER ALERT too, not just
+    # the resend -- so NO outbound send happens at all on this path.
+    assert text.calls == []
 
 
 async def test_retry_failed_outbound_synchronous_send_failure_alerts_immediately(
@@ -366,10 +368,9 @@ async def test_retry_failed_message_respects_send_mode_kill_switch(
 
     await retry_failed_message(c, await _wa_cfg(), controls, "wamid.MSGORIG")
 
-    # Suppressed by send_decision -> only the owner alert is sent, never a resend to the customer.
-    assert len(text.calls) == 1
-    assert text.calls[0]["to"] == "+919999999999"
-    assert PHONE in str(text.calls[0]["body"])
+    # send_mode="off" suppresses BOTH the resend to the customer AND the owner alert (the incident
+    # kill switch stops every outbound path).
+    assert text.calls == []
     # A suppressed resend still burns a retry attempt (it can never earn a future wamid), and the
     # wamid stays unchanged so no fresh row is created.
     info = await c.conversations.get_message_retry_info("wamid.MSGORIG")
@@ -445,3 +446,152 @@ async def test_owner_alert_degrades_silently_when_unset_message(
     await retry_failed_message(c, await _wa_cfg(), controls, "wamid.MSG")
 
     assert text.calls == []  # no send attempted to an unset owner number
+
+
+# --- kill-switch gating of the OWNER ALERT itself ---------------------------
+
+
+async def test_retry_failed_outbound_alerts_when_resend_suppressed_but_owner_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # allowlist mode: the CUSTOMER phone is not allowlisted (resend suppressed) but the OWNER number
+    # is -> the owner alert must still send. Proves the alert gate keys on the owner number, not the
+    # customer, so a targeted allowlist never silences incident paging.
+    c = get_container()
+    await _seed_outbound_sent("gid://shopify/Order/7", "wamid.ORIGINAL")
+    owner = "+919999999999"
+    controls = AdminControls(
+        send_mode="allowlist", allowlist_phones=[owner], owner_alert_number=owner
+    )
+
+    template = FakeTemplateSender(
+        SendResult(ok=True, status_code=200, wamid="wamid.RESENT", error=None)
+    )
+    text = FakeTextSender()
+    _install_template(monkeypatch, template)
+    _install_text(monkeypatch, text)
+
+    await retry_failed_outbound(c, await _wa_cfg(), controls, "wamid.ORIGINAL")
+
+    assert template.calls == []  # customer not allowlisted -> resend suppressed
+    assert len(text.calls) == 1  # owner IS allowlisted -> alert still sends
+    assert text.calls[0]["to"] == owner
+
+
+async def test_retry_failed_message_alerts_when_resend_suppressed_but_owner_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    c = get_container()
+    await _seed_message_sent("wamid.MSGORIG", "Your order is on the way.")
+    owner = "+919999999999"
+    controls = AdminControls(
+        send_mode="allowlist", allowlist_phones=[owner], owner_alert_number=owner
+    )
+
+    text = FakeTextSender()
+    _install_text(monkeypatch, text)
+
+    await retry_failed_message(c, await _wa_cfg(), controls, "wamid.MSGORIG")
+
+    # Customer not allowlisted -> no resend; owner IS allowlisted -> alert sends. Only one send, to
+    # the owner (never a resend to the customer).
+    assert len(text.calls) == 1
+    assert text.calls[0]["to"] == owner
+
+
+# --- send timeout is bounded ------------------------------------------------
+
+
+async def test_retry_failed_outbound_bounds_send_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Both the resend AND the owner alert must use the short path-specific timeout, never the 20s
+    # default -- this send runs inline inside the webhook request.
+    from app.core.delivery_retry import _RETRY_SEND_TIMEOUT_SECONDS
+
+    c = get_container()
+    await _seed_outbound_sent("gid://shopify/Order/8", "wamid.ORIGINAL")
+    # Resend fails (non-ok) so BOTH the template resend and the owner-alert send_text fire.
+    controls = AdminControls(send_mode="live", owner_alert_number="+919999999999")
+
+    template = FakeTemplateSender(
+        SendResult(ok=False, status_code=500, wamid=None, error="boom")
+    )
+    text = FakeTextSender()
+    _install_template(monkeypatch, template)
+    _install_text(monkeypatch, text)
+
+    await retry_failed_outbound(c, await _wa_cfg(), controls, "wamid.ORIGINAL")
+
+    assert template.calls[0]["timeout"] == _RETRY_SEND_TIMEOUT_SECONDS
+    assert text.calls[0]["timeout"] == _RETRY_SEND_TIMEOUT_SECONDS
+
+
+async def test_retry_failed_message_bounds_send_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.delivery_retry import _RETRY_SEND_TIMEOUT_SECONDS
+
+    c = get_container()
+    await _seed_message_sent("wamid.MSGORIG", "Your order is on the way.")
+    controls = AdminControls(send_mode="live", owner_alert_number="+919999999999")
+
+    # Resend (first send_text) fails non-ok, so the owner alert (second send_text) also fires.
+    text = FakeTextSender(
+        results=[SendResult(ok=False, status_code=500, wamid=None, error="boom")]
+    )
+    _install_text(monkeypatch, text)
+
+    await retry_failed_message(c, await _wa_cfg(), controls, "wamid.MSGORIG")
+
+    assert len(text.calls) == 2
+    assert text.calls[0]["timeout"] == _RETRY_SEND_TIMEOUT_SECONDS  # the resend
+    assert text.calls[1]["timeout"] == _RETRY_SEND_TIMEOUT_SECONDS  # the owner alert
+
+
+# --- owner alert reports the ACTUAL spent retry count -----------------------
+
+
+async def test_owner_alert_reports_actual_retry_count_on_early_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Fires from the bad-payload branch on the FIRST attempt: exactly 1 retry attempt was spent, so
+    # the alert must say "1", not the hardcoded MAX_RETRIES.
+    c = get_container()
+    await _seed_outbound_sent("gid://shopify/Order/9", "wamid.ORIGINAL", payload={
+        "template": "order_confirmation_cod", "language": "hi", "customer_name": "Suman",
+    })
+    controls = AdminControls(send_mode="live", owner_alert_number="+919999999999")
+
+    template = FakeTemplateSender(
+        SendResult(ok=True, status_code=200, wamid="w", error=None)
+    )
+    text = FakeTextSender()
+    _install_template(monkeypatch, template)
+    _install_text(monkeypatch, text)
+
+    await retry_failed_outbound(c, await _wa_cfg(), controls, "wamid.ORIGINAL")
+
+    assert len(text.calls) == 1
+    body = str(text.calls[0]["body"])
+    assert "1 retry attempt" in body
+    assert f"{MAX_RETRIES} retry attempt" not in body
+
+
+async def test_owner_alert_reports_max_count_at_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Fires from the at-cap branch: MAX_RETRIES attempts were already spent, so the alert says "3".
+    c = get_container()
+    row_id = await _seed_outbound_sent("gid://shopify/Order/10", "wamid.ORIGINAL")
+    for _ in range(MAX_RETRIES):
+        await c.ingest.record_outbound_retry(row_id, None)
+    controls = AdminControls(send_mode="live", owner_alert_number="+919999999999")
+
+    text = FakeTextSender()
+    _install_text(monkeypatch, text)
+
+    await retry_failed_outbound(c, await _wa_cfg(), controls, "wamid.ORIGINAL")
+
+    assert len(text.calls) == 1
+    assert f"{MAX_RETRIES} retry attempt" in str(text.calls[0]["body"])

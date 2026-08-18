@@ -822,9 +822,10 @@ class InMemoryConversationStore:
         # Same lookup-by-wamid (O(1) via _message_by_wamid) as apply_message_delivery_status. The
         # mutable row carries id/content/retry_count; conversation_id is not stored on the row, so
         # resolve it from the per-conversation index. The messages-table sibling of
-        # get_outbound_retry_info.
+        # get_outbound_retry_info. Defense-in-depth: pin role='assistant' (mirrors the Postgres
+        # impl) so a future change stamping an inbound wamid onto a user row can never be "resent".
         row = self._message_by_wamid.get(wamid)
-        if row is None:
+        if row is None or row.role != "assistant":
             return None
         conversation_id = self._conversation_id_of(row.id)
         if conversation_id is None:

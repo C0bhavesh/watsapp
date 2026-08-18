@@ -29,14 +29,29 @@ logger = logging.getLogger("app.core.delivery_retry")
 
 MAX_RETRIES = 3
 
+# Short, path-specific timeout for every send this module makes -- both the customer resend and the
+# owner alert. Both run inline inside the WhatsApp webhook request (via apply_status), which shares
+# one TURN_TIMEOUT_SECONDS budget with any inbound customer messages in the same payload; a single
+# failed-status webhook can trigger a resend PLUS an owner alert, so at send_text/send_template's
+# 20s default the pair could burn up to 40s and silently drop a customer's message on an already
+# 200-acked webhook. Bounded to 3.0s (matching outbox_drain._INLINE_SEND_TIMEOUT_SECONDS): a
+# timeout just raises WhatsAppSendError sooner, which every call site already handles (burn the
+# retry, page the owner); Meta's redelivery of an un-acked request maps to "unchanged" (no double
+# retry), so a short cut-off costs nothing.
+_RETRY_SEND_TIMEOUT_SECONDS = 3.0
+
 _ALERT_TEMPLATE = (
-    "Thetavas bot: a message to {phone} failed to deliver after {max_retries} retries and "
-    "was not sent. You may want to follow up another way."
+    "Thetavas bot: a message to {phone} failed to deliver after {retry_count} retry attempt(s) "
+    "and was not sent. You may want to follow up another way."
 )
 
 
 async def _alert_owner_retry_exhausted(
-    c: Container, wa_cfg: WhatsAppConfig, owner_number: str, phone: str
+    c: Container,
+    wa_cfg: WhatsAppConfig,
+    controls: AdminControls,
+    phone: str,
+    retry_count: int,
 ) -> None:
     """Tell the store owner a message could not be delivered after every retry was used.
 
@@ -44,12 +59,28 @@ async def _alert_owner_retry_exhausted(
     number is unset, never raise, log-only on a failed alert send) but with its own message -- this
     is a different situation (a delivery permanently failed) from that function's handoff-alert
     wording, so it is a separate function rather than a reuse of that private helper.
+
+    The alert is itself a real outbound WhatsApp send, so it goes through the SAME
+    ``send_decision`` kill switch as every other send in this module (ADR-002) -- flipping
+    ``send_mode`` to ``off`` during an incident must stop this path too, not just the resend. A
+    suppressed alert simply does not send (debug-log, no warning -- an expected kill-switch state,
+    not a failure). ``retry_count`` is the number of retry attempts actually SPENT on this row, so
+    the wording is accurate even when it fires from an early-terminal branch (0 or 1 attempts).
     """
+    owner_number = controls.owner_alert_number
     if not owner_number:
         return
-    alert = _ALERT_TEMPLATE.format(phone=phone, max_retries=MAX_RETRIES)
+    if send_decision(controls.send_mode, controls.allowlist_phones, owner_number) == "suppress":
+        logger.debug(
+            "retry-exhausted owner alert suppressed by kill switch (send_mode=%s)",
+            controls.send_mode,
+        )
+        return
+    alert = _ALERT_TEMPLATE.format(phone=phone, retry_count=retry_count)
     try:
-        result = await send_text(c.http, wa_cfg, owner_number, alert)
+        result = await send_text(
+            c.http, wa_cfg, owner_number, alert, timeout=_RETRY_SEND_TIMEOUT_SECONDS
+        )
     except WhatsAppSendError:
         logger.warning("retry-exhausted owner alert failed to send (transport error)")
         return
@@ -74,37 +105,50 @@ async def retry_failed_outbound(
     if info is None:
         return
     if info.retry_count >= MAX_RETRIES:
-        await _alert_owner_retry_exhausted(c, wa_cfg, controls.owner_alert_number, info.phone_e164)
+        await _alert_owner_retry_exhausted(
+            c, wa_cfg, controls, info.phone_e164, info.retry_count
+        )
         return
+
+    # Every terminal branch below burns one retry, so the count actually SPENT once this attempt
+    # ends is info.retry_count + 1 -- that is what the owner alert reports.
+    spent = info.retry_count + 1
 
     payload = parse_payload(info.payload_json)
     if payload is None:
         await c.ingest.record_outbound_retry(info.id, None)
-        await _alert_owner_retry_exhausted(c, wa_cfg, controls.owner_alert_number, info.phone_e164)
+        await _alert_owner_retry_exhausted(c, wa_cfg, controls, info.phone_e164, spent)
         return
 
     decision = send_decision(controls.send_mode, controls.allowlist_phones, info.phone_e164)
     if decision == "suppress":
         await c.ingest.record_outbound_retry(info.id, None)
-        await _alert_owner_retry_exhausted(c, wa_cfg, controls.owner_alert_number, info.phone_e164)
+        await _alert_owner_retry_exhausted(c, wa_cfg, controls, info.phone_e164, spent)
         return
 
     try:
         result = await send_template(
             c.http, wa_cfg, info.phone_e164, payload.template, payload.language,
             payload.body_params, button_payloads=payload.buttons,
-            header_image_url=payload.image_url,
+            header_image_url=payload.image_url, timeout=_RETRY_SEND_TIMEOUT_SECONDS,
         )
     except WhatsAppSendError:
         await c.ingest.record_outbound_retry(info.id, None)
-        await _alert_owner_retry_exhausted(c, wa_cfg, controls.owner_alert_number, info.phone_e164)
+        await _alert_owner_retry_exhausted(c, wa_cfg, controls, info.phone_e164, spent)
         return
 
     if result.ok and result.wamid:
         await c.ingest.record_outbound_retry(info.id, result.wamid)
+        # Non-PII audit trail: wamids are established elsewhere as safe to log verbatim; the phone
+        # and message content are NOT logged.
+        logger.info(
+            "delivery retry resent (table=outbound_messages old_wamid=%s new_wamid=%s "
+            "retry_count=%s)",
+            wamid, result.wamid, spent,
+        )
     else:
         await c.ingest.record_outbound_retry(info.id, None)
-        await _alert_owner_retry_exhausted(c, wa_cfg, controls.owner_alert_number, info.phone_e164)
+        await _alert_owner_retry_exhausted(c, wa_cfg, controls, info.phone_e164, spent)
 
 
 async def retry_failed_message(
@@ -122,9 +166,13 @@ async def retry_failed_message(
     if info.retry_count >= MAX_RETRIES:
         phone = await c.conversations.get_user_id(info.conversation_id)
         await _alert_owner_retry_exhausted(
-            c, wa_cfg, controls.owner_alert_number, phone or "unknown recipient"
+            c, wa_cfg, controls, phone or "unknown recipient", info.retry_count
         )
         return
+
+    # Every terminal branch below burns one retry, so the count actually SPENT once this attempt
+    # ends is info.retry_count + 1 -- that is what the owner alert reports.
+    spent = info.retry_count + 1
 
     phone = await c.conversations.get_user_id(info.conversation_id)
     if phone is None:
@@ -132,26 +180,31 @@ async def retry_failed_message(
         # so this attempt earns no new wamid and is terminal: page the owner like every other
         # dead-end branch in this module.
         await c.conversations.record_message_retry(info.id, None)
-        await _alert_owner_retry_exhausted(
-            c, wa_cfg, controls.owner_alert_number, "unknown recipient"
-        )
+        await _alert_owner_retry_exhausted(c, wa_cfg, controls, "unknown recipient", spent)
         return
 
     decision = send_decision(controls.send_mode, controls.allowlist_phones, phone)
     if decision == "suppress":
         await c.conversations.record_message_retry(info.id, None)
-        await _alert_owner_retry_exhausted(c, wa_cfg, controls.owner_alert_number, phone)
+        await _alert_owner_retry_exhausted(c, wa_cfg, controls, phone, spent)
         return
 
     try:
-        result = await send_text(c.http, wa_cfg, phone, info.content)
+        result = await send_text(
+            c.http, wa_cfg, phone, info.content, timeout=_RETRY_SEND_TIMEOUT_SECONDS
+        )
     except WhatsAppSendError:
         await c.conversations.record_message_retry(info.id, None)
-        await _alert_owner_retry_exhausted(c, wa_cfg, controls.owner_alert_number, phone)
+        await _alert_owner_retry_exhausted(c, wa_cfg, controls, phone, spent)
         return
 
     if result.ok and result.wamid:
         await c.conversations.record_message_retry(info.id, result.wamid)
+        # Non-PII audit trail: wamids are safe to log verbatim; phone/content are NOT logged.
+        logger.info(
+            "delivery retry resent (table=messages old_wamid=%s new_wamid=%s retry_count=%s)",
+            wamid, result.wamid, spent,
+        )
     else:
         await c.conversations.record_message_retry(info.id, None)
-        await _alert_owner_retry_exhausted(c, wa_cfg, controls.owner_alert_number, phone)
+        await _alert_owner_retry_exhausted(c, wa_cfg, controls, phone, spent)

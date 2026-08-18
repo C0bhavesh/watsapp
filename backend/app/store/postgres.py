@@ -1422,10 +1422,13 @@ class PostgresConversationStore:
     async def get_message_retry_info(self, wamid: str) -> MessageRetryInfo | None:
         # Looked up by the row's CURRENT wamid (uses idx_messages_wamid), the same routing key
         # apply_message_delivery_status uses. The messages-table sibling of get_outbound_retry_info.
-        # Read-only.
+        # Read-only. Defense-in-depth: only assistant rows ever carry a wamid today, but pin
+        # role='assistant' so a future change that stamps an inbound wamid onto a user row can never
+        # cause us to "resend" a customer's own message back to them.
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT id, conversation_id, content, retry_count FROM messages WHERE wamid = $1",
+                "SELECT id, conversation_id, content, retry_count FROM messages "
+                "WHERE wamid = $1 AND role = 'assistant'",
                 wamid,
             )
         if row is None:

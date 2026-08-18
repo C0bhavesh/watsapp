@@ -2001,7 +2001,7 @@ async def test_webhook_status_event_updates_ai_reply_delivery_status(
 async def test_webhook_status_processing_exception_still_acks_200(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def exploding_apply(c, status):
+    async def exploding_apply(c, wa_cfg, status):
         raise RuntimeError("boom")
 
     monkeypatch.setattr("app.channels.whatsapp.apply_delivery_status", exploding_apply)

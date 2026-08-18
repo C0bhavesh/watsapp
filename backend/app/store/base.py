@@ -294,6 +294,20 @@ class MessageStore(Protocol):
 
 
 @dataclass(frozen=True)
+class MessageRetryInfo:
+    """Retry state of an AI-reply message row, looked up by its current wamid. The messages-table
+    sibling of OutboundRetryInfo (template sends). Consumed by the delivery-failure auto-retry
+    resend logic: `id` re-targets the row for record_message_retry, `conversation_id`/`content` are
+    the original reply it re-uses verbatim, `retry_count` is how many retry attempts have already
+    been spent (the resend cap is checked against it)."""
+
+    id: int
+    conversation_id: int
+    content: str
+    retry_count: int
+
+
+@dataclass(frozen=True)
 class StoredMessage:
     role: str
     content: str
@@ -345,6 +359,18 @@ class ConversationStore(Protocol):
     # The applied/unchanged distinction lets retry wiring fire only on a genuinely new 'failed',
     # never on a Meta-redelivered duplicate webhook (which would double-fire a retry).
     async def apply_message_delivery_status(self, wamid: str, status: str) -> str: ...
+
+    # Looks up an AI-reply message row by its current wamid, returning its retry state
+    # (id/conversation_id/content/retry_count) or None if no row carries this wamid. The
+    # messages-table sibling of IngestStore.get_outbound_retry_info. Read-only.
+    async def get_message_retry_info(self, wamid: str) -> MessageRetryInfo | None: ...
+
+    # Records that a retry attempt was used. `new_wamid` non-None means the resend succeeded and
+    # got a fresh wamid -- the row's wamid is updated to it and delivery_status reset to NULL (a
+    # fresh send awaiting its own confirmation). `new_wamid` None means the resend attempt itself
+    # could not be sent (or was suppressed by the kill switch) -- retry_count still increments,
+    # but wamid/delivery_status are left as-is. Sibling of IngestStore.record_outbound_retry.
+    async def record_message_retry(self, id: int, new_wamid: str | None) -> None: ...
 
     async def pause_until(self, conversation_id: int, until: datetime) -> None: ...
 

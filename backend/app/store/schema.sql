@@ -130,6 +130,13 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS delivery_status text;
 -- Partial index: the status-webhook lookup is WHERE wamid = $1, and only AI-reply rows that were
 -- actually sent carry a wamid (user-role and not-yet-sent rows are NULL), so index just those.
 CREATE INDEX IF NOT EXISTS idx_messages_wamid ON messages (wamid) WHERE wamid IS NOT NULL;
+-- Count of delivery-failure retry attempts spent on an AI-reply row (delivery-failure auto-retry;
+-- the messages-table sibling of outbound_messages.retry_count above). record_message_retry
+-- increments it; the resend cap is checked against it. Additive + idempotent (mirrors the wamid/
+-- delivery_status ALTERs above), so it can be applied to a live table without a rewrite. NOTE: an
+-- OWNER-RUN manual migration -- nothing in the app executes schema.sql automatically; documented
+-- here as the source-of-truth DDL.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS retry_count int NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS knowledge_overrides (
     kind        text PRIMARY KEY,

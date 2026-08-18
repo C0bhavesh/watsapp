@@ -103,6 +103,73 @@ async def test_apply_message_delivery_status_duplicate_failed_pg(pool: LazyPool)
     assert second == "unchanged"
 
 
+# --- ConversationStore message retry-info + retry-record (Task 3) ---
+
+async def test_get_message_retry_info_returns_current_state_pg(pool: LazyPool) -> None:
+    store = PostgresConversationStore(pool)
+    user_id = f"+91{uuid.uuid4().int % 10**10:010d}"
+    conv_id = await store.get_or_create(user_id)
+    msg_id = await store.append_message(conv_id, "assistant", "your order shipped")
+    wamid = f"wamid.{uuid.uuid4()}"
+    await store.set_message_wamid(msg_id, wamid)
+
+    info = await store.get_message_retry_info(wamid)
+
+    assert info is not None
+    assert info.id == msg_id
+    assert info.conversation_id == conv_id
+    assert info.content == "your order shipped"
+    assert info.retry_count == 0
+
+
+async def test_get_message_retry_info_unknown_wamid_returns_none_pg(pool: LazyPool) -> None:
+    store = PostgresConversationStore(pool)
+    info = await store.get_message_retry_info(f"wamid.{uuid.uuid4()}")
+    assert info is None
+
+
+async def test_record_message_retry_with_new_wamid_resets_delivery_status_pg(
+    pool: LazyPool,
+) -> None:
+    store = PostgresConversationStore(pool)
+    user_id = f"+91{uuid.uuid4().int % 10**10:010d}"
+    conv_id = await store.get_or_create(user_id)
+    msg_id = await store.append_message(conv_id, "assistant", "your order shipped")
+    wamid = f"wamid.{uuid.uuid4()}"
+    await store.set_message_wamid(msg_id, wamid)
+    await store.apply_message_delivery_status(wamid, "failed")
+
+    new_wamid = f"wamid.{uuid.uuid4()}"
+    await store.record_message_retry(msg_id, new_wamid)
+
+    info = await store.get_message_retry_info(new_wamid)
+    assert info is not None
+    assert info.retry_count == 1
+    assert await store.get_message_retry_info(wamid) is None
+    messages = await store.find_messages_by_user_id(user_id)
+    assert messages[-1].delivery_status is None
+
+
+async def test_record_message_retry_with_no_new_wamid_increments_count_only_pg(
+    pool: LazyPool,
+) -> None:
+    store = PostgresConversationStore(pool)
+    user_id = f"+91{uuid.uuid4().int % 10**10:010d}"
+    conv_id = await store.get_or_create(user_id)
+    msg_id = await store.append_message(conv_id, "assistant", "your order shipped")
+    wamid = f"wamid.{uuid.uuid4()}"
+    await store.set_message_wamid(msg_id, wamid)
+    await store.apply_message_delivery_status(wamid, "failed")
+
+    await store.record_message_retry(msg_id, None)
+
+    info = await store.get_message_retry_info(wamid)
+    assert info is not None
+    assert info.retry_count == 1
+    messages = await store.find_messages_by_user_id(user_id)
+    assert messages[-1].delivery_status == "failed"
+
+
 async def test_get_user_id_pg(pool: LazyPool) -> None:
     store = PostgresConversationStore(pool)
     user_id = f"+91{uuid.uuid4().int % 10**10:010d}"

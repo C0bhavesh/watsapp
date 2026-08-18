@@ -9,6 +9,7 @@ from app.store.base import (
     IngestResult,
     MappingUpsert,
     MappingView,
+    MessageRetryInfo,
     OrderActionEntry,
     OutboundClaim,
     OutboundDraft,
@@ -66,6 +67,10 @@ class _MessageRow:
     created_at: str | None
     wamid: str | None
     delivery_status: str | None
+    # Count of delivery-failure retry attempts spent on this AI reply (the in-memory analogue of
+    # messages.retry_count). record_message_retry increments it; the resend cap is checked against
+    # it. Defaulted so the existing append_message construction site stays unchanged.
+    retry_count: int = 0
 
 
 def _message_view(row: _MessageRow) -> StoredMessage:
@@ -812,6 +817,46 @@ class InMemoryConversationStore:
             row.delivery_status = status
             return "applied"
         return "unchanged"
+
+    async def get_message_retry_info(self, wamid: str) -> MessageRetryInfo | None:
+        # Same lookup-by-wamid (O(1) via _message_by_wamid) as apply_message_delivery_status. The
+        # mutable row carries id/content/retry_count; conversation_id is not stored on the row, so
+        # resolve it from the per-conversation index. The messages-table sibling of
+        # get_outbound_retry_info.
+        row = self._message_by_wamid.get(wamid)
+        if row is None:
+            return None
+        conversation_id = self._conversation_id_of(row.id)
+        if conversation_id is None:
+            return None
+        return MessageRetryInfo(
+            id=row.id,
+            conversation_id=conversation_id,
+            content=row.content,
+            retry_count=row.retry_count,
+        )
+
+    async def record_message_retry(self, id: int, new_wamid: str | None) -> None:
+        # Mirror the Postgres UPDATE: always increment retry_count; a non-None new_wamid means the
+        # resend succeeded -> reassign the wamid (re-index it, dropping the old key) and reset
+        # delivery_status to None (a fresh send awaiting its own confirmation). A None new_wamid
+        # leaves wamid/delivery_status as-is. Sibling of record_outbound_retry.
+        row = self._messages_by_id.get(id)
+        if row is None:
+            return
+        row.retry_count += 1
+        if new_wamid is not None:
+            if row.wamid is not None:
+                self._message_by_wamid.pop(row.wamid, None)
+            row.wamid = new_wamid
+            self._message_by_wamid[new_wamid] = row
+            row.delivery_status = None
+
+    def _conversation_id_of(self, message_id: int) -> int | None:
+        for conversation_id, rows in self._messages.items():
+            if any(r.id == message_id for r in rows):
+                return conversation_id
+        return None
 
     async def find_messages_by_user_id(
         self, user_id: str, limit: int = 100

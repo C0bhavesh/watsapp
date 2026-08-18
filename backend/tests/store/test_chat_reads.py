@@ -424,6 +424,65 @@ async def test_apply_message_delivery_status_returns_unchanged_on_duplicate_fail
     assert second == "unchanged"
 
 
+# --- ConversationStore message retry-info + retry-record (Task 3) ---
+
+async def test_get_message_retry_info_returns_current_state() -> None:
+    store = InMemoryConversationStore()
+    conv_id = await store.get_or_create("+919876500060")
+    msg_id = await store.append_message(conv_id, "assistant", "your order shipped")
+    await store.set_message_wamid(msg_id, "wamid.MRETRY1")
+
+    info = await store.get_message_retry_info("wamid.MRETRY1")
+
+    assert info is not None
+    assert info.id == msg_id
+    assert info.conversation_id == conv_id
+    assert info.content == "your order shipped"
+    assert info.retry_count == 0
+
+
+async def test_get_message_retry_info_unknown_wamid_returns_none() -> None:
+    store = InMemoryConversationStore()
+    info = await store.get_message_retry_info("wamid.NEVER_SEEN")
+    assert info is None
+
+
+async def test_record_message_retry_with_new_wamid_resets_delivery_status() -> None:
+    store = InMemoryConversationStore()
+    conv_id = await store.get_or_create("+919876500061")
+    msg_id = await store.append_message(conv_id, "assistant", "your order shipped")
+    await store.set_message_wamid(msg_id, "wamid.MFAIL1")
+    await store.apply_message_delivery_status("wamid.MFAIL1", "failed")
+
+    await store.record_message_retry(msg_id, "wamid.MRESENT1")
+
+    info = await store.get_message_retry_info("wamid.MRESENT1")
+    assert info is not None
+    assert info.retry_count == 1
+    # The old wamid no longer routes to the row (it was reassigned to the resend's wamid).
+    assert await store.get_message_retry_info("wamid.MFAIL1") is None
+    messages = await store.find_messages_by_user_id("+919876500061")
+    assert messages[-1].delivery_status is None  # reset, awaiting fresh confirmation
+
+
+async def test_record_message_retry_with_no_new_wamid_increments_count_only() -> None:
+    store = InMemoryConversationStore()
+    conv_id = await store.get_or_create("+919876500062")
+    msg_id = await store.append_message(conv_id, "assistant", "your order shipped")
+    await store.set_message_wamid(msg_id, "wamid.MFAIL2")
+    await store.apply_message_delivery_status("wamid.MFAIL2", "failed")
+
+    # No new wamid (the resend itself could not be sent / was suppressed): count increments, but
+    # the wamid and delivery_status are left as-is -- verify via the ORIGINAL wamid.
+    await store.record_message_retry(msg_id, None)
+
+    info = await store.get_message_retry_info("wamid.MFAIL2")
+    assert info is not None
+    assert info.retry_count == 1
+    messages = await store.find_messages_by_user_id("+919876500062")
+    assert messages[-1].delivery_status == "failed"  # unchanged
+
+
 async def test_user_role_messages_unaffected_by_delivery_status_default() -> None:
     store = InMemoryConversationStore()
     conv_id = await store.get_or_create("+919876500053")

@@ -20,6 +20,7 @@ from app.store.base import (
     IngestResult,
     MappingUpsert,
     MappingView,
+    MessageRetryInfo,
     OrderActionEntry,
     OutboundClaim,
     OutboundDraft,
@@ -1417,6 +1418,43 @@ class PostgresConversationStore:
                 wamid, status,
             )
         return "applied" if applied_id is not None else "unchanged"
+
+    async def get_message_retry_info(self, wamid: str) -> MessageRetryInfo | None:
+        # Looked up by the row's CURRENT wamid (uses idx_messages_wamid), the same routing key
+        # apply_message_delivery_status uses. The messages-table sibling of get_outbound_retry_info.
+        # Read-only.
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, conversation_id, content, retry_count FROM messages WHERE wamid = $1",
+                wamid,
+            )
+        if row is None:
+            return None
+        return MessageRetryInfo(
+            id=int(row["id"]),
+            conversation_id=int(row["conversation_id"]),
+            content=str(row["content"]),
+            retry_count=int(row["retry_count"]),
+        )
+
+    async def record_message_retry(self, id: int, new_wamid: str | None) -> None:
+        # Always increment retry_count. A non-None new_wamid means the resend succeeded and got a
+        # fresh wamid -> reassign wamid to it and reset delivery_status to NULL (the fresh send
+        # awaits its own delivery/read confirmation). A None new_wamid (resend could not be sent /
+        # kill-switch-suppressed) increments the count only, leaving wamid/status as-is. The
+        # messages-table sibling of record_outbound_retry.
+        async with self._pool.acquire() as conn:
+            if new_wamid is not None:
+                await conn.execute(
+                    "UPDATE messages SET retry_count = retry_count + 1,"
+                    " wamid = $2, delivery_status = NULL WHERE id = $1",
+                    id,
+                    new_wamid,
+                )
+            else:
+                await conn.execute(
+                    "UPDATE messages SET retry_count = retry_count + 1 WHERE id = $1", id
+                )
 
     async def pause_until(self, conversation_id: int, until: datetime) -> None:
         async with self._pool.acquire() as conn:

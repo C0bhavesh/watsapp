@@ -71,7 +71,7 @@ async def _alert_owner_retry_exhausted(
     if not owner_number:
         return
     if send_decision(controls.send_mode, controls.allowlist_phones, owner_number) == "suppress":
-        logger.debug(
+        logger.info(
             "retry-exhausted owner alert suppressed by kill switch (send_mode=%s)",
             controls.send_mode,
         )

@@ -2011,6 +2011,125 @@ async def test_webhook_status_processing_exception_still_acks_200(
     assert resp.status_code == 200
 
 
+async def _seed_retryable_outbound(
+    wamid: str,
+    phone: str = "+919664290413",
+    *,
+    delivery_status: str | None = None,
+    retry_count: int = 0,
+) -> None:
+    """Queue+send an outbound row whose payload_json actually renders (template+language+body),
+    so retry_failed_outbound can resend it. The in-memory row's delivery_status/retry_count are
+    then set directly to model the state a status webhook is about to act on."""
+    from app.store.base import OutboundDraft
+
+    ingest = get_container().ingest
+    dedupe_key = f"order_created:{wamid}"
+    outbound_id = await ingest.enqueue_outbound(
+        OutboundDraft(
+            dedupe_key=dedupe_key,
+            kind="order_confirmation",
+            phone_e164=phone,
+            payload_json=json.dumps(
+                {"template": "cod_confirmation", "language": "en", "body_params": {"1": "x"}}
+            ),
+        )
+    )
+    assert outbound_id is not None
+    await ingest.mark_outbound_sent(outbound_id, wamid)
+    meta = ingest._outbound_meta[dedupe_key]  # type: ignore[attr-defined]
+    meta.delivery_status = delivery_status
+    meta.retry_count = retry_count
+
+
+async def test_webhook_failed_status_triggers_a_retry_resend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A genuinely-new 'failed' on a sent template must resend it: send_template earns a fresh
+    # wamid, the row re-targets to it, retry_count increments, delivery_status resets to None.
+    sent: dict[str, bool] = {}
+
+    async def fake_send_template(*args, **kwargs):
+        from app.channels.whatsapp_sender import SendResult
+
+        sent["called"] = True
+        return SendResult(ok=True, status_code=200, wamid="wamid.RETRY1", error=None)
+
+    monkeypatch.setattr("app.core.delivery_retry.send_template", fake_send_template)
+    from app.admin.controls import AdminControls, save_controls
+
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    await _seed_retryable_outbound("wamid.SEEDED", phone="+919664290413")
+
+    body = _status_envelope("wamid.SEEDED", "failed")
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert sent.get("called") is True
+    # Old wamid no longer routes; the fresh wamid now carries the row with an incremented count.
+    assert await c.ingest.get_outbound_retry_info("wamid.SEEDED") is None
+    info = await c.ingest.get_outbound_retry_info("wamid.RETRY1")
+    assert info is not None
+    assert info.retry_count == 1
+    entries = await c.ingest.find_outbound_by_phone("+919664290413")
+    assert entries[-1].delivery_status is None
+
+
+async def test_webhook_duplicate_failed_status_does_not_retry_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Meta redelivers a 'failed' for a wamid already marked failed (a retry already happened once).
+    # apply_outbound_delivery_status returns "unchanged", so NO second resend fires.
+    calls: dict[str, int] = {"n": 0}
+
+    async def counting_send_template(*args, **kwargs):
+        from app.channels.whatsapp_sender import SendResult
+
+        calls["n"] += 1
+        return SendResult(ok=True, status_code=200, wamid="wamid.NEVER", error=None)
+
+    async def counting_send_text(*args, **kwargs):
+        from app.channels.whatsapp_sender import SendResult
+
+        calls["n"] += 1
+        return SendResult(ok=True, status_code=200, wamid="wamid.NEVER", error=None)
+
+    monkeypatch.setattr("app.core.delivery_retry.send_template", counting_send_template)
+    monkeypatch.setattr("app.core.delivery_retry.send_text", counting_send_text)
+    from app.admin.controls import AdminControls, save_controls
+
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    await _seed_retryable_outbound("wamid.DUP", delivery_status="failed", retry_count=1)
+
+    body = _status_envelope("wamid.DUP", "failed")
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert calls["n"] == 0
+
+
+async def test_webhook_retry_wiring_exception_still_acks_200(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An unexpected error inside the retry path must not fail the signed webhook's 200 ack --
+    # same exception-swallowing discipline already applied to the whole status-processing loop.
+    async def exploding_send_template(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("app.core.delivery_retry.send_template", exploding_send_template)
+    from app.admin.controls import AdminControls, save_controls
+
+    c = get_container()
+    await save_controls(c.config, AdminControls(send_mode="live"))
+    await _seed_retryable_outbound("wamid.EXPL")
+
+    body = _status_envelope("wamid.EXPL", "failed")
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+    assert resp.status_code == 200
+
+
 async def test_post_text_event_threads_history_into_router_classification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

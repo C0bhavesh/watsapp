@@ -111,6 +111,14 @@ def test_chats_js_thread_entries_key_includes_status(client: TestClient) -> None
     assert "e.status" in js
 
 
+def test_chats_js_thread_entries_key_includes_delivery_status(client: TestClient) -> None:
+    # The poll diff-key must also fold delivery_status in: it transitions independently of status
+    # (which stays "sent" on a template row), so without it a delivered/read tick update is never
+    # detected on an open thread until a manual refresh, defeating live receipts.
+    js = client.get("/admin/ui/chats.js").text
+    assert "e.delivery_status" in js
+
+
 def test_chats_js_poll_skips_when_hidden_and_guards_overlap(client: TestClient) -> None:
     # The 3s poll must skip while the tab is hidden and never overlap a slow tick, to protect the
     # shared DB pool (max_size=5). Fix 3.

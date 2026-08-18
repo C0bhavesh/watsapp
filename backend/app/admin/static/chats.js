@@ -332,7 +332,11 @@ function threadEntriesKey(entries) {
   // Fold every entry's status into the key so a queued -> sent/failed/undeliverable transition
   // (which changes neither the count nor the last timestamp) is still detected by the poll diff.
   const statuses = entries.map((e) => e.status || "").join(",");
-  return entries.length + ":" + (last.timestamp || "") + ":" + statuses;
+  // Fold delivery_status in too: it transitions null -> delivered -> read independently of
+  // status (which stays "sent" for a template row), so without this the poll never detects a
+  // delivery/read change and the tick marks go stale on an open thread until a manual refresh.
+  const deliveryStatuses = entries.map((e) => e.delivery_status || "").join(",");
+  return entries.length + ":" + (last.timestamp || "") + ":" + statuses + ":" + deliveryStatuses;
 }
 
 let pollInFlight = false;

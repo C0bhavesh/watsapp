@@ -588,16 +588,18 @@ class InMemoryIngestStore:
             meta.state = "sent"
             meta.template_wamid = wamid
 
-    async def apply_outbound_delivery_status(self, wamid: str, status: str) -> bool:
-        # Route a Meta delivery/read status by template_wamid. Return True whenever the wamid
-        # belongs to THIS table (whether or not the ordering guard actually advances the state) so
-        # the webhook handler knows not to also probe messages; False means "not this table."
+    async def apply_outbound_delivery_status(self, wamid: str, status: str) -> str:
+        # Route a Meta delivery/read status by template_wamid. "not_found" means the wamid is not
+        # in this table (try messages); "applied" means the ordering guard let the write through
+        # (a genuine forward move or a fresh 'failed'); "unchanged" means the wamid IS here but the
+        # guard rejected the write (a duplicate/regressive report). See base.py for the contract.
         for meta in self._outbound_meta.values():
             if meta.template_wamid == wamid:
                 if should_apply_delivery_status(meta.delivery_status, status):
                     meta.delivery_status = status
-                return True
-        return False
+                    return "applied"
+                return "unchanged"
+        return "not_found"
 
     async def mark_outbound_suppressed(self, id: int) -> None:
         meta = self._meta_by_id(id)
@@ -767,16 +769,18 @@ class InMemoryConversationStore:
             row.wamid = wamid
             self._message_by_wamid[wamid] = row
 
-    async def apply_message_delivery_status(self, wamid: str, status: str) -> bool:
-        # Route a Meta delivery/read status by wamid. Return True whenever the wamid belongs to
-        # THIS table (whether or not the ordering guard actually advances the state) so the webhook
-        # handler knows not to also probe outbound_messages; False means "not this table."
+    async def apply_message_delivery_status(self, wamid: str, status: str) -> str:
+        # Route a Meta delivery/read status by wamid. "not_found" means the wamid is not in this
+        # table (try outbound_messages); "applied" means the ordering guard let the write through
+        # (a genuine forward move or a fresh 'failed'); "unchanged" means the wamid IS here but the
+        # guard rejected the write (a duplicate/regressive report). See base.py for the contract.
         row = self._message_by_wamid.get(wamid)
         if row is None:
-            return False
+            return "not_found"
         if should_apply_delivery_status(row.delivery_status, status):
             row.delivery_status = status
-        return True
+            return "applied"
+        return "unchanged"
 
     async def find_messages_by_user_id(
         self, user_id: str, limit: int = 100

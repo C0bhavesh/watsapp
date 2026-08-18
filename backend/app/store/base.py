@@ -184,10 +184,16 @@ class IngestStore(Protocol):
     async def mark_outbound_sent(self, id: int, wamid: str | None) -> None: ...
 
     # Applies a Meta delivery/read status update, found by template_wamid, through the ordering
-    # guard in app.core.delivery_status. Returns True if a matching row was found (whether or not
-    # the ordering guard actually changed anything) so the webhook handler can decide whether to
-    # also try the messages table -- False means "not this table, try the other one."
-    async def apply_outbound_delivery_status(self, wamid: str, status: str) -> bool: ...
+    # guard in app.core.delivery_status. Returns one of three strings:
+    #   "not_found"  -- no row has this template_wamid (try the messages table instead);
+    #   "applied"    -- this call genuinely changed delivery_status (a forward transition or a
+    #                   fresh 'failed');
+    #   "unchanged"  -- a row was found but the ordering guard rejected the write (a duplicate or
+    #                   regressive report, or an already-terminal 'failed' getting another
+    #                   'failed').
+    # The applied/unchanged distinction lets retry wiring fire only on a genuinely new 'failed',
+    # never on a Meta-redelivered duplicate webhook (which would double-fire a retry).
+    async def apply_outbound_delivery_status(self, wamid: str, status: str) -> str: ...
 
     async def mark_outbound_suppressed(self, id: int) -> None: ...
 
@@ -305,10 +311,16 @@ class ConversationStore(Protocol):
     async def set_message_wamid(self, message_id: int, wamid: str) -> None: ...
 
     # Applies a Meta delivery/read status update, found by wamid, through the ordering guard in
-    # app.core.delivery_status. Returns True if a matching row was found (whether or not the
-    # ordering guard actually changed anything) so the webhook handler can decide whether to also
-    # try the outbound_messages table -- False means "not this table, try the other one."
-    async def apply_message_delivery_status(self, wamid: str, status: str) -> bool: ...
+    # app.core.delivery_status. Returns one of three strings:
+    #   "not_found"  -- no row has this wamid (try the outbound_messages table instead);
+    #   "applied"    -- this call genuinely changed delivery_status (a forward transition or a
+    #                   fresh 'failed');
+    #   "unchanged"  -- a row was found but the ordering guard rejected the write (a duplicate or
+    #                   regressive report, or an already-terminal 'failed' getting another
+    #                   'failed').
+    # The applied/unchanged distinction lets retry wiring fire only on a genuinely new 'failed',
+    # never on a Meta-redelivered duplicate webhook (which would double-fire a retry).
+    async def apply_message_delivery_status(self, wamid: str, status: str) -> str: ...
 
     async def pause_until(self, conversation_id: int, until: datetime) -> None: ...
 

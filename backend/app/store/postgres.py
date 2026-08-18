@@ -1060,7 +1060,7 @@ class PostgresIngestStore:
                 wamid,
             )
 
-    async def apply_outbound_delivery_status(self, wamid: str, status: str) -> bool:
+    async def apply_outbound_delivery_status(self, wamid: str, status: str) -> str:
         # Existence check + single atomic guarded UPDATE, NOT SELECT-then-conditional-UPDATE:
         # Meta commonly delivers 'delivered' and 'read' milliseconds apart as two separate
         # webhook deliveries, which on serverless can be two CONCURRENT invocations. A read-then-
@@ -1069,17 +1069,19 @@ class PostgresIngestStore:
         # Encoding the guard in the UPDATE's WHERE clause makes each UPDATE atomic per row
         # (Postgres row-level locking serializes concurrent same-row UPDATEs, each re-evaluating
         # the WHERE against the just-committed value). The existence check is race-free: a row's
-        # template_wamid, once set, never changes. Return value depends ONLY on existence (found
-        # -> True even when the guard rejects the write and 0 rows change); the UPDATE's row count
-        # is irrelevant to the contract. The WHERE clause below is a faithful mirror of
-        # should_apply_delivery_status() in app/core/delivery_status.py -- keep the two in sync.
+        # template_wamid, once set, never changes.
+        # Returns (see base.py): "not_found" if no row has this wamid; "applied" if the guarded
+        # UPDATE changed a row (RETURNING id yields a row -- a genuine forward move or a fresh
+        # 'failed'); "unchanged" if a row exists but the guard rejected the write (0 rows changed).
+        # The WHERE clause below is a faithful mirror of should_apply_delivery_status() in
+        # app/core/delivery_status.py -- keep the two in sync.
         async with self._pool.acquire() as conn:
             exists = await conn.fetchval(
                 "SELECT 1 FROM outbound_messages WHERE template_wamid = $1", wamid
             )
             if exists is None:
-                return False
-            await conn.execute(
+                return "not_found"
+            applied_id = await conn.fetchval(
                 "UPDATE outbound_messages SET delivery_status = $2, updated_at = now()"
                 " WHERE template_wamid = $1"
                 "   AND delivery_status IS DISTINCT FROM 'failed'"
@@ -1095,10 +1097,11 @@ class PostgresIngestStore:
                 "               WHEN 'read' THEN 2 ELSE -1 END)"
                 "       )"
                 "     )"
-                "   )",
+                "   )"
+                " RETURNING id",
                 wamid, status,
             )
-        return True
+        return "applied" if applied_id is not None else "unchanged"
 
     async def mark_outbound_suppressed(self, id: int) -> None:
         async with self._pool.acquire() as conn:
@@ -1338,21 +1341,22 @@ class PostgresConversationStore:
                 "UPDATE messages SET wamid = $2 WHERE id = $1", message_id, wamid
             )
 
-    async def apply_message_delivery_status(self, wamid: str, status: str) -> bool:
+    async def apply_message_delivery_status(self, wamid: str, status: str) -> str:
         # Existence check + single atomic guarded UPDATE (see the sibling
         # apply_outbound_delivery_status for the full rationale): a SELECT-then-conditional-UPDATE
         # races when Meta delivers 'delivered' and 'read' as two concurrent webhook invocations,
         # regressing the stored status. A row's wamid, once set, never changes, so the existence
-        # check is race-free and alone decides the return value (found -> True even if the guard
-        # rejects the write). The WHERE clause is a faithful mirror of
+        # check is race-free. Returns (see base.py): "not_found" if no row has this wamid;
+        # "applied" if the guarded UPDATE changed a row (RETURNING id yields a row); "unchanged" if
+        # a row exists but the guard rejected the write. The WHERE clause is a faithful mirror of
         # should_apply_delivery_status() in app/core/delivery_status.py -- keep the two in sync.
         async with self._pool.acquire() as conn:
             exists = await conn.fetchval(
                 "SELECT 1 FROM messages WHERE wamid = $1", wamid
             )
             if exists is None:
-                return False
-            await conn.execute(
+                return "not_found"
+            applied_id = await conn.fetchval(
                 "UPDATE messages SET delivery_status = $2"
                 " WHERE wamid = $1"
                 "   AND delivery_status IS DISTINCT FROM 'failed'"
@@ -1368,10 +1372,11 @@ class PostgresConversationStore:
                 "               WHEN 'read' THEN 2 ELSE -1 END)"
                 "       )"
                 "     )"
-                "   )",
+                "   )"
+                " RETURNING id",
                 wamid, status,
             )
-        return True
+        return "applied" if applied_id is not None else "unchanged"
 
     async def pause_until(self, conversation_id: int, until: datetime) -> None:
         async with self._pool.acquire() as conn:

@@ -126,15 +126,15 @@ async def test_apply_outbound_delivery_status_updates_by_wamid() -> None:
 
     applied = await store.apply_outbound_delivery_status("wamid.OUT123", "delivered")
 
-    assert applied is True
+    assert applied == "applied"
     entries = await store.find_outbound_by_phone("+919664290413")
     assert entries[-1].delivery_status == "delivered"
 
 
-async def test_apply_outbound_delivery_status_unknown_wamid_returns_false() -> None:
+async def test_apply_outbound_delivery_status_unknown_wamid_returns_not_found() -> None:
     store = InMemoryIngestStore()
     applied = await store.apply_outbound_delivery_status("wamid.NEVER_SEEN", "delivered")
-    assert applied is False
+    assert applied == "not_found"
 
 
 async def test_apply_outbound_delivery_status_respects_ordering_guard() -> None:
@@ -144,11 +144,24 @@ async def test_apply_outbound_delivery_status_respects_ordering_guard() -> None:
 
     regressed = await store.apply_outbound_delivery_status("wamid.OUT456", "delivered")
 
-    # found != applied: the wamid IS in this table (True, Task 5's routing signal) but the
-    # ordering guard blocks the read->delivered regression, so the stored value stays "read".
-    assert regressed is True
+    # found but not applied: the wamid IS in this table but the ordering guard blocks the
+    # read->delivered regression, so it returns "unchanged" and the stored value stays "read".
+    assert regressed == "unchanged"
     entries = await store.find_outbound_by_phone("+919664290413")
     assert entries[-1].delivery_status == "read"
+
+
+async def test_apply_outbound_delivery_status_returns_unchanged_on_duplicate_failed() -> None:
+    # Meta redelivers webhooks for reliability: a second 'failed' report for the same wamid must
+    # report "unchanged" (already-terminal failed), so Task 5 never fires a second retry.
+    store = InMemoryIngestStore()
+    await _send_outbound(store, "gid://shopify/Order/1", "+919664290413", "wamid.OUT789")
+
+    first = await store.apply_outbound_delivery_status("wamid.OUT789", "failed")
+    second = await store.apply_outbound_delivery_status("wamid.OUT789", "failed")
+
+    assert first == "applied"
+    assert second == "unchanged"
 
 
 # --- IngestStore.find_order_actions_by_wa_ids (multi-key) ---
@@ -311,15 +324,15 @@ async def test_set_message_wamid_then_apply_delivery_status() -> None:
 
     applied = await store.apply_message_delivery_status("wamid.TEST123", "delivered")
 
-    assert applied is True
+    assert applied == "applied"
     messages = await store.find_messages_by_user_id("+919876500051")
     assert messages[-1].delivery_status == "delivered"
 
 
-async def test_apply_message_delivery_status_unknown_wamid_returns_false() -> None:
+async def test_apply_message_delivery_status_unknown_wamid_returns_not_found() -> None:
     store = InMemoryConversationStore()
     applied = await store.apply_message_delivery_status("wamid.NEVER_SEEN", "delivered")
-    assert applied is False
+    assert applied == "not_found"
 
 
 async def test_apply_message_delivery_status_respects_ordering_guard() -> None:
@@ -331,12 +344,26 @@ async def test_apply_message_delivery_status_respects_ordering_guard() -> None:
 
     regressed = await store.apply_message_delivery_status("wamid.TEST456", "delivered")
 
-    # The return value reports "was this wamid found in THIS table" (Task 5's routing signal),
-    # NOT "did an update get applied" -- so it stays True even though the ordering guard blocks
-    # the actual write (found != applied). The stored value proves the guard did its job.
-    assert regressed is True
+    # found but not applied: the wamid IS in this table but the ordering guard blocks the
+    # read->delivered regression, so it returns "unchanged" and the stored value stays "read".
+    assert regressed == "unchanged"
     messages = await store.find_messages_by_user_id("+919876500052")
     assert messages[-1].delivery_status == "read"
+
+
+async def test_apply_message_delivery_status_returns_unchanged_on_duplicate_failed() -> None:
+    # A redelivered 'failed' status for the same wamid must report "unchanged" (already-terminal),
+    # so retry wiring (Task 5) never double-fires on a Meta redelivery.
+    store = InMemoryConversationStore()
+    conv_id = await store.get_or_create("+919876500054")
+    msg_id = await store.append_message(conv_id, "assistant", "hi")
+    await store.set_message_wamid(msg_id, "wamid.TEST789")
+
+    first = await store.apply_message_delivery_status("wamid.TEST789", "failed")
+    second = await store.apply_message_delivery_status("wamid.TEST789", "failed")
+
+    assert first == "applied"
+    assert second == "unchanged"
 
 
 async def test_user_role_messages_unaffected_by_delivery_status_default() -> None:

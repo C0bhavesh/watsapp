@@ -1993,8 +1993,9 @@ async def test_webhook_status_event_updates_ai_reply_delivery_status(
     status_body = _status_envelope("wamid.REPLY1", "delivered")
     status_resp = await post(status_body, {"X-Hub-Signature-256": sign(status_body)})
     assert status_resp.status_code == 200
-    # The wamid was really attached to the assistant's persisted row: routing it succeeds.
-    assert await c.conversations.apply_message_delivery_status("wamid.REPLY1", "read") is True
+    # The wamid was really attached to the assistant's persisted row: routing it succeeds, and
+    # delivered->read is a genuine forward move, so the write is applied.
+    assert await c.conversations.apply_message_delivery_status("wamid.REPLY1", "read") == "applied"
 
 
 async def test_webhook_status_processing_exception_still_acks_200(

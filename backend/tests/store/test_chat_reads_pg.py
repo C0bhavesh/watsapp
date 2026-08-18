@@ -59,15 +59,15 @@ async def test_set_wamid_then_apply_delivery_status_pg(pool: LazyPool) -> None:
 
     applied = await store.apply_message_delivery_status(wamid, "delivered")
 
-    assert applied is True
+    assert applied == "applied"
     messages = await store.find_messages_by_user_id(user_id)
     assert messages[-1].delivery_status == "delivered"
 
 
-async def test_apply_delivery_status_unknown_wamid_returns_false_pg(pool: LazyPool) -> None:
+async def test_apply_delivery_status_unknown_wamid_returns_not_found_pg(pool: LazyPool) -> None:
     store = PostgresConversationStore(pool)
     applied = await store.apply_message_delivery_status(f"wamid.{uuid.uuid4()}", "delivered")
-    assert applied is False
+    assert applied == "not_found"
 
 
 async def test_apply_delivery_status_respects_ordering_guard_pg(pool: LazyPool) -> None:
@@ -79,12 +79,28 @@ async def test_apply_delivery_status_respects_ordering_guard_pg(pool: LazyPool) 
     await store.set_message_wamid(msg_id, wamid)
     await store.apply_message_delivery_status(wamid, "read")
 
-    # found != applied: the row IS in this table (returns True) but the guard blocks the regression.
+    # found but not applied: the row IS in this table but the guard blocks the read->delivered
+    # regression, so it returns "unchanged".
     regressed = await store.apply_message_delivery_status(wamid, "delivered")
 
-    assert regressed is True
+    assert regressed == "unchanged"
     messages = await store.find_messages_by_user_id(user_id)
     assert messages[-1].delivery_status == "read"
+
+
+async def test_apply_message_delivery_status_duplicate_failed_pg(pool: LazyPool) -> None:
+    store = PostgresConversationStore(pool)
+    user_id = f"+91{uuid.uuid4().int % 10**10:010d}"
+    conv_id = await store.get_or_create(user_id)
+    msg_id = await store.append_message(conv_id, "assistant", "hi")
+    wamid = f"wamid.{uuid.uuid4()}"
+    await store.set_message_wamid(msg_id, wamid)
+
+    first = await store.apply_message_delivery_status(wamid, "failed")
+    second = await store.apply_message_delivery_status(wamid, "failed")
+
+    assert first == "applied"
+    assert second == "unchanged"
 
 
 async def test_get_user_id_pg(pool: LazyPool) -> None:
@@ -202,17 +218,17 @@ async def test_apply_outbound_delivery_status_updates_by_wamid_pg(pool: LazyPool
 
     applied = await store.apply_outbound_delivery_status(wamid, "delivered")
 
-    assert applied is True
+    assert applied == "applied"
     entries = await store.find_outbound_by_phone(phone)
     assert entries[-1].delivery_status == "delivered"
 
 
-async def test_apply_outbound_delivery_status_unknown_wamid_returns_false_pg(
+async def test_apply_outbound_delivery_status_unknown_wamid_returns_not_found_pg(
     pool: LazyPool,
 ) -> None:
     store = PostgresIngestStore(pool)
     applied = await store.apply_outbound_delivery_status(f"wamid.{uuid.uuid4()}", "delivered")
-    assert applied is False
+    assert applied == "not_found"
 
 
 async def test_apply_outbound_delivery_status_respects_ordering_guard_pg(pool: LazyPool) -> None:
@@ -222,12 +238,26 @@ async def test_apply_outbound_delivery_status_respects_ordering_guard_pg(pool: L
     await _send_outbound_pg(store, phone, wamid)
     await store.apply_outbound_delivery_status(wamid, "read")
 
-    # found != applied: the row IS in this table (True) but the guard blocks the regression.
+    # found but not applied: the row IS in this table but the guard blocks the read->delivered
+    # regression, so it returns "unchanged".
     regressed = await store.apply_outbound_delivery_status(wamid, "delivered")
 
-    assert regressed is True
+    assert regressed == "unchanged"
     entries = await store.find_outbound_by_phone(phone)
     assert entries[-1].delivery_status == "read"
+
+
+async def test_apply_outbound_delivery_status_duplicate_failed_pg(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    phone = f"+91{uuid.uuid4().int % 10**10:010d}"
+    wamid = f"wamid.{uuid.uuid4()}"
+    await _send_outbound_pg(store, phone, wamid)
+
+    first = await store.apply_outbound_delivery_status(wamid, "failed")
+    second = await store.apply_outbound_delivery_status(wamid, "failed")
+
+    assert first == "applied"
+    assert second == "unchanged"
 
 
 async def test_find_outbound_by_phone_pg(pool: LazyPool) -> None:

@@ -101,6 +101,19 @@ class OutboundEntry:
 
 
 @dataclass(frozen=True)
+class OutboundRetryInfo:
+    """Retry state of a sent template row, looked up by its current template_wamid. Consumed by
+    the delivery-failure auto-retry resend logic: `id` re-targets the row for record_outbound_retry,
+    `phone_e164`/`payload_json` are the original send it re-uses verbatim, `retry_count` is how many
+    retry attempts have already been spent (the resend cap is checked against it)."""
+
+    id: int
+    phone_e164: str
+    payload_json: str
+    retry_count: int
+
+
+@dataclass(frozen=True)
 class OrderActionEntry:
     order_gid: str
     action: str
@@ -194,6 +207,17 @@ class IngestStore(Protocol):
     # The applied/unchanged distinction lets retry wiring fire only on a genuinely new 'failed',
     # never on a Meta-redelivered duplicate webhook (which would double-fire a retry).
     async def apply_outbound_delivery_status(self, wamid: str, status: str) -> str: ...
+
+    # Looks up a sent template row by its current template_wamid, returning its retry state
+    # (id/phone/payload/retry_count) or None if no row carries this wamid. Read-only.
+    async def get_outbound_retry_info(self, wamid: str) -> OutboundRetryInfo | None: ...
+
+    # Records that a retry attempt was used. `new_wamid` non-None means the resend succeeded and
+    # got a fresh wamid -- the row's wamid is updated to it and delivery_status reset to NULL (a
+    # fresh send awaiting its own confirmation). `new_wamid` None means the resend attempt itself
+    # could not be sent (or was suppressed by the kill switch) -- retry_count still increments,
+    # but wamid/delivery_status are left as-is.
+    async def record_outbound_retry(self, id: int, new_wamid: str | None) -> None: ...
 
     async def mark_outbound_suppressed(self, id: int) -> None: ...
 

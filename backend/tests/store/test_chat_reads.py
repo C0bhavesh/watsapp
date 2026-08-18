@@ -164,6 +164,64 @@ async def test_apply_outbound_delivery_status_returns_unchanged_on_duplicate_fai
     assert second == "unchanged"
 
 
+# --- IngestStore outbound retry-info + retry-record (Task 2) ---
+
+async def test_get_outbound_retry_info_returns_current_state() -> None:
+    store = InMemoryIngestStore()
+    await _send_outbound(store, "gid://shopify/Order/1", "+919664290413", "wamid.RETRY1")
+
+    info = await store.get_outbound_retry_info("wamid.RETRY1")
+
+    assert info is not None
+    assert info.retry_count == 0
+    assert info.phone_e164 == "+919664290413"
+    assert info.payload_json == '{"template": "cod_confirmation"}'
+
+
+async def test_get_outbound_retry_info_unknown_wamid_returns_none() -> None:
+    store = InMemoryIngestStore()
+    info = await store.get_outbound_retry_info("wamid.NEVER_SEEN")
+    assert info is None
+
+
+async def test_record_outbound_retry_with_new_wamid_resets_delivery_status() -> None:
+    store = InMemoryIngestStore()
+    await _send_outbound(store, "gid://shopify/Order/1", "+919664290413", "wamid.FAIL1")
+    await store.apply_outbound_delivery_status("wamid.FAIL1", "failed")
+    seeded = await store.get_outbound_retry_info("wamid.FAIL1")
+    assert seeded is not None
+    row_id = seeded.id
+
+    await store.record_outbound_retry(row_id, "wamid.RESENT1")
+
+    info = await store.get_outbound_retry_info("wamid.RESENT1")
+    assert info is not None
+    assert info.retry_count == 1
+    # The old wamid no longer routes to the row (it was reassigned to the resend's wamid).
+    assert await store.get_outbound_retry_info("wamid.FAIL1") is None
+    entries = await store.find_outbound_by_phone("+919664290413")
+    assert entries[-1].delivery_status is None  # reset, awaiting fresh confirmation
+
+
+async def test_record_outbound_retry_with_no_new_wamid_increments_count_only() -> None:
+    store = InMemoryIngestStore()
+    await _send_outbound(store, "gid://shopify/Order/1", "+919664290413", "wamid.FAIL2")
+    await store.apply_outbound_delivery_status("wamid.FAIL2", "failed")
+    seeded = await store.get_outbound_retry_info("wamid.FAIL2")
+    assert seeded is not None
+    row_id = seeded.id
+
+    # No new wamid (the resend itself could not be sent / was suppressed): count increments, but
+    # the wamid and delivery_status are left as-is -- verify via the ORIGINAL wamid.
+    await store.record_outbound_retry(row_id, None)
+
+    info = await store.get_outbound_retry_info("wamid.FAIL2")
+    assert info is not None
+    assert info.retry_count == 1
+    entries = await store.find_outbound_by_phone("+919664290413")
+    assert entries[-1].delivery_status == "failed"  # unchanged
+
+
 # --- IngestStore.find_order_actions_by_wa_ids (multi-key) ---
 
 async def test_find_order_actions_by_wa_ids_returns_matching_rows() -> None:

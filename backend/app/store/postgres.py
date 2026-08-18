@@ -24,6 +24,7 @@ from app.store.base import (
     OutboundClaim,
     OutboundDraft,
     OutboundEntry,
+    OutboundRetryInfo,
     OutboundView,
     StoredMessage,
 )
@@ -1102,6 +1103,45 @@ class PostgresIngestStore:
                 wamid, status,
             )
         return "applied" if applied_id is not None else "unchanged"
+
+    async def get_outbound_retry_info(self, wamid: str) -> OutboundRetryInfo | None:
+        # Looked up by the row's CURRENT template_wamid (uses idx_outbound_template_wamid), the same
+        # routing key apply_outbound_delivery_status uses. Read-only.
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, phone_e164, payload_json, retry_count FROM outbound_messages"
+                " WHERE template_wamid = $1",
+                wamid,
+            )
+        if row is None:
+            return None
+        return OutboundRetryInfo(
+            id=int(row["id"]),
+            phone_e164=str(row["phone_e164"]),
+            payload_json=str(row["payload_json"]),
+            retry_count=int(row["retry_count"]),
+        )
+
+    async def record_outbound_retry(self, id: int, new_wamid: str | None) -> None:
+        # Always increment retry_count. A non-None new_wamid means the resend succeeded and got a
+        # fresh wamid -> reassign template_wamid to it and reset delivery_status to NULL (the fresh
+        # send awaits its own delivery/read confirmation). A None new_wamid (resend could not be
+        # sent / kill-switch-suppressed) increments the count only, leaving wamid/status as-is.
+        async with self._pool.acquire() as conn:
+            if new_wamid is not None:
+                await conn.execute(
+                    "UPDATE outbound_messages SET retry_count = retry_count + 1,"
+                    " template_wamid = $2, delivery_status = NULL, updated_at = now()"
+                    " WHERE id = $1",
+                    id,
+                    new_wamid,
+                )
+            else:
+                await conn.execute(
+                    "UPDATE outbound_messages SET retry_count = retry_count + 1, updated_at = now()"
+                    " WHERE id = $1",
+                    id,
+                )
 
     async def mark_outbound_suppressed(self, id: int) -> None:
         async with self._pool.acquire() as conn:

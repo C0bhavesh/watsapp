@@ -13,6 +13,7 @@ from app.store.base import (
     OutboundClaim,
     OutboundDraft,
     OutboundEntry,
+    OutboundRetryInfo,
     OutboundView,
     StoredMessage,
 )
@@ -96,6 +97,10 @@ class _OutboundRow:
     # re-stamped on a state transition, unlike updated_at). distinct_outbound_phones orders on it
     # so the recency ranking matches the Postgres MAX(created_at) DESC.
     created_at: datetime
+    # Count of delivery-failure retry attempts spent on this send (the in-memory analogue of
+    # outbound_messages.retry_count). record_outbound_retry increments it; the resend cap is
+    # checked against it. Defaulted so the existing _enqueue construction site stays unchanged.
+    retry_count: int = 0
 
 
 class InMemoryConfigRepo:
@@ -600,6 +605,32 @@ class InMemoryIngestStore:
                     return "applied"
                 return "unchanged"
         return "not_found"
+
+    async def get_outbound_retry_info(self, wamid: str) -> OutboundRetryInfo | None:
+        # Same lookup-by-template_wamid scan as apply_outbound_delivery_status. The draft carries
+        # phone/payload; the mutable row carries id + retry_count.
+        for key, meta in self._outbound_meta.items():
+            if meta.template_wamid == wamid:
+                draft = self.outbound[key]
+                return OutboundRetryInfo(
+                    id=meta.id,
+                    phone_e164=draft.phone_e164,
+                    payload_json=draft.payload_json,
+                    retry_count=meta.retry_count,
+                )
+        return None
+
+    async def record_outbound_retry(self, id: int, new_wamid: str | None) -> None:
+        # Mirror the Postgres UPDATE: always increment retry_count; a non-None new_wamid means the
+        # resend succeeded -> reassign the wamid and reset delivery_status to None (a fresh send
+        # awaiting its own confirmation). A None new_wamid leaves wamid/delivery_status as-is.
+        meta = self._meta_by_id(id)
+        if meta is None:
+            return
+        meta.retry_count += 1
+        if new_wamid is not None:
+            meta.template_wamid = new_wamid
+            meta.delivery_status = None
 
     async def mark_outbound_suppressed(self, id: int) -> None:
         meta = self._meta_by_id(id)

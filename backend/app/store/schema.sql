@@ -47,6 +47,12 @@ CREATE INDEX IF NOT EXISTS idx_outbound_state ON outbound_messages (state, creat
 -- Partial index mirroring idx_messages_wamid: the delivery-status webhook lookup is
 -- WHERE template_wamid = $1, and only sent template rows carry one (queued/unsent rows are NULL).
 CREATE INDEX IF NOT EXISTS idx_outbound_template_wamid ON outbound_messages (template_wamid) WHERE template_wamid IS NOT NULL;
+-- Count of delivery-failure retry attempts spent on a sent template row (delivery-failure
+-- auto-retry). record_outbound_retry increments it; the resend cap is checked against it.
+-- Additive + idempotent (mirrors the messages delivery_status/wamid ALTERs below), so it can be
+-- applied to a live table without a rewrite. NOTE: this is an OWNER-RUN manual migration -- nothing
+-- in the app executes schema.sql automatically; documented here as the source-of-truth DDL.
+ALTER TABLE outbound_messages ADD COLUMN IF NOT EXISTS retry_count int NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS processed_webhooks (
     webhook_id  text NOT NULL,

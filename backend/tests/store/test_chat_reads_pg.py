@@ -260,6 +260,70 @@ async def test_apply_outbound_delivery_status_duplicate_failed_pg(pool: LazyPool
     assert second == "unchanged"
 
 
+# --- IngestStore outbound retry-info + retry-record (Task 2) ---
+
+async def test_get_outbound_retry_info_returns_current_state_pg(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    phone = f"+91{uuid.uuid4().int % 10**10:010d}"
+    wamid = f"wamid.{uuid.uuid4()}"
+    await _send_outbound_pg(store, phone, wamid)
+
+    info = await store.get_outbound_retry_info(wamid)
+
+    assert info is not None
+    assert info.retry_count == 0
+    assert info.phone_e164 == phone
+    assert info.payload_json == '{"template": "cod_confirmation"}'
+
+
+async def test_get_outbound_retry_info_unknown_wamid_returns_none_pg(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    info = await store.get_outbound_retry_info(f"wamid.{uuid.uuid4()}")
+    assert info is None
+
+
+async def test_record_outbound_retry_with_new_wamid_resets_delivery_status_pg(
+    pool: LazyPool,
+) -> None:
+    store = PostgresIngestStore(pool)
+    phone = f"+91{uuid.uuid4().int % 10**10:010d}"
+    wamid = f"wamid.{uuid.uuid4()}"
+    await _send_outbound_pg(store, phone, wamid)
+    await store.apply_outbound_delivery_status(wamid, "failed")
+    seeded = await store.get_outbound_retry_info(wamid)
+    assert seeded is not None
+
+    new_wamid = f"wamid.{uuid.uuid4()}"
+    await store.record_outbound_retry(seeded.id, new_wamid)
+
+    info = await store.get_outbound_retry_info(new_wamid)
+    assert info is not None
+    assert info.retry_count == 1
+    assert await store.get_outbound_retry_info(wamid) is None
+    entries = await store.find_outbound_by_phone(phone)
+    assert entries[-1].delivery_status is None
+
+
+async def test_record_outbound_retry_with_no_new_wamid_increments_count_only_pg(
+    pool: LazyPool,
+) -> None:
+    store = PostgresIngestStore(pool)
+    phone = f"+91{uuid.uuid4().int % 10**10:010d}"
+    wamid = f"wamid.{uuid.uuid4()}"
+    await _send_outbound_pg(store, phone, wamid)
+    await store.apply_outbound_delivery_status(wamid, "failed")
+    seeded = await store.get_outbound_retry_info(wamid)
+    assert seeded is not None
+
+    await store.record_outbound_retry(seeded.id, None)
+
+    info = await store.get_outbound_retry_info(wamid)
+    assert info is not None
+    assert info.retry_count == 1
+    entries = await store.find_outbound_by_phone(phone)
+    assert entries[-1].delivery_status == "failed"
+
+
 async def test_find_outbound_by_phone_pg(pool: LazyPool) -> None:
     store = PostgresIngestStore(pool)
     gid = f"gid://shopify/Order/{uuid.uuid4()}"

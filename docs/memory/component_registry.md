@@ -13,6 +13,32 @@
 ---
 <!-- entries below -->
 
+## Template catalog + default-value resolver (admin manual-resend, Task 1 of 3, 2026-08-19)
+- **File:** app/admin/template_catalog.py
+- **Purpose:** registry of the store's 4 Meta-approved WhatsApp templates + a helper that derives
+  every template field's default value from ONE `Order`, for a later admin "resend template"
+  dialog (Task 2/3, not yet built).
+- **Public API:** `TemplateField(key, label, default_from)`, `TemplateDef(label, language,
+  param_style, fields, has_confirm_cancel_buttons=False, supports_image_header=False)`,
+  `TEMPLATE_CATALOG: dict[str, TemplateDef]` (keys: `cod_confirmation`, `prepaid_order`,
+  `order_shipped`, `order_delivered`), `resolve_template_defaults(order: Order) -> dict[str, str]`
+  (always returns every key, `""` when unavailable — no presence check needed by callers).
+- **Used in:** not yet wired to any route (Task 1 of a 3-task feature; consumed by Task 2's admin
+  endpoints next).
+- **Notes:** adding a future Meta-approved template is a one-entry addition to `TEMPLATE_CATALOG`,
+  no frontend/send_template change needed (both are generic over the registry per the design doc).
+  Depends on `split_variant_options` (now public, see below) and `Order`/`LineItem`/`Fulfillment`/
+  `Customer` from `app/shopify/models.py`, unchanged.
+
+## split_variant_options (public, was `_split_variant_options`, 2026-08-19)
+- **File:** app/channels/shopify_orders.py
+- **Purpose:** split a Shopify variant title (`"Black / XL"`) into `(colour, size)`.
+- **Public API:** `split_variant_options(variant_title: str | None) -> tuple[str | None, str | None]`.
+- **Used in:** `parse_order_created` (same file); `app/admin/template_catalog.py::resolve_template_defaults`.
+- **Notes:** renamed from private `_split_variant_options` so `template_catalog.py` could import it
+  directly (DRY) rather than duplicating the split logic — same rationale as the earlier
+  `_TemplatePayload` → `TemplatePayload` rename in the auto-retry feature. Body/docstring unchanged.
+
 ## Settings
 - **File:** backend/app/config/settings.py
 - **Purpose:** pydantic-settings config; fail-fast on missing `APP_MASTER_KEY`.

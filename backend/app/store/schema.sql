@@ -44,6 +44,9 @@ CREATE TABLE IF NOT EXISTS outbound_messages (
     updated_at      timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_outbound_state ON outbound_messages (state, created_at);
+-- Partial index mirroring idx_messages_wamid: the delivery-status webhook lookup is
+-- WHERE template_wamid = $1, and only sent template rows carry one (queued/unsent rows are NULL).
+CREATE INDEX IF NOT EXISTS idx_outbound_template_wamid ON outbound_messages (template_wamid) WHERE template_wamid IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS processed_webhooks (
     webhook_id  text NOT NULL,

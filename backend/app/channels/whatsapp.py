@@ -99,13 +99,26 @@ async def receive_webhook(request: Request) -> Response:
     # data loss, since Meta will not retry an acked delivery.
     events = extract_events(payload, expected_phone_number_id=cfg.phone_number_id)
 
+    # ONE budget for the whole delivery, computed BEFORE the status loop below so that loop is
+    # bounded too: extract_statuses can return an unbounded list from a large delivery, and the
+    # status loop runs before the no-events early return, so without a ceiling here it could run
+    # unbounded ahead of (and outside) the events loop's own budget check.
+    deadline = time.monotonic() + TURN_TIMEOUT_SECONDS
+
     # Delivery/read status callbacks arrive in their OWN deliveries (no messages), so this must
     # run BEFORE the no-events early return below, or a status-only webhook would never be
     # processed. Same tenant guard as extract_events; each apply is wrapped so a status-
     # processing failure never fails the signed webhook's 200 ack (same discipline applied to
-    # dispatch_button below).
+    # dispatch_button below). Budget-checked per iteration (matching the events loop) so an
+    # oversized delivery logs+stops rather than running unbounded.
     statuses = extract_statuses(payload, expected_phone_number_id=cfg.phone_number_id)
-    for status in statuses:
+    for index, status in enumerate(statuses):
+        if deadline - time.monotonic() <= 0:
+            logger.warning(
+                "request budget spent; skipping %s remaining delivery status(es)",
+                len(statuses) - index,
+            )
+            break
         try:
             await apply_delivery_status(c, status)
         except Exception:
@@ -122,11 +135,11 @@ async def receive_webhook(request: Request) -> Response:
     results: list[dict[str, Any]] = []
     processed = 0
     duplicate = 0
-    # ONE budget for the whole delivery, not one per turn: Meta batches several messages into
-    # a single webhook, so a per-turn ceiling let an N-message batch run for N x the ceiling
-    # with nothing capping the request itself. Every event is still recorded and acked below,
-    # so a loop that stops early leaves nothing unacknowledged to Meta.
-    deadline = time.monotonic() + TURN_TIMEOUT_SECONDS
+    # The shared per-delivery budget (`deadline`) is computed above, before the status loop, and
+    # is not one per turn: Meta batches several messages into a single webhook, so a per-turn
+    # ceiling let an N-message batch run for N x the ceiling with nothing capping the request
+    # itself. Every event is still recorded and acked below, so a loop that stops early leaves
+    # nothing unacknowledged to Meta.
     for event in events:
         is_new = await c.messages.record_if_new(event.message_id)
         if is_new:

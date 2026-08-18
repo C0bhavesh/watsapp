@@ -5,7 +5,6 @@ from datetime import datetime
 
 import asyncpg
 
-from app.core.delivery_status import should_apply_delivery_status
 from app.core.phone import normalize_phone
 from app.shopify.models import (
     Customer,
@@ -1062,21 +1061,43 @@ class PostgresIngestStore:
             )
 
     async def apply_outbound_delivery_status(self, wamid: str, status: str) -> bool:
+        # Existence check + single atomic guarded UPDATE, NOT SELECT-then-conditional-UPDATE:
+        # Meta commonly delivers 'delivered' and 'read' milliseconds apart as two separate
+        # webhook deliveries, which on serverless can be two CONCURRENT invocations. A read-then-
+        # update pair has a race window where both read the same pre-update value, both pass the
+        # ordering guard, and the later commit wins -- regressing 'read' back to 'delivered'.
+        # Encoding the guard in the UPDATE's WHERE clause makes each UPDATE atomic per row
+        # (Postgres row-level locking serializes concurrent same-row UPDATEs, each re-evaluating
+        # the WHERE against the just-committed value). The existence check is race-free: a row's
+        # template_wamid, once set, never changes. Return value depends ONLY on existence (found
+        # -> True even when the guard rejects the write and 0 rows change); the UPDATE's row count
+        # is irrelevant to the contract. The WHERE clause below is a faithful mirror of
+        # should_apply_delivery_status() in app/core/delivery_status.py -- keep the two in sync.
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT id, delivery_status FROM outbound_messages WHERE template_wamid = $1",
-                wamid,
+            exists = await conn.fetchval(
+                "SELECT 1 FROM outbound_messages WHERE template_wamid = $1", wamid
             )
-            if row is None:
+            if exists is None:
                 return False
-            if should_apply_delivery_status(
-                None if row["delivery_status"] is None else str(row["delivery_status"]), status
-            ):
-                await conn.execute(
-                    "UPDATE outbound_messages SET delivery_status = $2, updated_at = now()"
-                    " WHERE id = $1",
-                    row["id"], status,
-                )
+            await conn.execute(
+                "UPDATE outbound_messages SET delivery_status = $2, updated_at = now()"
+                " WHERE template_wamid = $1"
+                "   AND delivery_status IS DISTINCT FROM 'failed'"
+                "   AND ("
+                "     $2 = 'failed'"
+                "     OR ("
+                "       $2 IN ('sent', 'delivered', 'read')"
+                "       AND ("
+                "         delivery_status IS NULL"
+                "         OR (CASE delivery_status WHEN 'sent' THEN 0 WHEN 'delivered' THEN 1"
+                "             WHEN 'read' THEN 2 ELSE -1 END)"
+                "            < (CASE $2 WHEN 'sent' THEN 0 WHEN 'delivered' THEN 1"
+                "               WHEN 'read' THEN 2 ELSE -1 END)"
+                "       )"
+                "     )"
+                "   )",
+                wamid, status,
+            )
         return True
 
     async def mark_outbound_suppressed(self, id: int) -> None:
@@ -1318,18 +1339,38 @@ class PostgresConversationStore:
             )
 
     async def apply_message_delivery_status(self, wamid: str, status: str) -> bool:
+        # Existence check + single atomic guarded UPDATE (see the sibling
+        # apply_outbound_delivery_status for the full rationale): a SELECT-then-conditional-UPDATE
+        # races when Meta delivers 'delivered' and 'read' as two concurrent webhook invocations,
+        # regressing the stored status. A row's wamid, once set, never changes, so the existence
+        # check is race-free and alone decides the return value (found -> True even if the guard
+        # rejects the write). The WHERE clause is a faithful mirror of
+        # should_apply_delivery_status() in app/core/delivery_status.py -- keep the two in sync.
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT id, delivery_status FROM messages WHERE wamid = $1", wamid
+            exists = await conn.fetchval(
+                "SELECT 1 FROM messages WHERE wamid = $1", wamid
             )
-            if row is None:
+            if exists is None:
                 return False
-            if should_apply_delivery_status(
-                None if row["delivery_status"] is None else str(row["delivery_status"]), status
-            ):
-                await conn.execute(
-                    "UPDATE messages SET delivery_status = $2 WHERE id = $1", row["id"], status
-                )
+            await conn.execute(
+                "UPDATE messages SET delivery_status = $2"
+                " WHERE wamid = $1"
+                "   AND delivery_status IS DISTINCT FROM 'failed'"
+                "   AND ("
+                "     $2 = 'failed'"
+                "     OR ("
+                "       $2 IN ('sent', 'delivered', 'read')"
+                "       AND ("
+                "         delivery_status IS NULL"
+                "         OR (CASE delivery_status WHEN 'sent' THEN 0 WHEN 'delivered' THEN 1"
+                "             WHEN 'read' THEN 2 ELSE -1 END)"
+                "            < (CASE $2 WHEN 'sent' THEN 0 WHEN 'delivered' THEN 1"
+                "               WHEN 'read' THEN 2 ELSE -1 END)"
+                "       )"
+                "     )"
+                "   )",
+                wamid, status,
+            )
         return True
 
     async def pause_until(self, conversation_id: int, until: datetime) -> None:

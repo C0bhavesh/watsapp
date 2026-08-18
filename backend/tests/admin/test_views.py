@@ -319,9 +319,16 @@ def test_conversation_thread_non_template_entries_have_no_status_key(
     thread_id = _thread_id_for(client, normalized)
     resp = client.get(f"/admin/conversations/{thread_id}")
 
-    for entry in resp.json()["entries"]:
+    entries = resp.json()["entries"]
+    for entry in entries:
         if entry["type"] != "template_sent":
             assert "status" not in entry
+
+    # A customer's own inbound text is never an outbound send, so it must never carry a
+    # delivery_status field -- only ai_reply/template_sent entries can. (Guards the router's
+    # per-entry shaping from ever leaking a delivery_status key onto an inbound bubble.)
+    customer_entry = next(e for e in entries if e["type"] == "customer_message")
+    assert "delivery_status" not in customer_entry
 
 
 def test_conversation_thread_template_entry_includes_delivery_status(

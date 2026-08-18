@@ -221,8 +221,15 @@ async def _run_turn(c: Container, event: InboundText) -> None:
         )
     elif result.wamid:
         # Only after a genuine, successful send: attach WhatsApp's wamid to the assistant row so
-        # a later delivery/read status callback can be routed back to this message.
-        await c.conversations.set_message_wamid(assistant_message_id, result.wamid)
+        # a later delivery/read status callback can be routed back to this message. A transient
+        # failure here must NOT propagate: the customer's reply already went out, and an
+        # unhandled exception would abort the handoff owner-alert below (the customer would be
+        # told "connecting you to our team" while nobody is ever paged). Delivery-status tracking
+        # is best-effort telemetry -- swallow and warn, never block the alert.
+        try:
+            await c.conversations.set_message_wamid(assistant_message_id, result.wamid)
+        except Exception:
+            logger.exception("failed to record wamid for delivery-status tracking")
 
     if handoff:
         # Deliberately after the customer's reply and inside the same send_mode gating above:

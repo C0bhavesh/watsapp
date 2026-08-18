@@ -238,3 +238,21 @@ def test_chats_js_wires_manual_reply_send(client: TestClient) -> None:
     assert "/messages" in js
     assert "reply-send-btn" in js
     assert "reply-input" in js
+
+
+def test_chats_page_has_emoji_and_template_buttons(client: TestClient) -> None:
+    resp = client.get("/admin/ui/chats.html")
+    assert resp.status_code == 200
+    assert 'id="emoji-btn"' in resp.text
+    assert 'id="template-btn"' in resp.text
+    assert 'id="emoji-popup"' in resp.text
+    assert 'id="template-dialog"' in resp.text
+
+
+def test_chats_js_wires_emoji_insert_and_template_send(client: TestClient) -> None:
+    resp = client.get("/admin/ui/chats.js")
+    assert resp.status_code == 200
+    js = resp.text
+    assert "/templates" in js
+    assert "emoji-btn" in js
+    assert "template-btn" in js

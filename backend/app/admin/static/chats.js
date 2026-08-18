@@ -58,6 +58,145 @@ function formatBubbleTime(isoTimestamp) {
 
 const REPLY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+const EMOJI_LIST = [
+  "😀", "😂", "😊", "😍", "🙏", "👍", "👎", "🙌",
+  "🎉", "❤️", "🔥", "✅", "❌", "⏳", "📦", "🚚",
+  "😢", "😡", "🤔", "😅", "🙂", "😎", "💯", "🤝",
+  "📞", "📍", "💳", "🛍️", "⭐", "🙁", "👋", "🎁",
+];
+
+function buildEmojiPopup() {
+  const popup = el("emoji-popup");
+  popup.innerHTML = "";
+  for (const emoji of EMOJI_LIST) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = emoji;
+    btn.addEventListener("click", () => insertAtCursor(el("reply-input"), emoji));
+    popup.appendChild(btn);
+  }
+}
+
+function insertAtCursor(input, text) {
+  const start = input.selectionStart ?? input.value.length;
+  const end = input.selectionEnd ?? input.value.length;
+  input.value = input.value.slice(0, start) + text + input.value.slice(end);
+  const newPos = start + text.length;
+  input.focus();
+  input.setSelectionRange(newPos, newPos);
+}
+
+buildEmojiPopup();
+
+el("emoji-btn").addEventListener("click", () => {
+  const popup = el("emoji-popup");
+  popup.style.display = popup.style.display === "none" ? "grid" : "none";
+});
+
+document.addEventListener("click", (e) => {
+  const popup = el("emoji-popup");
+  if (popup.style.display === "none") return;
+  if (e.target === el("emoji-btn") || popup.contains(e.target)) return;
+  popup.style.display = "none";
+});
+
+function closeTemplateDialog() {
+  el("template-dialog").style.display = "none";
+}
+
+function renderTemplateFieldForm(orderName, tmpl) {
+  const body = el("template-dialog-body");
+  body.innerHTML = "";
+  const back = document.createElement("button");
+  back.type = "button";
+  back.textContent = "← Back";
+  back.addEventListener("click", () => openTemplateDialog());
+  body.appendChild(back);
+
+  const heading = document.createElement("div");
+  heading.className = "template-order-heading";
+  heading.textContent = tmpl.label + " — " + orderName;
+  body.appendChild(heading);
+
+  const inputs = {};
+  for (const field of tmpl.fields) {
+    const row = document.createElement("div");
+    row.className = "template-field-row";
+    const label = document.createElement("label");
+    label.textContent = field.label;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = field.value || "";
+    inputs[field.key] = input;
+    row.appendChild(label);
+    row.appendChild(input);
+    body.appendChild(row);
+  }
+
+  const sendBtn = document.createElement("button");
+  sendBtn.id = "template-send-btn";
+  sendBtn.type = "button";
+  sendBtn.textContent = "Send";
+  sendBtn.addEventListener("click", async () => {
+    if (currentThreadId === null) return;
+    sendBtn.disabled = true;
+    const values = {};
+    for (const key in inputs) values[key] = inputs[key].value;
+    try {
+      await api(
+        "/admin/conversations/" + encodeURIComponent(currentThreadId) + "/templates",
+        "POST",
+        { order_name: orderName, template: tmpl.key, values }
+      );
+      closeTemplateDialog();
+      await loadThread(currentThreadId, currentPhone);
+    } catch (e) {
+      el("reply-status").textContent = e.message;
+    } finally {
+      sendBtn.disabled = false;
+    }
+  });
+  body.appendChild(sendBtn);
+}
+
+function renderTemplatePickList(data) {
+  const body = el("template-dialog-body");
+  body.innerHTML = "";
+  for (const orderEntry of data.orders) {
+    const heading = document.createElement("div");
+    heading.className = "template-pick-heading";
+    heading.textContent = orderEntry.order_name;
+    body.appendChild(heading);
+    for (const tmpl of orderEntry.templates) {
+      const row = document.createElement("div");
+      row.className = "template-pick-row";
+      row.textContent = tmpl.label;
+      row.addEventListener("click", () => renderTemplateFieldForm(orderEntry.order_name, tmpl));
+      body.appendChild(row);
+    }
+  }
+  if (!data.orders.length) {
+    body.textContent = "No orders found for this customer.";
+  }
+}
+
+async function openTemplateDialog() {
+  if (currentThreadId === null) return;
+  el("template-dialog").style.display = "flex";
+  el("template-dialog-body").textContent = "Loading…";
+  try {
+    const data = await api(
+      "/admin/conversations/" + encodeURIComponent(currentThreadId) + "/templates"
+    );
+    renderTemplatePickList(data);
+  } catch (e) {
+    el("template-dialog-body").textContent = e.message;
+  }
+}
+
+el("template-btn").addEventListener("click", openTemplateDialog);
+el("template-dialog-close").addEventListener("click", closeTemplateDialog);
+
 function lastCustomerMessageAt(entries) {
   for (let i = entries.length - 1; i >= 0; i--) {
     if (entries[i].type === "customer_message") return new Date(entries[i].timestamp);

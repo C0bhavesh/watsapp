@@ -52,7 +52,7 @@
     #chat-empty { display: flex; align-items: center; justify-content: center; flex: 1;
       color: #667781; font-size: .9rem; }
     #reply-bar { display: flex; gap: .5rem; padding: .6rem 1.2rem; background: #f0f2f5;
-      border-top: 1px solid #e9edef; }
+      border-top: 1px solid #e9edef; position: relative; }
     #reply-input { flex: 1; padding: .5rem .7rem; border: 1px solid #d1d7db; border-radius: 8px;
       font-size: .85rem; outline: none; }
     #reply-input:disabled { background: #e9edef; color: #8696a0; }
@@ -60,6 +60,33 @@
       padding: .5rem 1.1rem; font-size: .82rem; cursor: pointer; }
     #reply-send-btn:disabled { background: #8696a0; cursor: not-allowed; }
     #reply-status { padding: 0 1.2rem .3rem; min-height: 1em; }
+    #emoji-btn, #template-btn { background: none; border: none; font-size: 1.3rem;
+      cursor: pointer; padding: .2rem .4rem; }
+    #emoji-popup { position: absolute; bottom: 4.2rem; left: 1.2rem; background: #fff;
+      border: 1px solid #d1d7db; border-radius: 8px; padding: .5rem; box-shadow: 0 2px 8px rgba(0,0,0,.15);
+      display: grid; grid-template-columns: repeat(8, 1fr); gap: .2rem; z-index: 10; }
+    #emoji-popup button { background: none; border: none; font-size: 1.15rem; cursor: pointer;
+      padding: .2rem; border-radius: 4px; }
+    #emoji-popup button:hover { background: #f0f2f5; }
+    #template-dialog { position: fixed; inset: 0; background: rgba(0,0,0,.35);
+      display: flex; align-items: center; justify-content: center; z-index: 20; }
+    #template-dialog-inner { background: #fff; border-radius: 10px; width: 420px; max-height: 80vh;
+      overflow-y: auto; padding: 1rem; }
+    #template-dialog-header { display: flex; justify-content: space-between; align-items: center;
+      font-weight: 600; margin-bottom: .7rem; }
+    #template-dialog-close { background: none; border: none; font-size: 1.2rem; cursor: pointer; }
+    .template-order-heading, .template-pick-heading { font-size: .82rem; font-weight: 600;
+      color: #667781; margin: .6rem 0 .4rem; }
+    .template-pick-row { padding: .5rem .6rem; border: 1px solid #e9edef; border-radius: 6px;
+      margin-bottom: .4rem; cursor: pointer; font-size: .85rem; }
+    .template-pick-row:hover { background: #f5f6f6; }
+    .template-field-row { margin-bottom: .5rem; }
+    .template-field-row label { display: block; font-size: .75rem; color: #667781;
+      margin-bottom: .2rem; }
+    .template-field-row input { width: 100%; padding: .4rem .5rem; border: 1px solid #d1d7db;
+      border-radius: 6px; font-size: .82rem; }
+    #template-send-btn { background: #00a884; color: #fff; border: none; border-radius: 6px;
+      padding: .5rem 1rem; font-size: .82rem; cursor: pointer; margin-top: .5rem; }
 
     #order-panel { width: 300px; flex-shrink: 0; background: #fff; border-left: 1px solid #e9edef;
       padding: 1rem; overflow-y: auto; }
@@ -98,8 +125,20 @@
       <div id="chat-messages"><div id="chat-empty">Select a chat to view it</div></div>
       <div class="status" id="thread-status"></div>
       <div id="reply-bar">
+        <button id="emoji-btn" type="button" title="Emoji">😊</button>
+        <button id="template-btn" type="button" title="Send a template">📋</button>
         <input id="reply-input" type="text" placeholder="Type a message" />
         <button id="reply-send-btn">Send</button>
+      </div>
+      <div id="emoji-popup" style="display:none"></div>
+      <div id="template-dialog" style="display:none">
+        <div id="template-dialog-inner">
+          <div id="template-dialog-header">
+            <span>Send a Template</span>
+            <button id="template-dialog-close" type="button">×</button>
+          </div>
+          <div id="template-dialog-body"></div>
+        </div>
       </div>
       <div class="status" id="reply-status"></div>
     </div>

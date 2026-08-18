@@ -71,6 +71,9 @@ class _MessageRow:
     # messages.retry_count). record_message_retry increments it; the resend cap is checked against
     # it. Defaulted so the existing append_message construction site stays unchanged.
     retry_count: int = 0
+    # Display-only marker distinguishing a manually-typed admin reply from an AI-generated one.
+    # Defaulted to None (AI) so the existing append_message construction site stays unchanged.
+    sender: str | None = None
 
 
 def _message_view(row: _MessageRow) -> StoredMessage:
@@ -80,6 +83,7 @@ def _message_view(row: _MessageRow) -> StoredMessage:
         content=row.content,
         created_at=row.created_at,
         delivery_status=row.delivery_status,
+        sender=row.sender,
     )
 
 
@@ -781,7 +785,9 @@ class InMemoryConversationStore:
     async def recent_messages(self, conversation_id: int, limit: int) -> list[StoredMessage]:
         return [_message_view(r) for r in self._messages.get(conversation_id, [])[-limit:]]
 
-    async def append_message(self, conversation_id: int, role: str, content: str) -> int:
+    async def append_message(
+        self, conversation_id: int, role: str, content: str, sender: str | None = None
+    ) -> int:
         # Stamp created_at (Postgres stamps a real timestamp via the column default) so the two
         # implementations stay behaviorally equivalent for the chat-thread timeline ordering.
         row = _MessageRow(
@@ -791,6 +797,7 @@ class InMemoryConversationStore:
             created_at=datetime.now(UTC).isoformat(),
             wamid=None,
             delivery_status=None,
+            sender=sender,
         )
         self._message_next_id += 1
         self._messages.setdefault(conversation_id, []).append(row)

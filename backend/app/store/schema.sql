@@ -137,6 +137,15 @@ CREATE INDEX IF NOT EXISTS idx_messages_wamid ON messages (wamid) WHERE wamid IS
 -- OWNER-RUN manual migration -- nothing in the app executes schema.sql automatically; documented
 -- here as the source-of-truth DDL.
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS retry_count int NOT NULL DEFAULT 0;
+-- Display-only marker distinguishing a manually-typed admin reply from an AI-generated one
+-- (admin manual-reply feature). NULL means "AI" (every existing row, and every future
+-- AI-generated row); 'admin' marks a row sent via the admin panel's message box. Deliberately
+-- NOT part of `role` (which stays 'assistant' for both) -- `role` is load-bearing for
+-- core/memory.py's AI context window and delivery_retry.py's role='assistant' filter, and this
+-- column must never affect either. Additive + idempotent, so no live migration is required.
+-- NOTE: an OWNER-RUN manual migration -- nothing in the app executes schema.sql automatically;
+-- documented here as the source-of-truth DDL.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender text;
 
 CREATE TABLE IF NOT EXISTS knowledge_overrides (
     kind        text PRIMARY KEY,

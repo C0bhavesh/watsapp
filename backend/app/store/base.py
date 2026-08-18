@@ -313,6 +313,7 @@ class StoredMessage:
     content: str
     created_at: str | None
     delivery_status: str | None = None
+    sender: str | None = None
 
 
 class ConversationStore(Protocol):
@@ -341,7 +342,9 @@ class ConversationStore(Protocol):
 
     async def recent_messages(self, conversation_id: int, limit: int) -> list[StoredMessage]: ...
 
-    async def append_message(self, conversation_id: int, role: str, content: str) -> int: ...
+    async def append_message(
+        self, conversation_id: int, role: str, content: str, sender: str | None = None
+    ) -> int: ...
 
     # Attaches WhatsApp's message id to an already-persisted message row, once the actual send
     # (which happens AFTER persist_turn writes the row) succeeds and returns a wamid. No-op if the

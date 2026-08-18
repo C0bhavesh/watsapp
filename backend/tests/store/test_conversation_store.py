@@ -59,6 +59,62 @@ async def test_handoff_attempted_roundtrip() -> None:
     assert await store.get_handoff_attempted_at(conversation_id) == at
 
 
+async def test_append_message_defaults_sender_to_none() -> None:
+    store = InMemoryConversationStore()
+    conversation_id = await store.get_or_create("+919876500099")
+    await store.append_message(conversation_id, "assistant", "hi")
+    messages = await store.recent_messages(conversation_id, limit=10)
+    assert messages[0].sender is None
+
+
+async def test_append_message_records_admin_sender() -> None:
+    store = InMemoryConversationStore()
+    conversation_id = await store.get_or_create("+919876500098")
+    await store.append_message(conversation_id, "assistant", "manual reply", sender="admin")
+    messages = await store.recent_messages(conversation_id, limit=10)
+    assert messages[0].sender == "admin"
+
+
+async def test_find_messages_by_user_id_includes_sender() -> None:
+    store = InMemoryConversationStore()
+    conversation_id = await store.get_or_create("+919876500097")
+    await store.append_message(conversation_id, "assistant", "manual reply", sender="admin")
+    messages = await store.find_messages_by_user_id("+919876500097", limit=10)
+    assert messages[0].sender == "admin"
+
+
+async def test_manual_reply_row_is_visible_to_ai_memory() -> None:
+    """A manual reply (role='assistant', sender='admin') must load into AI context exactly like
+    an AI-generated row -- core/memory.py::load_history only branches on `role`, never `sender`.
+    """
+    from app.core.memory import load_history
+
+    store = InMemoryConversationStore()
+    user_id = "+919876500096"
+    conversation_id = await store.get_or_create(user_id)
+    await store.append_message(conversation_id, "user", "where is my order")
+    await store.append_message(
+        conversation_id, "assistant", "It shipped yesterday.", sender="admin"
+    )
+    _, history = await load_history(store, user_id)
+    assert any(m.role == "assistant" and m.content == "It shipped yesterday." for m in history)
+
+
+async def test_manual_reply_row_is_eligible_for_delivery_retry_lookup() -> None:
+    """A manual reply must pass delivery_retry.py's `role = 'assistant'` filter (added in
+    sub-project 1e's final review) so a failed manual send still auto-retries.
+    """
+    store = InMemoryConversationStore()
+    conversation_id = await store.get_or_create("+919876500095")
+    message_id = await store.append_message(
+        conversation_id, "assistant", "Delayed by a day, sorry!", sender="admin"
+    )
+    await store.set_message_wamid(message_id, "wamid.MANUALRETRY1")
+    info = await store.get_message_retry_info("wamid.MANUALRETRY1")
+    assert info is not None
+    assert info.content == "Delayed by a day, sorry!"
+
+
 @pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"), reason="needs TEST_DATABASE_URL")
 async def test_conversation_roundtrip_postgres() -> None:
     import uuid
@@ -111,4 +167,103 @@ async def test_get_or_create_upsert_prevents_duplicate_rows_postgres() -> None:
             "SELECT count(*) FROM conversations WHERE user_id = $1", user_id
         )
     assert count == 1
+    await pool.close()
+
+
+@pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"), reason="needs TEST_DATABASE_URL")
+async def test_append_message_defaults_sender_to_none_postgres() -> None:
+    import uuid
+
+    from app.store.pg_factory import LazyPool
+    from app.store.postgres import PostgresConversationStore
+
+    pool = LazyPool(os.environ["TEST_DATABASE_URL"])
+    store = PostgresConversationStore(pool)
+    user_id = f"test-wa-id-{uuid.uuid4()}"
+    conversation_id = await store.get_or_create(user_id)
+    await store.append_message(conversation_id, "assistant", "hi")
+    messages = await store.recent_messages(conversation_id, limit=10)
+    assert messages[0].sender is None
+    await pool.close()
+
+
+@pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"), reason="needs TEST_DATABASE_URL")
+async def test_append_message_records_admin_sender_postgres() -> None:
+    import uuid
+
+    from app.store.pg_factory import LazyPool
+    from app.store.postgres import PostgresConversationStore
+
+    pool = LazyPool(os.environ["TEST_DATABASE_URL"])
+    store = PostgresConversationStore(pool)
+    user_id = f"test-wa-id-{uuid.uuid4()}"
+    conversation_id = await store.get_or_create(user_id)
+    await store.append_message(conversation_id, "assistant", "manual reply", sender="admin")
+    messages = await store.recent_messages(conversation_id, limit=10)
+    assert messages[0].sender == "admin"
+    await pool.close()
+
+
+@pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"), reason="needs TEST_DATABASE_URL")
+async def test_find_messages_by_user_id_includes_sender_postgres() -> None:
+    import uuid
+
+    from app.store.pg_factory import LazyPool
+    from app.store.postgres import PostgresConversationStore
+
+    pool = LazyPool(os.environ["TEST_DATABASE_URL"])
+    store = PostgresConversationStore(pool)
+    user_id = f"test-wa-id-{uuid.uuid4()}"
+    conversation_id = await store.get_or_create(user_id)
+    await store.append_message(conversation_id, "assistant", "manual reply", sender="admin")
+    messages = await store.find_messages_by_user_id(user_id, limit=10)
+    assert messages[0].sender == "admin"
+    await pool.close()
+
+
+@pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"), reason="needs TEST_DATABASE_URL")
+async def test_manual_reply_row_is_visible_to_ai_memory_postgres() -> None:
+    """A manual reply (role='assistant', sender='admin') must load into AI context exactly like
+    an AI-generated row -- core/memory.py::load_history only branches on `role`, never `sender`.
+    """
+    import uuid
+
+    from app.core.memory import load_history
+    from app.store.pg_factory import LazyPool
+    from app.store.postgres import PostgresConversationStore
+
+    pool = LazyPool(os.environ["TEST_DATABASE_URL"])
+    store = PostgresConversationStore(pool)
+    user_id = f"test-wa-id-{uuid.uuid4()}"
+    conversation_id = await store.get_or_create(user_id)
+    await store.append_message(conversation_id, "user", "where is my order")
+    await store.append_message(
+        conversation_id, "assistant", "It shipped yesterday.", sender="admin"
+    )
+    _, history = await load_history(store, user_id)
+    assert any(m.role == "assistant" and m.content == "It shipped yesterday." for m in history)
+    await pool.close()
+
+
+@pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"), reason="needs TEST_DATABASE_URL")
+async def test_manual_reply_row_is_eligible_for_delivery_retry_lookup_postgres() -> None:
+    """A manual reply must pass delivery_retry.py's `role = 'assistant'` filter (added in
+    sub-project 1e's final review) so a failed manual send still auto-retries.
+    """
+    import uuid
+
+    from app.store.pg_factory import LazyPool
+    from app.store.postgres import PostgresConversationStore
+
+    pool = LazyPool(os.environ["TEST_DATABASE_URL"])
+    store = PostgresConversationStore(pool)
+    user_id = f"test-wa-id-{uuid.uuid4()}"
+    conversation_id = await store.get_or_create(user_id)
+    message_id = await store.append_message(
+        conversation_id, "assistant", "Delayed by a day, sorry!", sender="admin"
+    )
+    await store.set_message_wamid(message_id, "wamid.MANUALRETRY1")
+    info = await store.get_message_retry_info("wamid.MANUALRETRY1")
+    assert info is not None
+    assert info.content == "Delayed by a day, sorry!"
     await pool.close()

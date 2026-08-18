@@ -1311,7 +1311,7 @@ class PostgresConversationStore:
     async def recent_messages(self, conversation_id: int, limit: int) -> list[StoredMessage]:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT role, content, created_at, delivery_status FROM messages"
+                "SELECT role, content, created_at, delivery_status, sender FROM messages"
                 " WHERE conversation_id = $1 ORDER BY created_at DESC LIMIT $2",
                 conversation_id,
                 limit,
@@ -1323,6 +1323,7 @@ class PostgresConversationStore:
                 content=str(r["content"]),
                 created_at=r["created_at"].isoformat() if r["created_at"] else None,
                 delivery_status=r["delivery_status"],
+                sender=r["sender"],
             )
             for r in ordered
         ]
@@ -1334,7 +1335,8 @@ class PostgresConversationStore:
         # user_id yet) returns an empty list via the JOIN yielding zero rows, never creates one.
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT m.role, m.content, m.created_at, m.delivery_status FROM messages m"
+                "SELECT m.role, m.content, m.created_at, m.delivery_status, m.sender"
+                " FROM messages m"
                 " JOIN conversations c ON c.id = m.conversation_id"
                 " WHERE c.user_id = $1 ORDER BY m.created_at DESC LIMIT $2",
                 user_id, limit,
@@ -1346,6 +1348,7 @@ class PostgresConversationStore:
                 content=str(r["content"]),
                 created_at=r["created_at"].isoformat() if r["created_at"] else None,
                 delivery_status=r["delivery_status"],
+                sender=r["sender"],
             )
             for r in ordered
         ]
@@ -1365,14 +1368,17 @@ class PostgresConversationStore:
             for r in rows
         ]
 
-    async def append_message(self, conversation_id: int, role: str, content: str) -> int:
+    async def append_message(
+        self, conversation_id: int, role: str, content: str, sender: str | None = None
+    ) -> int:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "INSERT INTO messages (conversation_id, role, content) VALUES ($1, $2, $3)"
-                " RETURNING id",
+                "INSERT INTO messages (conversation_id, role, content, sender) VALUES"
+                " ($1, $2, $3, $4) RETURNING id",
                 conversation_id,
                 role,
                 content,
+                sender,
             )
         return int(row["id"])
 

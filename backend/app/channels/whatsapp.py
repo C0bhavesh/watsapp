@@ -7,7 +7,6 @@ from typing import Any
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-from app.admin.controls import load_controls
 from app.channels.whatsapp_config import load_whatsapp_config
 from app.channels.whatsapp_inbound import (
     InboundButton,
@@ -113,9 +112,6 @@ async def receive_webhook(request: Request) -> Response:
     # dispatch_button below). Budget-checked per iteration (matching the events loop) so an
     # oversized delivery logs+stops rather than running unbounded.
     statuses = extract_statuses(payload, expected_phone_number_id=cfg.phone_number_id)
-    # AdminControls (send mode + allowlist + owner alert number) is needed only when a 'failed'
-    # status drives a resend through apply_delivery_status; load it once for the whole loop.
-    controls = await load_controls(c.config)
     for index, status in enumerate(statuses):
         if deadline - time.monotonic() <= 0:
             logger.warning(
@@ -124,7 +120,7 @@ async def receive_webhook(request: Request) -> Response:
             )
             break
         try:
-            await apply_delivery_status(c, cfg, controls, status)
+            await apply_delivery_status(c, cfg, status)
         except Exception:
             logger.exception("delivery-status processing failed; webhook still acks 200")
 

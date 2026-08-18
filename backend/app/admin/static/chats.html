@@ -51,6 +51,15 @@
     .delivery-mark-processing { color: #8696a0; }
     #chat-empty { display: flex; align-items: center; justify-content: center; flex: 1;
       color: #667781; font-size: .9rem; }
+    #reply-bar { display: flex; gap: .5rem; padding: .6rem 1.2rem; background: #f0f2f5;
+      border-top: 1px solid #e9edef; }
+    #reply-input { flex: 1; padding: .5rem .7rem; border: 1px solid #d1d7db; border-radius: 8px;
+      font-size: .85rem; outline: none; }
+    #reply-input:disabled { background: #e9edef; color: #8696a0; }
+    #reply-send-btn { background: #00a884; color: #fff; border: none; border-radius: 6px;
+      padding: .5rem 1.1rem; font-size: .82rem; cursor: pointer; }
+    #reply-send-btn:disabled { background: #8696a0; cursor: not-allowed; }
+    #reply-status { padding: 0 1.2rem .3rem; min-height: 1em; }
 
     #order-panel { width: 300px; flex-shrink: 0; background: #fff; border-left: 1px solid #e9edef;
       padding: 1rem; overflow-y: auto; }
@@ -88,6 +97,11 @@
       </div>
       <div id="chat-messages"><div id="chat-empty">Select a chat to view it</div></div>
       <div class="status" id="thread-status"></div>
+      <div id="reply-bar">
+        <input id="reply-input" type="text" placeholder="Type a message" />
+        <button id="reply-send-btn">Send</button>
+      </div>
+      <div class="status" id="reply-status"></div>
     </div>
     <div id="order-panel">
       <h3>Order Details</h3>

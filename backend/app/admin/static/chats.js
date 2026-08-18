@@ -3,14 +3,14 @@
 
 function el(id) { return document.getElementById(id); }
 
-async function api(path, method = "GET") {
+async function api(path, method = "GET", body = null) {
   const opts = { method, credentials: "same-origin" };
   if (method !== "GET") {
     // A bodyless POST sends no Content-Length, which Vercel's edge rejects with a 411 before the
-    // request reaches the app. Attach an empty JSON body so the edge lets it through; the FastAPI
-    // route ignores the body.
+    // request reaches the app. Default to an empty JSON body so the edge lets it through even when
+    // the caller has nothing to send; a caller with real data passes it via `body`.
     opts.headers = { "Content-Type": "application/json" };
-    opts.body = "{}";
+    opts.body = JSON.stringify(body === null ? {} : body);
   }
   const res = await fetch(path, opts);
   if (res.status === 401) {
@@ -43,6 +43,15 @@ function formatBubbleTime(isoTimestamp) {
   if (Number.isNaN(d.getTime())) return "";
   return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })
     .toLowerCase();
+}
+
+const REPLY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+function lastCustomerMessageAt(entries) {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i].type === "customer_message") return new Date(entries[i].timestamp);
+  }
+  return null;
 }
 
 function renderDeliveryMark(entry) {
@@ -80,7 +89,8 @@ function renderBubble(entry) {
   div.className = "bubble " + side;
   const label = document.createElement("div");
   label.className = "bubble-label";
-  label.textContent = entry.type.replace("_", " ");
+  label.textContent =
+    entry.type === "ai_reply" && entry.sender === "admin" ? "you" : entry.type.replace("_", " ");
   const text = document.createElement("div");
   text.textContent = entry.text;
   const ts = document.createElement("div");
@@ -239,6 +249,15 @@ async function loadThread(threadId, phone, silent = false) {
     const resumeBtn = el("resume-ai-btn");
     const isPaused = data.paused_until && new Date(data.paused_until) > new Date();
     resumeBtn.style.display = isPaused ? "inline-block" : "none";
+    const lastCustomerAt = lastCustomerMessageAt(data.entries);
+    const withinWindow = lastCustomerAt && (Date.now() - lastCustomerAt.getTime()) < REPLY_WINDOW_MS;
+    const replyInput = el("reply-input");
+    const replySendBtn = el("reply-send-btn");
+    replyInput.disabled = !withinWindow;
+    replySendBtn.disabled = !withinWindow;
+    replyInput.placeholder = withinWindow
+      ? "Type a message"
+      : "Outside the 24-hour reply window — send a template instead";
     threadSnapshotKey = threadEntriesKey(data.entries);
     if (!silent) el("thread-status").textContent = "";
   } catch (e) {
@@ -321,6 +340,33 @@ el("resume-ai-btn").addEventListener("click", async () => {
   if (currentThreadId === null) return;
   await api("/admin/conversations/" + encodeURIComponent(currentThreadId) + "/resume", "POST");
   await loadThread(currentThreadId, currentPhone);
+});
+
+el("reply-send-btn").addEventListener("click", async () => {
+  if (currentThreadId === null) return;
+  const input = el("reply-input");
+  const text = input.value.trim();
+  if (!text) return;
+  const btn = el("reply-send-btn");
+  btn.disabled = true;
+  el("reply-status").textContent = "";
+  try {
+    await api(
+      "/admin/conversations/" + encodeURIComponent(currentThreadId) + "/messages",
+      "POST",
+      { text }
+    );
+    input.value = "";
+    await loadThread(currentThreadId, currentPhone);
+  } catch (e) {
+    el("reply-status").textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+el("reply-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") el("reply-send-btn").click();
 });
 
 let listSnapshotKey = "";

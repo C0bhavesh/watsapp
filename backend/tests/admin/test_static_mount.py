@@ -222,3 +222,19 @@ def test_chats_js_excludes_processing_from_status_text(client: TestClient) -> No
     # in a conditional context (the status check).
     assert "entry.status" in js
     assert "processing" in js
+
+
+def test_chats_page_has_manual_reply_box(client: TestClient) -> None:
+    resp = client.get("/admin/ui/chats.html")
+    assert resp.status_code == 200
+    assert 'id="reply-input"' in resp.text
+    assert 'id="reply-send-btn"' in resp.text
+
+
+def test_chats_js_wires_manual_reply_send(client: TestClient) -> None:
+    resp = client.get("/admin/ui/chats.js")
+    assert resp.status_code == 200
+    js = resp.text
+    assert "/messages" in js
+    assert "reply-send-btn" in js
+    assert "reply-input" in js

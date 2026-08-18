@@ -27,7 +27,7 @@ from app.channels.whatsapp_sender import SendResult, WhatsAppSendError, send_tex
 from app.core.conversation import HANDOFF_PAUSE_WINDOW
 from app.core.phone import normalize_phone
 from app.deps import build_provider, get_container
-from app.jobs.outbox_drain import OUTCOME_SENT, send_inline_outbound
+from app.jobs.outbox_drain import OUTCOME_SENT, OUTCOME_SUPPRESSED, send_inline_outbound
 from app.knowledge.loader import KINDS, SEEDS_DIR, KnowledgeLoader
 from app.providers.base import ProviderErrorKind
 from app.providers.registry import get_provider, list_providers
@@ -1080,11 +1080,13 @@ async def send_admin_template(
     outcome = await send_inline_outbound(c, outbound_id)
     # None means nothing was attempted (send_mode="off", no WhatsApp config, or the row's claim
     # was lost to a race) -- the row stays queued for the backstop drain, which is a SUCCESSFUL
-    # enqueue, not a failure the admin needs to retry. Only a terminal outcome the row can never
-    # recover from on its own (send_inline_outbound never returns "retry" -- that's the cron-drain
-    # path's own bump_outbound_attempt state, not reachable from a single inline attempt) counts
-    # as a failure here.
-    if outcome not in (None, OUTCOME_SENT):
+    # enqueue, not a failure the admin needs to retry. OUTCOME_SUPPRESSED means send_decision
+    # correctly withheld the send (shadow mode, or allowlist mode with a non-allowlisted phone) --
+    # also not a failure, same category as "off" leaving the row queued/withheld by policy.
+    # OUTCOME_RETRY (a transport error or non-terminal Meta error on this single inline attempt)
+    # is treated as a failure here too -- the admin should retry manually rather than wait for the
+    # cron drain's own retry cadence.
+    if outcome not in (None, OUTCOME_SENT, OUTCOME_SUPPRESSED):
         _audit("admin_template_resend", "failure", resource=f"thread:{thread_id}")
         response.status_code = 502
         return {"ok": False, "error": f"send failed: {outcome}"}

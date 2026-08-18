@@ -1205,3 +1205,38 @@ def test_send_template_kill_switch_off_leaves_it_queued_not_failed(
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
     assert len(fake.calls) == 0  # never reached Meta -- send_mode="off" left the row queued
+
+
+def test_send_template_allowlist_miss_reports_success_not_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A phone not on the allowlist is a POLICY-WITHHELD send (send_decision -> "suppress" ->
+    OUTCOME_SUPPRESSED), not a failure the admin needs to retry -- same category as send_mode="off"
+    leaving the row queued. Regression for the bug where OUTCOME_SUPPRESSED was lumped in with the
+    genuine failure outcomes and this returned a 502."""
+    from app.admin.controls import AdminControls, save_controls
+    from app.channels.whatsapp_sender import SendResult
+
+    login(client)
+    _seed_whatsapp_config()
+    thread_id = _seed_order_for_thread(order_name="tavas5005", phone="+919876500056")
+    asyncio.run(save_controls(
+        get_container().config,
+        AdminControls(
+            send_mode="allowlist", allowlist_phones=[], owner_alert_number="",
+            default_language="en",
+        ),
+    ))
+
+    fake = _FakeTemplateSender(
+        SendResult(ok=True, status_code=200, wamid="wamid.TPL4", error=None)
+    )
+    monkeypatch.setattr("app.jobs.outbox_drain.send_template", fake)
+
+    resp = client.post(
+        f"/admin/conversations/{thread_id}/templates",
+        json={"order_name": "tavas5005", "template": "order_delivered", "values": {}},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    assert len(fake.calls) == 0  # never reached Meta -- suppressed by the empty allowlist

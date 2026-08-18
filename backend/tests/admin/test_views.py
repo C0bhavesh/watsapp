@@ -758,6 +758,35 @@ class _FakeTextSender:
         return self._result
 
 
+class _FakeTemplateSender:
+    """Records send_template calls, for the template-resend endpoint's tests. Mirrors
+    test_outbox_drain_job.py's FakeSender (same patch target, app.jobs.outbox_drain.send_template
+    -- the admin router never calls send_template directly, only via send_inline_outbound)."""
+
+    def __init__(self, result: object) -> None:
+        self.calls: list[dict[str, object]] = []
+        self._result = result
+
+    async def __call__(
+        self, http, cfg, to, template_name, language, body_params,
+        button_payloads=(), header_image_url=None, timeout=20.0,
+    ):
+        self.calls.append(
+            {
+                "to": to,
+                "template": template_name,
+                "language": language,
+                "body_params": body_params,
+                "button_payloads": list(button_payloads),
+                "header_image_url": header_image_url,
+                "timeout": timeout,
+            }
+        )
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
+
+
 def _seed_whatsapp_config() -> None:
     c = get_container()
     asyncio.run(c.config.set_secret("whatsapp:access_token", "tok"))
@@ -991,3 +1020,188 @@ def test_conversation_thread_reports_sender_on_manual_reply(client: TestClient) 
     assert resp.status_code == 200
     ai_entries = [e for e in resp.json()["entries"] if e["type"] == "ai_reply"]
     assert ai_entries[-1]["sender"] == "admin"
+
+
+def _seed_order_for_thread(
+    order_name: str = "tavas5001", phone: str = "+919876500050",
+) -> int:
+    # NOTE: find_mirrored_orders_by_phone (used by both new endpoints) reads from the order
+    # MIRROR (ingest.upsert_order_mirror), not from order_mappings -- ingest_order_created alone
+    # (the pattern used by _ingest_one/_seed_outbound_at above) would leave the mirror empty and
+    # every order lookup 404. Build a real Order via the same order_from_webhook_payload path
+    # test_conversation_thread_includes_order_summary already uses, and mirror it directly.
+    order = order_from_webhook_payload({
+        "admin_graphql_api_id": "gid://shopify/Order/50001",
+        "name": order_name,
+        "phone": phone,
+        "financial_status": "pending",
+        "fulfillment_status": None,
+        "cancelled_at": None,
+        "tags": "",
+        "payment_gateway_names": ["Cash on Delivery (COD)"],
+        "total_price": "999.00",
+        "currency": "INR",
+        "updated_at": "2026-08-19T10:00:00+05:30",
+    })
+    assert order is not None
+    asyncio.run(get_container().ingest.upsert_order_mirror(order))
+    return asyncio.run(get_container().conversations.get_or_create(phone))
+
+
+def test_list_templates_requires_auth(client: TestClient) -> None:
+    resp = client.get("/admin/conversations/1/templates")
+    assert resp.status_code == 401
+
+
+def test_list_templates_unknown_thread_returns_404(client: TestClient) -> None:
+    login(client)
+    resp = client.get("/admin/conversations/900000000003/templates")
+    assert resp.status_code == 404
+
+
+def test_list_templates_returns_all_four_with_defaults(client: TestClient) -> None:
+    login(client)
+    thread_id = _seed_order_for_thread()
+    resp = client.get(f"/admin/conversations/{thread_id}/templates")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["orders"]) == 1
+    keys = {t["key"] for t in data["orders"][0]["templates"]}
+    assert keys == {"cod_confirmation", "prepaid_order", "order_shipped", "order_delivered"}
+    cod = next(t for t in data["orders"][0]["templates"] if t["key"] == "cod_confirmation")
+    assert cod["has_buttons"] is True
+    order_id_field = next(f for f in cod["fields"] if f["key"] == "order_id")
+    assert order_id_field["value"] == "tavas5001"
+
+
+def test_send_template_requires_auth(client: TestClient) -> None:
+    resp = client.post(
+        "/admin/conversations/1/templates",
+        json={"order_name": "tavas1", "template": "order_shipped", "values": {}},
+    )
+    assert resp.status_code == 401
+
+
+def test_send_template_rejects_unknown_template_key(client: TestClient) -> None:
+    login(client)
+    _seed_whatsapp_config()
+    thread_id = _seed_order_for_thread(phone="+919876500051")
+    resp = client.post(
+        f"/admin/conversations/{thread_id}/templates",
+        json={"order_name": "tavas5001", "template": "not_a_real_template", "values": {}},
+    )
+    assert resp.status_code == 400
+
+
+def test_send_template_rejects_unknown_order_name(client: TestClient) -> None:
+    login(client)
+    _seed_whatsapp_config()
+    thread_id = _seed_order_for_thread(phone="+919876500052")
+    resp = client.post(
+        f"/admin/conversations/{thread_id}/templates",
+        json={"order_name": "tavas_does_not_exist", "template": "order_shipped", "values": {}},
+    )
+    assert resp.status_code == 404
+
+
+def test_send_template_positional_shipped_sends_and_persists(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.admin.controls import AdminControls, save_controls
+    from app.channels.whatsapp_sender import SendResult
+
+    login(client)
+    _seed_whatsapp_config()
+    # send_mode defaults to "off" (AdminControls.send_mode) -- this endpoint respects the kill
+    # switch same as every automatic template send, so a genuine send requires "live" here.
+    asyncio.run(save_controls(get_container().config, AdminControls(send_mode="live")))
+    thread_id = _seed_order_for_thread(order_name="tavas5002", phone="+919876500053")
+
+    fake = _FakeTemplateSender(
+        SendResult(ok=True, status_code=200, wamid="wamid.TPL1", error=None)
+    )
+    monkeypatch.setattr("app.jobs.outbox_drain.send_template", fake)
+
+    resp = client.post(
+        f"/admin/conversations/{thread_id}/templates",
+        json={
+            "order_name": "tavas5002", "template": "order_shipped",
+            "values": {"tracking_company": "Delhivery"},
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    assert len(fake.calls) == 1
+    call = fake.calls[0]
+    assert call["template"] == "order_shipped"
+    assert isinstance(call["body_params"], list)
+    assert call["body_params"][1] == "tavas5002"  # order_name field, positional index 1
+    assert call["body_params"][2] == "Delhivery"  # admin-edited override
+    assert call["button_payloads"] == []
+
+
+def test_send_template_cod_confirmation_uses_server_resolved_gid_for_buttons(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.admin.controls import AdminControls, save_controls
+    from app.channels.whatsapp_sender import SendResult
+
+    login(client)
+    _seed_whatsapp_config()
+    asyncio.run(save_controls(get_container().config, AdminControls(send_mode="live")))
+    thread_id = _seed_order_for_thread(order_name="tavas5003", phone="+919876500054")
+
+    fake = _FakeTemplateSender(
+        SendResult(ok=True, status_code=200, wamid="wamid.TPL2", error=None)
+    )
+    monkeypatch.setattr("app.jobs.outbox_drain.send_template", fake)
+
+    # Request tries to smuggle an unrelated gid inside `values` -- it must be ignored, since gid
+    # is never read from the request body at all, only re-resolved server-side by order_name.
+    resp = client.post(
+        f"/admin/conversations/{thread_id}/templates",
+        json={
+            "order_name": "tavas5003", "template": "cod_confirmation",
+            "values": {"gid": "gid://shopify/Order/ATTACKER"},
+        },
+    )
+    assert resp.status_code == 200
+    call = fake.calls[0]
+    assert call["button_payloads"] == [
+        "order:confirm:gid://shopify/Order/50001", "order:cancel:gid://shopify/Order/50001",
+    ]
+
+
+def test_send_template_kill_switch_off_leaves_it_queued_not_failed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unlike send_manual_reply's free text, a template resend respects send_mode -- it goes
+    through the same enqueue_outbound + send_inline_outbound pipeline as every automatic template
+    send, and send_inline_outbound leaves an 'off'-mode row queued for the backstop drain rather
+    than sending immediately or failing. Enqueuing successfully is reported as {"ok": true}: it
+    is not a failure, the row is just not sent YET."""
+    from app.admin.controls import AdminControls, save_controls
+    from app.channels.whatsapp_sender import SendResult
+
+    login(client)
+    _seed_whatsapp_config()
+    thread_id = _seed_order_for_thread(order_name="tavas5004", phone="+919876500055")
+    asyncio.run(save_controls(
+        get_container().config,
+        AdminControls(
+            send_mode="off", allowlist_phones=[], owner_alert_number="", default_language="en",
+        ),
+    ))
+
+    fake = _FakeTemplateSender(
+        SendResult(ok=True, status_code=200, wamid="wamid.TPL3", error=None)
+    )
+    monkeypatch.setattr("app.jobs.outbox_drain.send_template", fake)
+
+    resp = client.post(
+        f"/admin/conversations/{thread_id}/templates",
+        json={"order_name": "tavas5004", "template": "order_delivered", "values": {}},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    assert len(fake.calls) == 0  # never reached Meta -- send_mode="off" left the row queued

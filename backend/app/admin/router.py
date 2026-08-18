@@ -5,6 +5,7 @@ import hmac
 import json
 import logging
 import re
+import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime
 
@@ -16,6 +17,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from app.admin.auth import check_password, issue_token, verify_token
 from app.admin.controls import AdminControls, load_controls, save_controls
 from app.admin.knowledge_models import validate_and_serialize
+from app.admin.template_catalog import TEMPLATE_CATALOG, resolve_template_defaults
 from app.channels.whatsapp_config import (
     WHATSAPP_PLAIN_FIELDS,
     WHATSAPP_SECRET_FIELDS,
@@ -25,13 +27,14 @@ from app.channels.whatsapp_sender import SendResult, WhatsAppSendError, send_tex
 from app.core.conversation import HANDOFF_PAUSE_WINDOW
 from app.core.phone import normalize_phone
 from app.deps import build_provider, get_container
+from app.jobs.outbox_drain import OUTCOME_SENT, send_inline_outbound
 from app.knowledge.loader import KINDS, SEEDS_DIR, KnowledgeLoader
 from app.providers.base import ProviderErrorKind
 from app.providers.registry import get_provider, list_providers
 from app.providers.verify import verify_key
 from app.ratelimit import limiter
 from app.shopify.models import Order
-from app.store.base import ConversationSummary, MappingView, OutboundView
+from app.store.base import ConversationSummary, MappingView, OutboundDraft, OutboundView
 
 logger = logging.getLogger("app.admin")
 
@@ -550,6 +553,14 @@ class ManualReplyRequest(BaseModel):
     text: str = Field(max_length=4096)
 
 
+class TemplateSendRequest(BaseModel):
+    """Admin-editable resend of one of the store's approved WhatsApp templates for an order."""
+
+    order_name: str
+    template: str
+    values: dict[str, str] = Field(default_factory=dict)
+
+
 class ErasureRequest(BaseModel):
     """DPDP right-to-erasure by phone number (E.164). The phone is PII — never logged.
 
@@ -963,3 +974,120 @@ async def send_manual_reply(
 
     _audit("admin_manual_reply", "success", resource=f"thread:{thread_id}")
     return {"ok": True, "wamid": result.wamid}
+
+
+@admin_router.get(
+    "/conversations/{thread_id}/templates", dependencies=[Depends(require_admin)]
+)
+async def list_templates(thread_id: int) -> dict[str, object]:
+    """List every order for this thread's customer with each catalog template's fields
+    pre-filled from that order's current data -- purely a read, no send happens here."""
+    c = get_container()
+    user_id = await c.conversations.get_user_id(thread_id)
+    if user_id is None:
+        raise HTTPException(status_code=404, detail="thread not found")
+    orders = await c.ingest.find_mirrored_orders_by_phone(user_id)
+    order_payloads: list[dict[str, object]] = []
+    for order in orders:
+        defaults = resolve_template_defaults(order)
+        templates = [
+            {
+                "key": key,
+                "label": tmpl.label,
+                "has_buttons": tmpl.has_confirm_cancel_buttons,
+                "fields": [
+                    {"key": f.key, "label": f.label, "value": defaults.get(f.default_from, "")}
+                    for f in tmpl.fields
+                ],
+            }
+            for key, tmpl in TEMPLATE_CATALOG.items()
+        ]
+        order_payloads.append({"order_name": order.name, "templates": templates})
+    return {"orders": order_payloads}
+
+
+@admin_router.post(
+    "/conversations/{thread_id}/templates", dependencies=[Depends(require_admin)]
+)
+@limiter.limit("30/minute")
+async def send_admin_template(
+    request: Request, thread_id: int, body: TemplateSendRequest, response: Response
+) -> dict[str, object]:
+    """Resend one of the store's approved templates for a specific order, with admin-editable
+    field values, via the SAME enqueue_outbound + send_inline_outbound pipeline every automatic
+    template send already uses (order confirmation, shipped, delivered) -- so it respects
+    send_decision/send_mode/allowlist_phones exactly like those, UNLIKE send_manual_reply's free
+    text (which deliberately bypasses the kill switch; a template resend does not, since it's the
+    same category of message as every other automatic template send).
+
+    The order's gid (used for cod_confirmation's Confirm/Cancel buttons) is ALWAYS resolved here,
+    server-side, from find_mirrored_orders_by_phone -- `body` never carries a gid at all, only the
+    human-readable order_name, so there is no way for a request to target a button payload at an
+    order it didn't already have visibility into via this same thread.
+    """
+    c = get_container()
+    user_id = await c.conversations.get_user_id(thread_id)
+    if user_id is None:
+        _audit("admin_template_resend", "failure", resource=f"thread:{thread_id}")
+        raise HTTPException(status_code=404, detail="thread not found")
+
+    tmpl = TEMPLATE_CATALOG.get(body.template)
+    if tmpl is None:
+        _audit("admin_template_resend", "failure", resource=f"thread:{thread_id}")
+        raise HTTPException(status_code=400, detail="unknown template")
+
+    orders = await c.ingest.find_mirrored_orders_by_phone(user_id)
+    order = next((o for o in orders if o.name == body.order_name), None)
+    if order is None:
+        _audit("admin_template_resend", "failure", resource=f"thread:{thread_id}")
+        raise HTTPException(status_code=404, detail="order not found for this customer")
+
+    defaults = resolve_template_defaults(order)
+    resolved: dict[str, str] = {
+        f.key: (body.values.get(f.key) or defaults.get(f.default_from, "") or "")
+        for f in tmpl.fields
+    }
+    body_params: dict[str, str] | list[str]
+    if tmpl.param_style == "named":
+        body_params = resolved
+    else:
+        body_params = [resolved[f.key] for f in tmpl.fields]
+    button_payloads = (
+        [f"order:confirm:{order.gid}", f"order:cancel:{order.gid}"]
+        if tmpl.has_confirm_cancel_buttons else []
+    )
+
+    # Prefix is "admin_resend:" (registered in outbox_drain.py's _DEDUPE_PREFIXES), followed
+    # immediately by the order's gid (required: _gid_from_dedupe_key needs the text right after
+    # the matched prefix to start with "gid://"), then the template key and a fresh uuid so a
+    # repeat resend of the SAME template for the SAME order never collides on dedupe_key -- this
+    # is a deliberate repeat, not a dedupe-guarded automatic trigger.
+    draft = OutboundDraft(
+        dedupe_key=f"admin_resend:{order.gid}:{body.template}:{uuid.uuid4()}",
+        kind="admin_template_resend",
+        phone_e164=user_id,
+        payload_json=json.dumps(
+            {"template": body.template, "language": tmpl.language, "body_params": body_params,
+             "buttons": button_payloads}
+        ),
+    )
+    outbound_id = await c.ingest.enqueue_outbound(draft)
+    if outbound_id is None:
+        _audit("admin_template_resend", "failure", resource=f"thread:{thread_id}")
+        response.status_code = 502
+        return {"ok": False, "error": "failed to queue template"}
+
+    outcome = await send_inline_outbound(c, outbound_id)
+    # None means nothing was attempted (send_mode="off", no WhatsApp config, or the row's claim
+    # was lost to a race) -- the row stays queued for the backstop drain, which is a SUCCESSFUL
+    # enqueue, not a failure the admin needs to retry. Only a terminal outcome the row can never
+    # recover from on its own (send_inline_outbound never returns "retry" -- that's the cron-drain
+    # path's own bump_outbound_attempt state, not reachable from a single inline attempt) counts
+    # as a failure here.
+    if outcome not in (None, OUTCOME_SENT):
+        _audit("admin_template_resend", "failure", resource=f"thread:{thread_id}")
+        response.status_code = 502
+        return {"ok": False, "error": f"send failed: {outcome}"}
+
+    _audit("admin_template_resend", "success", resource=f"thread:{thread_id}")
+    return {"ok": True}

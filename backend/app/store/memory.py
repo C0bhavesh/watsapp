@@ -812,6 +812,14 @@ class InMemoryConversationStore:
             row.wamid = wamid
             self._message_by_wamid[wamid] = row
 
+    async def set_message_delivery_status(self, message_id: int, status: str) -> None:
+        # Set delivery_status directly by id (no wamid), mirroring set_message_wamid's by-id
+        # lookup. Used for a send that never produced a wamid so the row can still be marked
+        # "failed" (no-op if the id is unknown, defensive only).
+        row = self._messages_by_id.get(message_id)
+        if row is not None:
+            row.delivery_status = status
+
     async def apply_message_delivery_status(self, wamid: str, status: str) -> str:
         # Route a Meta delivery/read status by wamid. "not_found" means the wamid is not in this
         # table (try outbound_messages); "applied" means the ordering guard let the write through

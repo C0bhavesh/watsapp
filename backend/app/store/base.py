@@ -351,6 +351,13 @@ class ConversationStore(Protocol):
     # message id doesn't exist (should not happen in practice, defensive only).
     async def set_message_wamid(self, message_id: int, wamid: str) -> None: ...
 
+    # Sets delivery_status on a message row directly by its id (NOT by wamid, unlike
+    # apply_message_delivery_status). Used when a send never produced a wamid at all -- e.g. a
+    # manual admin reply whose WhatsApp send raised or returned not-ok -- so the row can be marked
+    # "failed" and show the failed tick instead of a misleading grey "sent" tick. No ordering
+    # guard: the caller sets a terminal state on a row it just created.
+    async def set_message_delivery_status(self, message_id: int, status: str) -> None: ...
+
     # Applies a Meta delivery/read status update, found by wamid, through the ordering guard in
     # app.core.delivery_status. Returns one of three strings:
     #   "not_found"  -- no row has this wamid (try the outbound_messages table instead);

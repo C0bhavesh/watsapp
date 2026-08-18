@@ -1388,6 +1388,12 @@ class PostgresConversationStore:
                 "UPDATE messages SET wamid = $2 WHERE id = $1", message_id, wamid
             )
 
+    async def set_message_delivery_status(self, message_id: int, status: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE messages SET delivery_status = $2 WHERE id = $1", message_id, status
+            )
+
     async def apply_message_delivery_status(self, wamid: str, status: str) -> str:
         # Existence check + single atomic guarded UPDATE (see the sibling
         # apply_outbound_delivery_status for the full rationale): a SELECT-then-conditional-UPDATE

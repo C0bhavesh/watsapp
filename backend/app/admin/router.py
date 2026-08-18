@@ -893,8 +893,9 @@ async def resume_conversation(thread_id: int) -> dict[str, object]:
 @admin_router.post(
     "/conversations/{thread_id}/messages", dependencies=[Depends(require_admin)]
 )
+@limiter.limit("30/minute")
 async def send_manual_reply(
-    thread_id: int, body: ManualReplyRequest, response: Response
+    request: Request, thread_id: int, body: ManualReplyRequest, response: Response
 ) -> dict[str, object]:
     """Send a free-text WhatsApp message typed by the admin, mirroring core/conversation.py's
     AI-reply send path so the same delivery-status tick marks and auto-retry machinery apply
@@ -915,9 +916,11 @@ async def send_manual_reply(
     c = get_container()
     user_id = await c.conversations.get_user_id(thread_id)
     if user_id is None:
+        _audit("admin_manual_reply", "failure", resource=f"thread:{thread_id}")
         raise HTTPException(status_code=404, detail="thread not found")
     text = body.text.strip()
     if not text:
+        _audit("admin_manual_reply", "failure", resource=f"thread:{thread_id}")
         raise HTTPException(status_code=400, detail="text must not be empty")
 
     message_id = await c.conversations.append_message(
@@ -926,23 +929,31 @@ async def send_manual_reply(
 
     wa_cfg = await load_whatsapp_config(c.config)
     if wa_cfg is None:
+        # The row was persisted before this guard; mark it failed so the UI shows the red "!"
+        # tick (not a misleading grey "sent" tick) and delivery_retry never treats it as sent.
+        await c.conversations.set_message_delivery_status(message_id, "failed")
         _audit("admin_manual_reply", "failure", resource=f"thread:{thread_id}")
         raise HTTPException(status_code=503, detail="whatsapp not configured")
 
     try:
         result: SendResult = await send_text(c.http, wa_cfg, user_id, text)
     except WhatsAppSendError:
-        await c.conversations.pause_until(thread_id, datetime.now(UTC) + HANDOFF_PAUSE_WINDOW)
+        # Do NOT pause the AI on a failed send: unlike the customer-initiated handoff path, a
+        # misconfigured/failing send would otherwise silently mute the AI for 24h with no reply
+        # and no owner alert. Mark the row failed (no wamid ever arrived) so it shows the red "!".
+        await c.conversations.set_message_delivery_status(message_id, "failed")
         _audit("admin_manual_reply", "failure", resource=f"thread:{thread_id}")
         response.status_code = 502
         return {"ok": False, "error": "failed to send message"}
 
-    await c.conversations.pause_until(thread_id, datetime.now(UTC) + HANDOFF_PAUSE_WINDOW)
-
     if not result.ok:
+        await c.conversations.set_message_delivery_status(message_id, "failed")
         _audit("admin_manual_reply", "failure", resource=f"thread:{thread_id}")
         response.status_code = 502
         return {"ok": False, "error": result.error or "send failed"}
+
+    # Pause the AI only on a genuinely successful send (mirrors the handoff pause window).
+    await c.conversations.pause_until(thread_id, datetime.now(UTC) + HANDOFF_PAUSE_WINDOW)
 
     if result.wamid:
         try:

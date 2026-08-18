@@ -20,7 +20,15 @@ async function api(path, method = "GET", body = null) {
   let data = null;
   try { data = await res.json(); } catch (e) { /* non-JSON */ }
   if (!res.ok) {
-    const detail = data && data.detail ? JSON.stringify(data.detail) : res.status;
+    // Most endpoints return {"detail": ...} (a string or, for validation errors, an object -> keep
+    // JSON.stringify); the manual-reply send endpoint instead returns {"ok": false, "error": "..."}
+    // (always a plain string) on a 502/503, so prefer data.error as a plain-string fallback.
+    let detail = res.status;
+    if (data && data.detail) {
+      detail = JSON.stringify(data.detail);
+    } else if (data && data.error) {
+      detail = data.error;
+    }
     throw new Error("Request failed: " + detail);
   }
   return data;
@@ -29,6 +37,9 @@ async function api(path, method = "GET", body = null) {
 let currentThreadId = null;
 let currentPhone = null;
 let currentOrders = [];
+// Tracks whether the currently-loaded thread is still inside the 24h reply window. Set by
+// loadThread; read by the send handler's finally so it re-enables Send only when a reply is allowed.
+let replyWithinWindow = false;
 
 const STATUS_LABELS = {
   suppressed: "Not delivered — skipped by send policy",
@@ -224,8 +235,16 @@ function renderOrderPanel(orders) {
 }
 
 async function loadThread(threadId, phone, silent = false) {
+  // Capture the OLD thread id BEFORE reassigning, so a genuine thread switch (not the 3s silent
+  // poll refresh of the SAME thread) clears any in-progress draft + stale status. Without this a
+  // draft typed for customer A survives into customer B's thread and a single Enter could misfire.
+  const isThreadSwitch = threadId !== currentThreadId;
   currentThreadId = threadId;
   currentPhone = phone;
+  if (isThreadSwitch) {
+    el("reply-input").value = "";
+    el("reply-status").textContent = "";
+  }
   document.querySelectorAll(".thread-row").forEach((row) => {
     row.classList.toggle("active", row.dataset.threadId === String(threadId));
   });
@@ -251,6 +270,10 @@ async function loadThread(threadId, phone, silent = false) {
     resumeBtn.style.display = isPaused ? "inline-block" : "none";
     const lastCustomerAt = lastCustomerMessageAt(data.entries);
     const withinWindow = lastCustomerAt && (Date.now() - lastCustomerAt.getTime()) < REPLY_WINDOW_MS;
+    // Remember the window state so the send handler's finally re-enables the button only when a
+    // reply is still allowed, instead of unconditionally (which left an enabled Send button on a
+    // thread that had since scrolled outside the 24h window).
+    replyWithinWindow = Boolean(withinWindow);
     const replyInput = el("reply-input");
     const replySendBtn = el("reply-send-btn");
     replyInput.disabled = !withinWindow;
@@ -361,7 +384,9 @@ el("reply-send-btn").addEventListener("click", async () => {
   } catch (e) {
     el("reply-status").textContent = e.message;
   } finally {
-    btn.disabled = false;
+    // Re-enable Send only if the thread is still within the 24h reply window; a thread that scrolled
+    // out of the window (loadThread would have disabled the input) must not keep an enabled button.
+    btn.disabled = !replyWithinWindow;
   }
 });
 

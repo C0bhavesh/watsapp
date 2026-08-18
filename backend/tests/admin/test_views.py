@@ -877,9 +877,103 @@ def test_manual_reply_reports_send_failure(
     )
     assert messages[-1].content == "hello"
     assert messages[-1].sender == "admin"
+    # A failed send (no wamid ever arrived) is marked "failed" so the UI shows the red "!" tick
+    # instead of a misleading grey "sent" tick, and delivery_retry never treats it as sent.
+    assert messages[-1].delivery_status == "failed"
 
+    # A failed send must NOT pause/mute the AI (unlike the customer-initiated handoff path): a
+    # persistently failing send would otherwise silently mute the AI for 24h with no owner alert.
     paused_until = asyncio.run(get_container().conversations.get_paused_until(thread_id))
-    assert paused_until is not None
+    assert paused_until is None
+
+
+def test_manual_reply_marks_failed_when_result_not_ok(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-ok SendResult (send returned but Meta rejected it) also marks the row failed and
+    surfaces Meta's error, without pausing the AI."""
+    from app.channels.whatsapp_sender import SendResult
+
+    login(client)
+    _seed_whatsapp_config()
+    normalized = "+919876500045"
+    thread_id = asyncio.run(get_container().conversations.get_or_create(normalized))
+
+    fake = _FakeTextSender(
+        SendResult(ok=False, status_code=400, wamid=None, error="invalid recipient")
+    )
+    monkeypatch.setattr("app.admin.router.send_text", fake)
+
+    resp = client.post(f"/admin/conversations/{thread_id}/messages", json={"text": "hello"})
+
+    assert resp.status_code == 502
+    assert resp.json() == {"ok": False, "error": "invalid recipient"}
+
+    messages = asyncio.run(
+        get_container().conversations.find_messages_by_user_id(normalized, limit=10)
+    )
+    assert messages[-1].delivery_status == "failed"
+    paused_until = asyncio.run(get_container().conversations.get_paused_until(thread_id))
+    assert paused_until is None
+
+
+def test_manual_reply_returns_503_and_marks_failed_when_whatsapp_unconfigured(
+    client: TestClient,
+) -> None:
+    """With no WhatsApp config, the send can't happen: return 503 and mark the persisted row
+    failed so it shows the red "!" tick and never looks like a delivered message."""
+    login(client)
+    # Deliberately do NOT call _seed_whatsapp_config() -> load_whatsapp_config returns None.
+    normalized = "+919876500046"
+    thread_id = asyncio.run(get_container().conversations.get_or_create(normalized))
+
+    resp = client.post(f"/admin/conversations/{thread_id}/messages", json={"text": "hello"})
+
+    assert resp.status_code == 503
+
+    messages = asyncio.run(
+        get_container().conversations.find_messages_by_user_id(normalized, limit=10)
+    )
+    assert messages[-1].content == "hello"
+    assert messages[-1].delivery_status == "failed"
+    paused_until = asyncio.run(get_container().conversations.get_paused_until(thread_id))
+    assert paused_until is None
+
+
+def test_manual_reply_row_visible_to_memory_and_retry(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: a row CREATED BY THE ENDPOINT (via a real POST) must be visible to the AI's
+    memory window (core/memory.load_history) and findable by delivery_retry's wamid lookup."""
+    from app.channels.whatsapp_sender import SendResult
+    from app.core.memory import load_history
+
+    login(client)
+    _seed_whatsapp_config()
+    normalized = "+919876500047"
+    thread_id = asyncio.run(get_container().conversations.get_or_create(normalized))
+
+    fake = _FakeTextSender(
+        SendResult(ok=True, status_code=200, wamid="wamid.MANUAL_E2E", error=None)
+    )
+    monkeypatch.setattr("app.admin.router.send_text", fake)
+
+    resp = client.post(
+        f"/admin/conversations/{thread_id}/messages", json={"text": "shipped today"}
+    )
+    assert resp.status_code == 200
+
+    # (1) The manually-sent row is replayed into the AI's memory window as an assistant turn.
+    _conv_id, history = asyncio.run(load_history(get_container().conversations, normalized))
+    assert any(m.role == "assistant" and m.content == "shipped today" for m in history)
+
+    # (2) The same row is findable by delivery_retry via its wamid (so a delivery-failure webhook
+    # could resend it), proving the endpoint's output is on the standard retry path.
+    info = asyncio.run(
+        get_container().conversations.get_message_retry_info("wamid.MANUAL_E2E")
+    )
+    assert info is not None
+    assert info.content == "shipped today"
 
 
 def test_conversation_thread_reports_sender_on_manual_reply(client: TestClient) -> None:

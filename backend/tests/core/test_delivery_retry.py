@@ -68,18 +68,30 @@ class FakeTemplateSender:
 
 
 class FakeTextSender:
-    """Records send_text calls (used for both the AI-reply resend and the owner alert)."""
+    """Records send_text calls (used for both the AI-reply resend and the owner alert).
 
-    def __init__(self, result: object = None) -> None:
+    Pass a single ``result`` reused for every call, or a ``results`` sequence consumed one per call
+    (falling back to a default success once exhausted) -- the latter models the message path where
+    the resend and the follow-up owner alert both flow through this same monkeypatched send_text.
+    """
+
+    def __init__(
+        self, result: object = None, results: list[object] | None = None,
+    ) -> None:
         self.calls: list[dict[str, object]] = []
         self._result = result
+        self._results = list(results) if results is not None else None
 
     async def __call__(self, http, cfg, to, body, timeout=20.0) -> SendResult:
         self.calls.append({"to": to, "body": body})
-        if isinstance(self._result, Exception):
-            raise self._result
-        if isinstance(self._result, SendResult):
-            return self._result
+        if self._results is not None:
+            item: object = self._results.pop(0) if self._results else None
+        else:
+            item = self._result
+        if isinstance(item, Exception):
+            raise item
+        if isinstance(item, SendResult):
+            return item
         # Default: a successful alert send (owner alerts don't care about the wamid).
         return SendResult(ok=True, status_code=200, wamid=None, error=None)
 
@@ -340,6 +352,53 @@ async def test_retry_failed_message_stops_and_alerts_at_max_retries(
     assert len(text.calls) == 1
     assert text.calls[0]["to"] == "+919999999999"
     assert PHONE in str(text.calls[0]["body"])
+
+
+async def test_retry_failed_message_respects_send_mode_kill_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    c = get_container()
+    _, message_id = await _seed_message_sent("wamid.MSGORIG", "Your order is on the way.")
+    controls = AdminControls(send_mode="off", owner_alert_number="+919999999999")
+
+    text = FakeTextSender()
+    _install_text(monkeypatch, text)
+
+    await retry_failed_message(c, await _wa_cfg(), controls, "wamid.MSGORIG")
+
+    # Suppressed by send_decision -> only the owner alert is sent, never a resend to the customer.
+    assert len(text.calls) == 1
+    assert text.calls[0]["to"] == "+919999999999"
+    assert PHONE in str(text.calls[0]["body"])
+    # A suppressed resend still burns a retry attempt (it can never earn a future wamid), and the
+    # wamid stays unchanged so no fresh row is created.
+    info = await c.conversations.get_message_retry_info("wamid.MSGORIG")
+    assert info is not None
+    assert info.retry_count == 1
+
+
+async def test_retry_failed_message_synchronous_send_failure_alerts_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    c = get_container()
+    _, message_id = await _seed_message_sent("wamid.MSGORIG", "Your order is on the way.")
+    controls = AdminControls(send_mode="live", owner_alert_number="+919999999999")
+
+    # The resend (first send_text) raises; the follow-up owner alert (second send_text) succeeds.
+    text = FakeTextSender(results=[WhatsAppSendError("network down")])
+    _install_text(monkeypatch, text)
+
+    await retry_failed_message(c, await _wa_cfg(), controls, "wamid.MSGORIG")
+
+    # send_text is called twice: the resend (which raises) and the immediate owner alert. A
+    # transport error means this attempt earned no wamid -> alert now, do not wait for the cap.
+    assert len(text.calls) == 2
+    assert text.calls[0]["to"] == PHONE  # the resend attempt
+    assert text.calls[1]["to"] == "+919999999999"  # the owner alert
+    assert PHONE in str(text.calls[1]["body"])
+    info = await c.conversations.get_message_retry_info("wamid.MSGORIG")
+    assert info is not None
+    assert info.retry_count == 1
 
 
 # --- owner-alert degradation ------------------------------------------------

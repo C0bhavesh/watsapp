@@ -128,8 +128,13 @@ async def retry_failed_message(
 
     phone = await c.conversations.get_user_id(info.conversation_id)
     if phone is None:
-        # Conversation row vanished (should not happen in practice) -- nothing sensible to resend.
+        # Conversation row vanished (should not happen in practice) -- nothing sensible to resend,
+        # so this attempt earns no new wamid and is terminal: page the owner like every other
+        # dead-end branch in this module.
         await c.conversations.record_message_retry(info.id, None)
+        await _alert_owner_retry_exhausted(
+            c, wa_cfg, controls.owner_alert_number, "unknown recipient"
+        )
         return
 
     decision = send_decision(controls.send_mode, controls.allowlist_phones, phone)

@@ -454,7 +454,7 @@ async def test_empty_dict_body_params_is_undeliverable(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # _parse_payload's empty-dict branch: a NAMED body_params of {} carries no placeholder values,
+    # parse_payload's empty-dict branch: a NAMED body_params of {} carries no placeholder values,
     # so the template can never render -> terminal undeliverable, never sent. This gates the
     # follow-up payload writer: an accidental drop of the `if not raw_body_params` empty-check would
     # let an empty dict through, and this test would catch it.
@@ -485,7 +485,7 @@ async def test_empty_list_body_params_is_undeliverable(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # _parse_payload's empty-list branch: a POSITIONAL body_params of [] carries no {{n}} values,
+    # parse_payload's empty-list branch: a POSITIONAL body_params of [] carries no {{n}} values,
     # so the template can never render -> terminal undeliverable, never sent. Distinct code path
     # from the empty-dict case above (list `if not raw_body_params`, not the dict one).
     c = get_container()
@@ -515,7 +515,7 @@ async def test_dict_body_params_non_string_value_is_undeliverable(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # _parse_payload's dict non-string-value branch: a NAMED body_params whose values are not all
+    # parse_payload's dict non-string-value branch: a NAMED body_params whose values are not all
     # strings ({"x": 1}) fails the `isinstance(v, str)` all(...) guard -> terminal undeliverable.
     # Meta placeholder values must be strings; an accidental drop of the isinstance guard would send
     # a malformed payload, and this test would catch it. Distinct path from the empty-dict case.
@@ -546,7 +546,7 @@ async def test_list_body_params_non_string_entry_is_undeliverable(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # _parse_payload's list non-string-entry branch: a POSITIONAL body_params whose entries are not
+    # parse_payload's list non-string-entry branch: a POSITIONAL body_params whose entries are not
     # all strings ([1, 2]) fails the `isinstance(v, str)` all(...) guard -> terminal undeliverable.
     # Distinct code path from the dict non-string-value case (list all(...), not the dict one).
     c = get_container()

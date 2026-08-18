@@ -140,7 +140,7 @@ async def send_template(
     """
     components: list[dict[str, Any]] = []
     # Defense-in-depth: only a public https link becomes an IMAGE header. The two callers
-    # (ShopifyClient.get_product_image_url, outbox_drain._parse_payload) already https-check, but
+    # (ShopifyClient.get_product_image_url, outbox_drain.parse_payload) already https-check, but
     # this shared low-level sender must not forward an unvalidated URL straight to Meta — a missing
     # or non-https value degrades to "no header" (the send stays valid), never raises.
     if header_image_url and header_image_url.startswith("https://"):

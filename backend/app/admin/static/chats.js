@@ -46,15 +46,19 @@ function formatBubbleTime(isoTimestamp) {
 }
 
 function renderDeliveryMark(entry) {
-  // A tick makes sense for a template_sent entry that actually went out (status "sent"), or for
-  // any ai_reply entry (which carries no status field to gate on).
+  // A tick makes sense for a template_sent entry that actually went out (status "sent"), for
+  // any ai_reply entry (which carries no status field to gate on), or for a template_sent stuck
+  // in "processing" (which shows a clock icon instead of the tick).
   const eligible =
     entry.type === "ai_reply" ||
-    (entry.type === "template_sent" && entry.status === "sent");
+    (entry.type === "template_sent" && (entry.status === "sent" || entry.status === "processing"));
   if (!eligible) return null;
   const mark = document.createElement("span");
   mark.className = "delivery-mark";
-  if (entry.delivery_status === "failed") {
+  if (entry.status === "processing") {
+    mark.textContent = "⏱";
+    mark.classList.add("delivery-mark-processing");
+  } else if (entry.delivery_status === "failed") {
     mark.textContent = "!";
     mark.classList.add("delivery-mark-failed");
   } else if (entry.delivery_status === "read") {
@@ -86,7 +90,7 @@ function renderBubble(entry) {
   if (mark) ts.appendChild(mark);
   div.appendChild(label);
   div.appendChild(text);
-  if (entry.status && entry.status !== "sent") {
+  if (entry.status && entry.status !== "sent" && entry.status !== "processing") {
     const status = document.createElement("div");
     status.className = "bubble-status";
     if (

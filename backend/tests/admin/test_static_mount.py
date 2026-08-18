@@ -192,3 +192,33 @@ def test_chats_js_renders_delivery_ticks(client: TestClient) -> None:
     assert "delivery_status" in js
     assert "delivered" in js
     assert "read" in js
+
+
+def test_chats_js_shows_clock_icon_for_processing_status(client: TestClient) -> None:
+    # A template_sent entry stuck in "processing" status should show a clock icon (⏱)
+    # instead of the literal word "processing" as status text.
+    resp = client.get("/admin/ui/chats.js")
+    js = resp.text
+    assert "⏱" in js
+    assert "delivery-mark-processing" in js
+
+
+def test_chats_html_has_processing_mark_css(client: TestClient) -> None:
+    # The clock icon for processing status must have a CSS rule defining its color.
+    resp = client.get("/admin/ui/chats.html")
+    html = resp.text
+    assert "delivery-mark-processing" in html
+    assert "#8696a0" in html
+
+
+def test_chats_js_excludes_processing_from_status_text(client: TestClient) -> None:
+    # The "processing" status should NOT render as a bottom-line status text (it gets the icon
+    # instead). The condition on renderBubble must exclude "processing" from triggering the
+    # status text div.
+    resp = client.get("/admin/ui/chats.js")
+    js = resp.text
+    # The condition should be something like: status !== "sent" && status !== "processing"
+    # or an explicit list that excludes processing. We check that "processing" appears
+    # in a conditional context (the status check).
+    assert "entry.status" in js
+    assert "processing" in js

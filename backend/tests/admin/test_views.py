@@ -1024,6 +1024,8 @@ def test_conversation_thread_reports_sender_on_manual_reply(client: TestClient) 
 
 def _seed_order_for_thread(
     order_name: str = "tavas5001", phone: str = "+919876500050",
+    order_gid: str = "gid://shopify/Order/50001",
+    cancelled_at: str | None = None, fulfilled: bool = False,
 ) -> int:
     # NOTE: find_mirrored_orders_by_phone (used by both new endpoints) reads from the order
     # MIRROR (ingest.upsert_order_mirror), not from order_mappings -- ingest_order_created alone
@@ -1031,12 +1033,12 @@ def _seed_order_for_thread(
     # every order lookup 404. Build a real Order via the same order_from_webhook_payload path
     # test_conversation_thread_includes_order_summary already uses, and mirror it directly.
     order = order_from_webhook_payload({
-        "admin_graphql_api_id": "gid://shopify/Order/50001",
+        "admin_graphql_api_id": order_gid,
         "name": order_name,
         "phone": phone,
         "financial_status": "pending",
-        "fulfillment_status": None,
-        "cancelled_at": None,
+        "fulfillment_status": "fulfilled" if fulfilled else None,
+        "cancelled_at": cancelled_at,
         "tags": "",
         "payment_gateway_names": ["Cash on Delivery (COD)"],
         "total_price": "999.00",
@@ -1045,6 +1047,21 @@ def _seed_order_for_thread(
     })
     assert order is not None
     asyncio.run(get_container().ingest.upsert_order_mirror(order))
+    if fulfilled:
+        from app.shopify.models import Fulfillment
+
+        asyncio.run(
+            get_container().ingest.upsert_fulfillment(
+                order_gid,
+                Fulfillment(
+                    gid="gid://shopify/Fulfillment/50001",
+                    status="success",
+                    tracking_company="Delhivery",
+                    tracking_number="AWB50001",
+                    tracking_url="https://track.example/AWB50001",
+                ),
+            )
+        )
     return asyncio.run(get_container().conversations.get_or_create(phone))
 
 
@@ -1061,7 +1078,9 @@ def test_list_templates_unknown_thread_returns_404(client: TestClient) -> None:
 
 def test_list_templates_returns_all_four_with_defaults(client: TestClient) -> None:
     login(client)
-    thread_id = _seed_order_for_thread()
+    # A fulfilled, non-cancelled order is eligible for all four templates (the state filter only
+    # trims cancelled orders' confirmations and unfulfilled orders' shipped/delivered notices).
+    thread_id = _seed_order_for_thread(fulfilled=True)
     resp = client.get(f"/admin/conversations/{thread_id}/templates")
     assert resp.status_code == 200
     data = resp.json()
@@ -1072,6 +1091,40 @@ def test_list_templates_returns_all_four_with_defaults(client: TestClient) -> No
     assert cod["has_buttons"] is True
     order_id_field = next(f for f in cod["fields"] if f["key"] == "order_id")
     assert order_id_field["value"] == "tavas5001"
+    # Finding 3: the pinned order-identity field is shown read-only in the dialog form.
+    assert order_id_field["read_only"] is True
+
+
+def test_list_templates_cancelled_order_excludes_confirmation_templates(
+    client: TestClient,
+) -> None:
+    # Finding 10: a cancelled order must not offer cod_confirmation/prepaid_order (their live
+    # Confirm/Cancel buttons make no sense for an already-cancelled order) -- support noise only,
+    # not a mutation-safety gate. It is fulfilled, so the shipped/delivered notices still apply.
+    login(client)
+    thread_id = _seed_order_for_thread(
+        phone="+919876500060", cancelled_at="2026-08-19T09:00:00+05:30", fulfilled=True,
+    )
+    resp = client.get(f"/admin/conversations/{thread_id}/templates")
+    assert resp.status_code == 200
+    keys = {t["key"] for t in resp.json()["orders"][0]["templates"]}
+    assert "cod_confirmation" not in keys
+    assert "prepaid_order" not in keys
+    assert keys == {"order_shipped", "order_delivered"}
+
+
+def test_list_templates_unfulfilled_order_excludes_shipped_and_delivered(
+    client: TestClient,
+) -> None:
+    # Finding 10: an order with no fulfillments has nothing to report shipped/delivered on.
+    login(client)
+    thread_id = _seed_order_for_thread(phone="+919876500061", fulfilled=False)
+    resp = client.get(f"/admin/conversations/{thread_id}/templates")
+    assert resp.status_code == 200
+    keys = {t["key"] for t in resp.json()["orders"][0]["templates"]}
+    assert "order_shipped" not in keys
+    assert "order_delivered" not in keys
+    assert keys == {"cod_confirmation", "prepaid_order"}
 
 
 def test_send_template_requires_auth(client: TestClient) -> None:
@@ -1130,7 +1183,7 @@ def test_send_template_positional_shipped_sends_and_persists(
         },
     )
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True}
+    assert resp.json() == {"ok": True, "status": "sent"}
     assert len(fake.calls) == 1
     call = fake.calls[0]
     assert call["template"] == "order_shipped"
@@ -1203,7 +1256,7 @@ def test_send_template_kill_switch_off_leaves_it_queued_not_failed(
         json={"order_name": "tavas5004", "template": "order_delivered", "values": {}},
     )
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True}
+    assert resp.json() == {"ok": True, "status": "queued"}
     assert len(fake.calls) == 0  # never reached Meta -- send_mode="off" left the row queued
 
 
@@ -1238,5 +1291,198 @@ def test_send_template_allowlist_miss_reports_success_not_failure(
         json={"order_name": "tavas5005", "template": "order_delivered", "values": {}},
     )
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True}
+    assert resp.json() == {"ok": True, "status": "suppressed"}
     assert len(fake.calls) == 0  # never reached Meta -- suppressed by the empty allowlist
+
+
+def test_send_template_blank_field_sends_placeholder_not_empty_string(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 1: Meta rejects an empty template body parameter, so a blank field (e.g. resending
+    order_shipped for a not-yet-fulfilled order -> blank courier) must be substituted with
+    EMPTY_PARAM_PLACEHOLDER ("-") in body_params, never sent as ""."""
+    from app.admin.controls import AdminControls, save_controls
+    from app.channels.copy import EMPTY_PARAM_PLACEHOLDER
+    from app.channels.whatsapp_sender import SendResult
+
+    login(client)
+    _seed_whatsapp_config()
+    asyncio.run(save_controls(get_container().config, AdminControls(send_mode="live")))
+    # Unfulfilled order -> tracking_company/tracking_link default to "". No admin override either.
+    thread_id = _seed_order_for_thread(order_name="tavas5006", phone="+919876500057")
+
+    fake = _FakeTemplateSender(
+        SendResult(ok=True, status_code=200, wamid="wamid.TPL5", error=None)
+    )
+    monkeypatch.setattr("app.jobs.outbox_drain.send_template", fake)
+
+    resp = client.post(
+        f"/admin/conversations/{thread_id}/templates",
+        json={"order_name": "tavas5006", "template": "order_shipped", "values": {}},
+    )
+    assert resp.status_code == 200
+    assert len(fake.calls) == 1
+    body_params = fake.calls[0]["body_params"]
+    assert isinstance(body_params, list)
+    # tracking_company (index 2) and tracking_link (index 3) had no value -> placeholder, not "".
+    assert body_params[2] == EMPTY_PARAM_PLACEHOLDER
+    assert body_params[3] == EMPTY_PARAM_PLACEHOLDER
+    assert "" not in body_params
+
+
+def test_send_template_order_id_pinned_to_server_value_ignoring_override(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 3: the admin-editable order_id field must be force-overwritten with the
+    server-resolved order.name, so the visible order text can never desync from the button
+    payloads (which are pinned to the server gid)."""
+    from app.admin.controls import AdminControls, save_controls
+    from app.channels.whatsapp_sender import SendResult
+
+    login(client)
+    _seed_whatsapp_config()
+    asyncio.run(save_controls(get_container().config, AdminControls(send_mode="live")))
+    thread_id = _seed_order_for_thread(order_name="tavas5007", phone="+919876500058")
+
+    fake = _FakeTemplateSender(
+        SendResult(ok=True, status_code=200, wamid="wamid.TPL6", error=None)
+    )
+    monkeypatch.setattr("app.jobs.outbox_drain.send_template", fake)
+
+    resp = client.post(
+        f"/admin/conversations/{thread_id}/templates",
+        json={
+            "order_name": "tavas5007", "template": "cod_confirmation",
+            "values": {"order_id": "some-other-order"},
+        },
+    )
+    assert resp.status_code == 200
+    body_params = fake.calls[0]["body_params"]
+    assert isinstance(body_params, dict)
+    assert body_params["order_id"] == "tavas5007"  # server value, NOT the submitted override
+
+
+def test_send_template_drops_values_key_not_in_template_field_list(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 8: a `values` key that is not one of the picked template's fields must never appear
+    anywhere in the body_params sent to Meta."""
+    from app.admin.controls import AdminControls, save_controls
+    from app.channels.whatsapp_sender import SendResult
+
+    login(client)
+    _seed_whatsapp_config()
+    asyncio.run(save_controls(get_container().config, AdminControls(send_mode="live")))
+    thread_id = _seed_order_for_thread(order_name="tavas5008", phone="+919876500059")
+
+    fake = _FakeTemplateSender(
+        SendResult(ok=True, status_code=200, wamid="wamid.TPL7", error=None)
+    )
+    monkeypatch.setattr("app.jobs.outbox_drain.send_template", fake)
+
+    resp = client.post(
+        f"/admin/conversations/{thread_id}/templates",
+        json={
+            "order_name": "tavas5008", "template": "cod_confirmation",
+            "values": {
+                "customer_name": "Legit", "gid": "gid://shopify/Order/999",
+                "unexpected_key": "x",
+            },
+        },
+    )
+    assert resp.status_code == 200
+    body_params = fake.calls[0]["body_params"]
+    assert isinstance(body_params, dict)
+    assert "gid" not in body_params
+    assert "unexpected_key" not in body_params
+    assert "gid" not in body_params.values()
+    assert "x" not in body_params.values()
+
+
+def test_send_template_does_not_touch_order_mappings_status(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 6: a resend uses the "admin_resend:" dedupe family (NOT the order-confirmation
+    family), so a successful send must never advance order_mappings.status."""
+    from app.admin.controls import AdminControls, save_controls
+    from app.channels.whatsapp_sender import SendResult
+    from app.store.base import MappingUpsert
+
+    login(client)
+    _seed_whatsapp_config()
+    asyncio.run(save_controls(get_container().config, AdminControls(send_mode="live")))
+    order_gid = "gid://shopify/Order/50060"
+    thread_id = _seed_order_for_thread(
+        order_name="tavas5060", phone="+919876500062", order_gid=order_gid,
+    )
+    # Seed an order_mappings row for the SAME gid with a known status ("pending").
+    mapping = MappingUpsert(
+        order_gid=order_gid, order_name="tavas5060", order_number_int=5060,
+        phone_e164="+919876500062", customer_name="Test", email=None, language="en",
+        financial_status_at_create="pending", is_cod=True,
+    )
+    outbound = OutboundDraft(
+        dedupe_key=f"order_created:{order_gid}", kind="order_confirmation",
+        phone_e164="+919876500062", payload_json="{}",
+    )
+    asyncio.run(
+        get_container().ingest.ingest_order_created(
+            f"wh-{order_gid}", "orders/create", mapping, outbound
+        )
+    )
+
+    fake = _FakeTemplateSender(
+        SendResult(ok=True, status_code=200, wamid="wamid.TPL8", error=None)
+    )
+    monkeypatch.setattr("app.jobs.outbox_drain.send_template", fake)
+
+    resp = client.post(
+        f"/admin/conversations/{thread_id}/templates",
+        json={"order_name": "tavas5060", "template": "cod_confirmation", "values": {}},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "status": "sent"}
+
+    mappings = {m.order_gid: m for m in asyncio.run(get_container().ingest.recent_mappings(20))}
+    assert mappings[order_gid].status == "pending"  # unchanged by the resend
+
+
+def test_queued_admin_resend_row_drains_via_backstop_job(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 7: a resend enqueued while send_mode="off" stays queued; once send_mode flips to
+    "live", the backstop run_outbox_drain must actually send the previously-queued admin_resend
+    row -- proving the payload shape is drain-compatible, protected by a real regression test."""
+    from app.admin.controls import AdminControls, save_controls
+    from app.channels.whatsapp_sender import SendResult
+    from app.jobs.outbox_drain import run_outbox_drain
+
+    login(client)
+    _seed_whatsapp_config()
+    asyncio.run(save_controls(
+        get_container().config,
+        AdminControls(
+            send_mode="off", allowlist_phones=[], owner_alert_number="", default_language="en",
+        ),
+    ))
+    thread_id = _seed_order_for_thread(order_name="tavas5070", phone="+919876500063")
+
+    fake = _FakeTemplateSender(
+        SendResult(ok=True, status_code=200, wamid="wamid.TPL9", error=None)
+    )
+    monkeypatch.setattr("app.jobs.outbox_drain.send_template", fake)
+
+    resp = client.post(
+        f"/admin/conversations/{thread_id}/templates",
+        json={"order_name": "tavas5070", "template": "order_delivered", "values": {}},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "status": "queued"}
+    assert len(fake.calls) == 0  # off -> nothing sent inline
+
+    # Flip to live and run the backstop drain: the queued admin_resend row now actually sends.
+    asyncio.run(save_controls(get_container().config, AdminControls(send_mode="live")))
+    summary = asyncio.run(run_outbox_drain(get_container()))
+    assert summary["sent"] == 1
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["template"] == "order_delivered"

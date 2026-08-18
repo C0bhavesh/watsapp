@@ -8,9 +8,10 @@ import re
 import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime
+from typing import Annotated
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request, Response
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, StringConstraints, ValidationError
 from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -18,6 +19,7 @@ from app.admin.auth import check_password, issue_token, verify_token
 from app.admin.controls import AdminControls, load_controls, save_controls
 from app.admin.knowledge_models import validate_and_serialize
 from app.admin.template_catalog import TEMPLATE_CATALOG, resolve_template_defaults
+from app.channels.copy import EMPTY_PARAM_PLACEHOLDER
 from app.channels.whatsapp_config import (
     WHATSAPP_PLAIN_FIELDS,
     WHATSAPP_SECRET_FIELDS,
@@ -554,11 +556,18 @@ class ManualReplyRequest(BaseModel):
 
 
 class TemplateSendRequest(BaseModel):
-    """Admin-editable resend of one of the store's approved WhatsApp templates for an order."""
+    """Admin-editable resend of one of the store's approved WhatsApp templates for an order.
 
-    order_name: str
-    template: str
-    values: dict[str, str] = Field(default_factory=dict)
+    Length-bounded like the sibling ManualReplyRequest: order_name/template are short catalog/
+    order identifiers, and each editable field value is capped near Meta's own ~1024-char
+    template-parameter limit so no unbounded string rides in up to the 1 MiB body cap.
+    """
+
+    order_name: str = Field(max_length=64)
+    template: str = Field(max_length=64)
+    values: dict[str, Annotated[str, StringConstraints(max_length=1024)]] = Field(
+        default_factory=dict
+    )
 
 
 class ErasureRequest(BaseModel):
@@ -976,6 +985,25 @@ async def send_manual_reply(
     return {"ok": True, "wamid": result.wamid}
 
 
+_CONFIRMATION_TEMPLATES = ("cod_confirmation", "prepaid_order")
+_FULFILLMENT_TEMPLATES = ("order_shipped", "order_delivered")
+
+
+def _template_applies_to_order(template_key: str, order: Order) -> bool:
+    """Filter the offered templates by the order's current state (Finding 10 -- support noise, not
+    a mutation-safety gate; core/order_actions.py re-validates every button tap independently).
+
+    Skip the Confirm/Cancel confirmation templates for an already-cancelled order, and skip the
+    shipped/delivered notices for an order with no fulfillments yet (nothing to report on). Uses
+    only the Order fields already in hand -- no extra Shopify call.
+    """
+    if template_key in _CONFIRMATION_TEMPLATES and order.is_cancelled():
+        return False
+    if template_key in _FULFILLMENT_TEMPLATES and not order.fulfillments:
+        return False
+    return True
+
+
 @admin_router.get(
     "/conversations/{thread_id}/templates", dependencies=[Depends(require_admin)]
 )
@@ -996,11 +1024,19 @@ async def list_templates(thread_id: int) -> dict[str, object]:
                 "label": tmpl.label,
                 "has_buttons": tmpl.has_confirm_cancel_buttons,
                 "fields": [
-                    {"key": f.key, "label": f.label, "value": defaults.get(f.default_from, "")}
+                    {
+                        "key": f.key,
+                        "label": f.label,
+                        "value": defaults.get(f.default_from, ""),
+                        # order_id is the server-pinned order identity (see send_admin_template):
+                        # the send path force-overwrites it, so it is shown read-only, not editable.
+                        "read_only": f.key == "order_id",
+                    }
                     for f in tmpl.fields
                 ],
             }
             for key, tmpl in TEMPLATE_CATALOG.items()
+            if _template_applies_to_order(key, order)
         ]
         order_payloads.append({"order_name": order.name, "templates": templates})
     return {"orders": order_payloads}
@@ -1047,6 +1083,18 @@ async def send_admin_template(
         f.key: (body.values.get(f.key) or defaults.get(f.default_from, "") or "")
         for f in tmpl.fields
     }
+    # Finding 3: pin the order-identity field to the SERVER-resolved order name, overriding any
+    # admin submission, so the visible order text can never desync from the Confirm/Cancel button
+    # payloads (which are always the server gid). order_id is the field key only on the two
+    # confirmation templates; practically only cod_confirmation has buttons, but prepaid_order's
+    # text would be just as misleading with a mismatched id, so both are pinned.
+    if "order_id" in resolved:
+        resolved["order_id"] = order.name
+    # Finding 1: Meta rejects an empty template body parameter (named or positional), so every
+    # send call site substitutes EMPTY_PARAM_PLACEHOLDER rather than sending "" (see
+    # app.channels.copy). A blank admin override + blank default (e.g. resending order_shipped for a
+    # not-yet-fulfilled order -> blank courier/tracking) would otherwise make Meta reject the send.
+    resolved = {k: (v if v.strip() else EMPTY_PARAM_PLACEHOLDER) for k, v in resolved.items()}
     body_params: dict[str, str] | list[str]
     if tmpl.param_style == "named":
         body_params = resolved
@@ -1062,6 +1110,12 @@ async def send_admin_template(
     # the matched prefix to start with "gid://"), then the template key and a fresh uuid so a
     # repeat resend of the SAME template for the SAME order never collides on dedupe_key -- this
     # is a deliberate repeat, not a dedupe-guarded automatic trigger.
+    # WARNING (Finding 9): _gid_from_dedupe_key's return value for this "admin_resend:" prefix is
+    # NOT a clean order gid -- it is "gid://shopify/Order/123:cod_confirmation:<uuid>" (trailing
+    # template-key + uuid text). It passes the startswith("gid://") check but must NEVER be used
+    # for anything beyond a truthy/None validity check. The ONLY mapping-status write in the drain
+    # is gated on the DIFFERENT order-confirmation prefix family, so this is safe today; do not add
+    # any new gid-consuming behavior keyed off an admin_resend dedupe_key.
     draft = OutboundDraft(
         dedupe_key=f"admin_resend:{order.gid}:{body.template}:{uuid.uuid4()}",
         kind="admin_template_resend",
@@ -1091,5 +1145,18 @@ async def send_admin_template(
         response.status_code = 502
         return {"ok": False, "error": f"send failed: {outcome}"}
 
-    _audit("admin_template_resend", "success", resource=f"thread:{thread_id}")
-    return {"ok": True}
+    # Finding 4: distinguish the three non-failure outcomes for the admin, instead of a bare
+    # {"ok": true} that conflates "delivered", "queued for the (not reliably-running) backstop
+    # drain", and "permanently withheld by send policy". None -> queued; SENT -> sent; SUPPRESSED
+    # -> suppressed. The same distinction is written to the audit detail.
+    if outcome == OUTCOME_SENT:
+        status = "sent"
+    elif outcome == OUTCOME_SUPPRESSED:
+        status = "suppressed"
+    else:  # None -- nothing attempted, row left queued for the backstop drain
+        status = "queued"
+    _audit(
+        "admin_template_resend", "success",
+        resource=f"thread:{thread_id}", detail=f"outcome={status}",
+    )
+    return {"ok": True, "status": status}

@@ -29,7 +29,6 @@ class TemplateDef:
     param_style: str  # "named" or "positional"
     fields: tuple[TemplateField, ...]
     has_confirm_cancel_buttons: bool = False
-    supports_image_header: bool = False
 
 
 _CONFIRMATION_FIELDS = (
@@ -45,11 +44,11 @@ TEMPLATE_CATALOG: dict[str, TemplateDef] = {
     "cod_confirmation": TemplateDef(
         label="COD Confirmation", language="en", param_style="named",
         fields=_CONFIRMATION_FIELDS,
-        has_confirm_cancel_buttons=True, supports_image_header=True,
+        has_confirm_cancel_buttons=True,
     ),
     "prepaid_order": TemplateDef(
         label="Prepaid Order Confirmation", language="en", param_style="named",
-        fields=_CONFIRMATION_FIELDS, supports_image_header=True,
+        fields=_CONFIRMATION_FIELDS,
     ),
     "order_shipped": TemplateDef(
         label="Shipped Notice", language="en", param_style="positional",

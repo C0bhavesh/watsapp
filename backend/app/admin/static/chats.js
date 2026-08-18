@@ -48,6 +48,13 @@ const STATUS_LABELS = {
   queued: "Queued",
 };
 
+// A template resend's success outcome (Finding 4): "sent" closes the dialog; any other outcome is
+// NOT delivered, so we keep the dialog open and say so rather than closing as if it went out.
+const TEMPLATE_STATUS_NOTES = {
+  queued: "Queued — send mode is off. It will go out when sending is enabled.",
+  suppressed: "Withheld by send policy (shadow/allowlist mode) — not delivered.",
+};
+
 function formatBubbleTime(isoTimestamp) {
   if (!isoTimestamp) return "";
   const d = new Date(isoTimestamp);
@@ -127,6 +134,9 @@ function renderTemplateFieldForm(orderName, tmpl) {
     const input = document.createElement("input");
     input.type = "text";
     input.value = field.value || "";
+    // Finding 3: the server pins order_id to the resolved order name regardless of what is
+    // submitted, so show it read-only rather than as an editable field that is silently overridden.
+    if (field.read_only) input.disabled = true;
     inputs[field.key] = input;
     row.appendChild(label);
     row.appendChild(input);
@@ -137,26 +147,44 @@ function renderTemplateFieldForm(orderName, tmpl) {
   sendBtn.id = "template-send-btn";
   sendBtn.type = "button";
   sendBtn.textContent = "Send";
+  // Finding 2: the template dialog is a full-viewport overlay, so the error must land INSIDE it
+  // (a previous version wrote to #reply-status, which sits BEHIND the modal and was invisible).
+  const templateStatus = document.createElement("div");
+  templateStatus.id = "template-status";
+  templateStatus.className = "template-status";
   sendBtn.addEventListener("click", async () => {
     if (currentThreadId === null) return;
     sendBtn.disabled = true;
+    templateStatus.textContent = "";
     const values = {};
     for (const key in inputs) values[key] = inputs[key].value;
     try {
-      await api(
+      const result = await api(
         "/admin/conversations/" + encodeURIComponent(currentThreadId) + "/templates",
         "POST",
         { order_name: orderName, template: tmpl.key, values }
       );
-      closeTemplateDialog();
       await loadThread(currentThreadId, currentPhone);
+      const sendStatus = result && result.status;
+      if (sendStatus && sendStatus !== "sent") {
+        // Enqueued or withheld, not delivered: keep the dialog open, say so, and leave Send
+        // disabled -- the row is already queued, a second click would double-send (Finding 4).
+        templateStatus.textContent =
+          TEMPLATE_STATUS_NOTES[sendStatus] || ("Not sent: " + sendStatus);
+      } else {
+        closeTemplateDialog();
+      }
     } catch (e) {
-      el("reply-status").textContent = e.message;
-    } finally {
+      // Finding 2: show the failure in the dialog, and relabel to "Retry" so an accidental
+      // second click cannot silently fire a duplicate send -- retrying is now a deliberately
+      // different action, and a rapid double-click is already blocked by the disable-on-start.
+      templateStatus.textContent = e.message;
+      sendBtn.textContent = "Retry";
       sendBtn.disabled = false;
     }
   });
   body.appendChild(sendBtn);
+  body.appendChild(templateStatus);
 }
 
 function renderTemplatePickList(data) {

@@ -256,3 +256,21 @@ def test_chats_js_wires_emoji_insert_and_template_send(client: TestClient) -> No
     assert "/templates" in js
     assert "emoji-btn" in js
     assert "template-btn" in js
+
+
+def test_chats_js_template_error_lands_in_dialog_local_status(client: TestClient) -> None:
+    # Finding 2: the template dialog is a full-viewport overlay, so a send failure must render in
+    # a dialog-local status element (template-status), NOT #reply-status which sits behind the
+    # modal and is invisible while the dialog is open. Assert the new target exists in the send
+    # handler and the failure path relabels Send to "Retry" (a deliberate distinct retry action).
+    js = client.get("/admin/ui/chats.js").text
+    assert "template-status" in js
+    assert "Retry" in js
+
+
+def test_chats_js_template_send_surfaces_non_sent_outcome(client: TestClient) -> None:
+    # Finding 4: a queued/suppressed outcome must not close the dialog as if it went out; the
+    # handler reads result.status and shows a note for anything other than "sent".
+    js = client.get("/admin/ui/chats.js").text
+    assert "TEMPLATE_STATUS_NOTES" in js
+    assert "result.status" in js or "sendStatus" in js

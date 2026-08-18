@@ -225,6 +225,15 @@
   Both features are now pushed to `main` and deployed to production (`thetavas-bot.vercel.app`,
   `/health` verified `ok` post-deploy). See the sub-project 1c and 1e rows below for what shipped.
 
+- [CHECKPOINT] Admin Manual Reply (Task 1: messages.sender) — schema migration must be confirmed run before deployment. The new `messages.sender` column is read **unconditionally** in `PostgresConversationStore.recent_messages` (a hot path: `core/memory.py::load_history` → `core/conversation.py::run_turn`, which wraps its body in a blanket `except Exception`). If this code is deployed to production BEFORE the owner runs the migration, every customer turn will raise `UndefinedColumnError`, the exception will be silently swallowed, the webhook still 200s, and the customer receives ZERO bot replies — silent total outage. See `error_learnings.md` [2026-08-18] entry for the full incident pattern.
+  
+  Required SQL (documented in `backend/app/store/schema.sql`):
+  ```sql
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender text;
+  ```
+  
+  **Status: PENDING — deployment of any admin-manual-reply feature code is blocked until the owner confirms this migration has been applied to production.**
+
 - ~~Q16 (2026-08-12) — phone-match scope for the database-first order-Q&A lookup.~~ **ANSWERED
   + IMPLEMENTED (2026-08-12): use the shipping mobile number.** Matches a real data constraint —
   checkout doesn't always capture the buyer's own phone on the order record, but shipping phone is

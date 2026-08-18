@@ -98,7 +98,7 @@ def parse_order_created(payload: dict) -> IncomingOrder | None:  # type: ignore[
     # cod_confirmation template. Absent line items leave every product field None.
     line_items = _seq(payload.get("line_items"))
     first_item = _d(line_items[0]) if line_items else {}
-    product_color, product_size = _split_variant_options(_s(first_item.get("variant_title")))
+    product_color, product_size = split_variant_options(_s(first_item.get("variant_title")))
     return IncomingOrder(
         gid=gid,
         name=name,
@@ -118,7 +118,7 @@ def parse_order_created(payload: dict) -> IncomingOrder | None:  # type: ignore[
     )
 
 
-def _split_variant_options(variant_title: str | None) -> tuple[str | None, str | None]:
+def split_variant_options(variant_title: str | None) -> tuple[str | None, str | None]:
     """Split a Shopify variant title into (colour, size) for the cod_confirmation template.
 
     Shopify joins a variant's option values with `` / `` (e.g. ``"Cream / M"`` = Color / Size), so

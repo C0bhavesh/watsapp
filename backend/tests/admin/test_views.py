@@ -235,6 +235,12 @@ def test_conversations_list_does_not_corrupt_recency_on_reload(client: TestClien
     client.get("/admin/conversations")
 
     first = client.get("/admin/conversations").json()
+    # NOTE (2026-08-19): since recent_conversations() excludes message-less rows (the thread-list
+    # sort-order fix), this store-level comparison only meaningfully covers the messaged thread
+    # (+919664290413) -- the outbound-only thread (+918888888888) has no `messages` rows, so it is
+    # correctly absent from both `before` and `after` here, degenerating to a no-op check for it.
+    # `first == second` above/below is what still covers the outbound-only case, via
+    # GET /admin/conversations' union of all three sources.
     before = {
         s.user_id: s.last_active_at
         for s in asyncio.run(c.conversations.recent_conversations(1000))

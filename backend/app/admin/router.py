@@ -770,9 +770,14 @@ async def list_conversations(
             customer_name = name or None
         order_names = [o.name for o in orders_for_phone]
 
+        unread_count = await c.conversations.count_unread_messages(thread_id)
+        paused_until = await c.conversations.get_paused_until(thread_id)
+        ai_paused = paused_until is not None and paused_until > datetime.now(UTC)
+
         result.append(
             {"thread_id": thread_id, "phone": norm, "last_active_at": last_active,
-             "preview": preview, "customer_name": customer_name, "order_names": order_names}
+             "preview": preview, "customer_name": customer_name, "order_names": order_names,
+             "unread_count": unread_count, "ai_paused": ai_paused}
         )
 
     result.sort(key=lambda r: str(r["last_active_at"] or ""), reverse=True)
@@ -883,6 +888,10 @@ async def get_conversation_thread(thread_id: int) -> dict[str, object]:
     order_summaries = [_order_summary(o) for o in orders_sorted]
 
     paused_until = await c.conversations.get_paused_until(thread_id)
+    # Opening a thread (this endpoint fires both on click-open and on every 3s poll tick while it
+    # stays open) marks it read. Placed last so a failure here can never prevent the entries/orders
+    # payload from returning -- worst case a badge stays stale one tick, never a broken thread view.
+    await c.conversations.mark_read(thread_id, datetime.now(UTC))
     return {
         "entries": entries,
         "orders": order_summaries,

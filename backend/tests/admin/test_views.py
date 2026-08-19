@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -130,6 +131,74 @@ def test_conversations_list_shows_recent_threads(client: TestClient) -> None:
     row = next(r for r in rows if r["phone"] == "+919664290413")
     assert isinstance(row["thread_id"], int)
     assert row["preview"]
+
+
+def test_conversations_list_shows_unread_count_for_new_customer_message(
+    client: TestClient,
+) -> None:
+    login(client)
+    _send_ai_message("+919664290413", "hi", "hello there")
+    thread_id = _thread_id_for(client, "+919664290413")
+    # Opening the thread marks it read as of now; a message that arrives AFTER that must count.
+    client.get(f"/admin/conversations/{thread_id}")
+    # This machine's clock resolution is coarse enough that back-to-back datetime.now(UTC) calls
+    # can tie (confirmed empirically -- consecutive calls returned the identical value in >99.9%
+    # of a tight-loop sample), which would make the strict created_at > last_read_at comparison
+    # in count_unread_messages silently miss this message. A small sleep guarantees the new
+    # message's timestamp is unambiguously later than the mark_read stamp above.
+    time.sleep(0.05)
+
+    async def _new_customer_message() -> None:
+        await get_container().conversations.append_message(thread_id, "user", "still there?")
+
+    asyncio.run(_new_customer_message())
+
+    rows = client.get("/admin/conversations").json()
+    row = next(r for r in rows if r["thread_id"] == thread_id)
+    assert row["unread_count"] == 1
+
+
+def test_opening_thread_clears_unread_count(client: TestClient) -> None:
+    login(client)
+    _send_ai_message("+919664290413", "hi", "hello there")
+    thread_id = _thread_id_for(client, "+919664290413")
+    # See the sibling test above for why this sleep is needed on this machine's coarse clock.
+    time.sleep(0.05)
+
+    async def _new_customer_message() -> None:
+        await get_container().conversations.append_message(thread_id, "user", "still there?")
+
+    asyncio.run(_new_customer_message())
+    before = client.get("/admin/conversations").json()
+    row_before = next(r for r in before if r["thread_id"] == thread_id)
+    assert row_before["unread_count"] >= 1
+
+    client.get(f"/admin/conversations/{thread_id}")
+
+    after = client.get("/admin/conversations").json()
+    row_after = next(r for r in after if r["thread_id"] == thread_id)
+    assert row_after["unread_count"] == 0
+
+
+def test_conversations_list_reports_ai_paused_while_handed_off(client: TestClient) -> None:
+    login(client)
+    _send_ai_message("+919664290413", "hi", "hello there")
+    thread_id = _thread_id_for(client, "+919664290413")
+    future = datetime.now(UTC) + timedelta(hours=1)
+    asyncio.run(get_container().conversations.pause_until(thread_id, future))
+
+    rows = client.get("/admin/conversations").json()
+    row = next(r for r in rows if r["thread_id"] == thread_id)
+    assert row["ai_paused"] is True
+
+
+def test_conversations_list_reports_ai_not_paused_by_default(client: TestClient) -> None:
+    login(client)
+    _send_ai_message("+919664290413", "hi", "hello there")
+
+    rows = client.get("/admin/conversations").json()
+    row = next(r for r in rows if r["phone"] == "+919664290413")
+    assert row["ai_paused"] is False
 
 
 def test_conversations_list_includes_outbound_only_customer(client: TestClient) -> None:

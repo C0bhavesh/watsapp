@@ -1498,3 +1498,21 @@ class PostgresConversationStore:
                 "SELECT handoff_attempted_at FROM conversations WHERE id = $1", conversation_id
             )
         return None if row is None else row["handoff_attempted_at"]
+
+    async def mark_read(self, conversation_id: int, at: datetime) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE conversations SET last_read_at = $1 WHERE id = $2", at, conversation_id
+            )
+
+    async def count_unread_messages(self, conversation_id: int) -> int:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT COUNT(*) AS n"
+                " FROM messages m"
+                " JOIN conversations c ON c.id = m.conversation_id"
+                " WHERE m.conversation_id = $1 AND m.role = 'user'"
+                "   AND m.created_at > c.last_read_at",
+                conversation_id,
+            )
+        return int(row["n"]) if row is not None else 0

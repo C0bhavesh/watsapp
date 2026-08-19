@@ -295,3 +295,27 @@ async def test_mark_read_clears_unread_count() -> None:
     assert await store.count_unread_messages(conversation_id) == 1
     await store.mark_read(conversation_id, datetime.now(UTC))
     assert await store.count_unread_messages(conversation_id) == 0
+
+
+@pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"), reason="needs TEST_DATABASE_URL")
+async def test_unread_count_roundtrip_postgres() -> None:
+    import uuid
+
+    from app.store.pg_factory import LazyPool
+    from app.store.postgres import PostgresConversationStore
+
+    pool = LazyPool(os.environ["TEST_DATABASE_URL"])
+    store = PostgresConversationStore(pool)
+    user_id = f"test-wa-id-{uuid.uuid4()}"
+    conversation_id = await store.get_or_create(user_id)
+    assert await store.count_unread_messages(conversation_id) == 0
+
+    old = datetime(2020, 1, 1, tzinfo=UTC)
+    await store.mark_read(conversation_id, old)
+    await store.append_message(conversation_id, "user", "hi")
+    await store.append_message(conversation_id, "assistant", "hello")
+    assert await store.count_unread_messages(conversation_id) == 1
+
+    await store.mark_read(conversation_id, datetime.now(UTC))
+    assert await store.count_unread_messages(conversation_id) == 0
+    await pool.close()

@@ -69,6 +69,13 @@ def test_login_cookie_not_secure_in_dev(client: TestClient) -> None:
     assert "Secure" not in set_cookie
 
 
+def test_login_cookie_max_age_is_30_days(client: TestClient) -> None:
+    r = client.post("/admin/login", json={"password": "test-admin-pass"})
+    assert r.status_code == 200
+    set_cookie = r.headers.get("set-cookie", "")
+    assert "max-age=2592000" in set_cookie.lower()
+
+
 def test_login_cookie_secure_in_prod_ignores_forwarded_proto(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -219,6 +219,13 @@ class LoginRequest(BaseModel):
     password: str = Field(max_length=256)
 
 
+# Owner-directed (client-decisions-all.md Q20/A, confirmed 30-day duration, 2026-08-19): a
+# device already logged in should rarely need the password again. Single source of truth for
+# BOTH issue_token's ttl_hours and the cookie's max_age, so the two can never independently
+# drift out of sync (the prior code kept them in sync only via a comment).
+ADMIN_SESSION_TTL_HOURS = 24 * 30
+
+
 @admin_router.post("/login")
 @limiter.limit("5/minute")
 async def login(request: Request, req: LoginRequest, response: Response) -> dict[str, bool]:
@@ -231,7 +238,7 @@ async def login(request: Request, req: LoginRequest, response: Response) -> dict
         _audit("login", "failure")
         raise HTTPException(status_code=401, detail="invalid password")
     _audit("login", "success")
-    token = issue_token(settings.app_master_key, _now())
+    token = issue_token(settings.app_master_key, _now(), ttl_hours=ADMIN_SESSION_TTL_HOURS)
     response.set_cookie(
         "admin_session",
         token,
@@ -240,7 +247,7 @@ async def login(request: Request, req: LoginRequest, response: Response) -> dict
         # Secure derived from server config, never a client header: prod (TLS-terminated at
         # Vercel) always forces Secure; dev/tests over http stay usable (app_env defaults to dev).
         secure=settings.app_env == "prod",
-        max_age=12 * 3600,  # keep in sync with issue_token ttl_hours
+        max_age=ADMIN_SESSION_TTL_HOURS * 3600,
         path="/admin",
     )
     return {"ok": True}

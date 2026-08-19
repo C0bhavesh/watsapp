@@ -240,11 +240,13 @@
   (`thetavas-bot.vercel.app`, `/health` verified `ok`). See the "Admin chat unread marker + filter
   chips" row at the top of this table for the full summary.
 
-- **[CHECKPOINT] Admin auth: password-protection posture for the WhatsApp admin chat page —
-  ON HOLD, awaiting client answer.** See client-decisions-all.md, Part 8, Q20. No code changed —
-  this is purely a pending decision, not a migration or a shipped-but-unpushed feature. The page
-  currently keeps its existing 12-hour session + per-device password login unchanged until the
-  client answers A/B/C.
+- ~~[CHECKPOINT] Admin auth: password-protection posture for the WhatsApp admin chat page.~~
+  **RESOLVED (2026-08-19): client answered A (keep the password, extend the session), owner
+  confirmed 30 days.** See client-decisions-all.md, Part 8, Q20. Built + code-reviewed
+  (APPROVE) + security-reviewed (sound mechanism, no defect; one pre-existing revocation gap
+  flagged as informational, not blocking, logged in the same Q20 entry). No schema migration —
+  nothing for Supabase. **Not yet pushed** — commit `6e002ea` on local `main`, awaiting owner
+  review/push approval.
 
 - **[CHECKPOINT] Delivery-failure error-code capture (bug fix, REVIEW 2026-08-19) — schema
   migration, NOT YET RUN.** Run this in Supabase BEFORE this fix is pushed/deployed:

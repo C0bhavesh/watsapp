@@ -309,7 +309,21 @@ full order/chat history for every customer.
   payment gateways/couriers/service providers as needed to fulfil orders, this option is worth
   weighing against that commitment before choosing it.
 
-Marked ON HOLD pending your answer — nothing has been changed yet.
+**✅ ANSWERED (2026-08-19): A, keep the password, extend the session to 30 days.** Built as
+`ADMIN_SESSION_TTL_HOURS = 24 * 30` in `backend/app/admin/router.py` — a single named constant
+used for both the signed token's expiry and the cookie's `max_age`, replacing two previously
+independently-maintained magic numbers. No other cookie flag changed (`httponly`, `samesite`,
+`secure`, `path` all unchanged). Design: `docs/superpowers/specs/2026-08-19-admin-session-ttl-design.md`;
+plan: `docs/superpowers/plans/2026-08-19-admin-session-ttl.md`. Code-reviewer: APPROVE, no
+findings. Security-reviewer: sound mechanism at 30 days, no defect introduced — but flagged one
+pre-existing gap worth knowing about, worsened in real-world impact by the longer session: there
+is no way to end a specific session early if a device is lost or a shared device is used (no
+`/admin/logout`), and the only theoretical "revoke everything" lever — rotating `APP_MASTER_KEY`
+— would also break decryption of every stored credential (Shopify tokens, WhatsApp token) unless
+combined with a re-encryption migration, so it is not a real usable option today. This was already
+true at 12 hours; a 30-day session just means a compromised/lost device now stays accessible for
+up to 30 days instead of up to 12 hours if this is ever hit. Not blocking — flagging so it can be
+weighed and decided separately, not folded into this change unasked.
 
 ## ✅ ANSWERED (2026-08-12)
 

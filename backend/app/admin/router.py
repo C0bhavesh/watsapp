@@ -889,9 +889,13 @@ async def get_conversation_thread(thread_id: int) -> dict[str, object]:
 
     paused_until = await c.conversations.get_paused_until(thread_id)
     # Opening a thread (this endpoint fires both on click-open and on every 3s poll tick while it
-    # stays open) marks it read. Placed last so a failure here can never prevent the entries/orders
-    # payload from returning -- worst case a badge stays stale one tick, never a broken thread view.
-    await c.conversations.mark_read(thread_id, datetime.now(UTC))
+    # stays open) marks it read. Placed last and guarded so a failure here can never prevent the
+    # entries/orders payload from returning -- worst case a badge stays stale one tick, never a
+    # broken thread view.
+    try:
+        await c.conversations.mark_read(thread_id, datetime.now(UTC))
+    except Exception:
+        logger.warning("failed to mark thread %s as read", thread_id)
     return {
         "entries": entries,
         "orders": order_summaries,

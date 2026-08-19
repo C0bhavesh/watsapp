@@ -1500,9 +1500,17 @@ class PostgresConversationStore:
         return None if row is None else row["handoff_attempted_at"]
 
     async def mark_read(self, conversation_id: int, at: datetime) -> None:
+        # last_read_at is compared against messages.created_at (DB-server DEFAULT now()) in
+        # count_unread_messages, but `at` is stamped by the FastAPI process's own clock -- a
+        # different clock domain, only NTP-close, not identical. GREATEST($1, now()) guarantees
+        # the STORED value is never earlier than the DB's own clock, so the later strict
+        # comparison always draws both sides from the same clock domain (see error_learnings.md
+        # 2026-08-19 "app-clock vs DB-clock mark_read").
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "UPDATE conversations SET last_read_at = $1 WHERE id = $2", at, conversation_id
+                "UPDATE conversations SET last_read_at = GREATEST($1, now()) WHERE id = $2",
+                at,
+                conversation_id,
             )
 
     async def count_unread_messages(self, conversation_id: int) -> int:

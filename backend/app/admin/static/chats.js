@@ -63,6 +63,13 @@ function formatBubbleTime(isoTimestamp) {
     .toLowerCase();
 }
 
+function formatBubbleDate(isoTimestamp) {
+  if (!isoTimestamp) return "";
+  const d = new Date(isoTimestamp);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString();
+}
+
 const REPLY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 const EMOJI_LIST = [
@@ -320,6 +327,13 @@ function renderBubble(entry) {
   return div;
 }
 
+function renderDateDivider(dateLabel) {
+  const div = document.createElement("div");
+  div.className = "date-divider";
+  div.textContent = dateLabel;
+  return div;
+}
+
 function renderOrderDetail(order) {
   el("order-number").textContent = order.order_name;
 
@@ -451,7 +465,13 @@ async function loadThread(threadId, phone, silent = false) {
     if (!data.entries.length) {
       container.innerHTML = '<div id="chat-empty">No messages yet</div>';
     } else {
+      let lastRenderedDate = "";
       for (const entry of data.entries) {
+        const entryDate = formatBubbleDate(entry.timestamp);
+        if (entryDate && entryDate !== lastRenderedDate) {
+          container.appendChild(renderDateDivider(entryDate));
+          lastRenderedDate = entryDate;
+        }
         container.appendChild(renderBubble(entry));
       }
       container.scrollTop = container.scrollHeight;

@@ -32,8 +32,12 @@ async def test_find_messages_by_user_id_unknown_user_returns_empty_no_create() -
 
 async def test_recent_conversations_ordered_by_last_active_desc() -> None:
     store = InMemoryConversationStore()
-    await store.get_or_create("919664290413")
-    await store.get_or_create("917000000000")
+    conv1 = await store.get_or_create("919664290413")
+    conv2 = await store.get_or_create("917000000000")
+    # Both must have at least one message to qualify for recent_conversations (message-less rows
+    # are excluded -- see the two tests below).
+    await store.append_message(conv1, "user", "hi")
+    await store.append_message(conv2, "user", "hi")
     # touch() (genuine activity) bumps the FIRST one so it becomes the most recently active.
     await store.touch("919664290413")
 
@@ -46,7 +50,8 @@ async def test_get_or_create_does_not_bump_last_active_on_existing() -> None:
     # The bug: get_or_create used to bump last_active_at on every call (even an already-existing
     # row), so the display-only admin thread-list lookup corrupted recency on every page load.
     store = InMemoryConversationStore()
-    await store.get_or_create("919664290413")
+    conv_id = await store.get_or_create("919664290413")
+    await store.append_message(conv_id, "user", "hi")  # qualify for recent_conversations
     first = (await store.recent_conversations())[0].last_active_at
 
     await store.get_or_create("919664290413")  # a genuine no-op for recency now
@@ -58,6 +63,7 @@ async def test_get_or_create_does_not_bump_last_active_on_existing() -> None:
 async def test_touch_bumps_last_active_on_existing() -> None:
     store = InMemoryConversationStore()
     conv_id = await store.get_or_create("919664290413")
+    await store.append_message(conv_id, "user", "hi")  # qualify for recent_conversations
     # Pin an old stamp so the assertion is deterministic on coarse clocks (two now() calls can
     # otherwise land in the same tick and compare equal).
     store._last_active_at[conv_id] = datetime(2020, 1, 1, tzinfo=UTC)  # type: ignore[attr-defined]
@@ -67,6 +73,30 @@ async def test_touch_bumps_last_active_on_existing() -> None:
     after = (await store.recent_conversations())[0].last_active_at
 
     assert before is not None and after is not None and after > before
+
+
+async def test_recent_conversations_excludes_message_less_conversation() -> None:
+    # The bug: a conversation row created via get_or_create for a customer who has only ever
+    # received OUTBOUND messages (no inbound chat -> no rows in `messages`) picks up the column's
+    # creation-time DEFAULT now() and used to surface in recent_conversations as if it were genuine
+    # recent activity, permanently outranking real recency from other sources.
+    store = InMemoryConversationStore()
+    await store.get_or_create("919664290413")  # no append_message call -- mirrors the real bug
+
+    summaries = await store.recent_conversations(limit=10)
+
+    assert "919664290413" not in [s.user_id for s in summaries]
+
+
+async def test_recent_conversations_includes_conversation_with_messages() -> None:
+    # Regression guard: the message-less filter must not over-exclude a genuine chat thread.
+    store = InMemoryConversationStore()
+    conv_id = await store.get_or_create("919664290413")
+    await store.append_message(conv_id, "user", "where is my order")
+
+    summaries = await store.recent_conversations(limit=10)
+
+    assert "919664290413" in [s.user_id for s in summaries]
 
 
 async def test_touch_missing_conversation_is_noop() -> None:

@@ -708,7 +708,9 @@ async def list_conversations(
     # Union distinct phones across all THREE sources so a customer who only ever received an order
     # confirmation (no conversation row) still appears. Normalize every candidate to E.164 before
     # deduping so one customer is never listed twice under two formats. get_or_create below is a
-    # display-only lookup and no longer bumps last_active_at, so captured recency stays truthful.
+    # display-only lookup: its ON CONFLICT branch is a self-assignment (no bump on an existing
+    # row), and recent_conversations() excludes any message-less row entirely -- so a brand-new
+    # row's creation-time DEFAULT now() stamp can never leak into this union as fake recency.
     last_active_by_phone: dict[str, str | None] = {}
     ordered_phones: list[str] = []
     seen: set[str] = set()

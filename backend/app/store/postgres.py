@@ -1356,8 +1356,9 @@ class PostgresConversationStore:
     async def recent_conversations(self, limit: int = 50) -> list[ConversationSummary]:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT user_id, last_active_at FROM conversations"
-                " ORDER BY last_active_at DESC LIMIT $1",
+                "SELECT c.user_id, c.last_active_at FROM conversations c"
+                " WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)"
+                " ORDER BY c.last_active_at DESC LIMIT $1",
                 limit,
             )
         return [

@@ -189,7 +189,8 @@ async def _last_active_pg(store: PostgresConversationStore, user_id: str) -> str
 async def test_get_or_create_no_bump_then_touch_pg(pool: LazyPool) -> None:
     store = PostgresConversationStore(pool)
     user_id = f"+91{uuid.uuid4().int % 10**10:010d}"
-    await store.get_or_create(user_id)
+    conv_id = await store.get_or_create(user_id)
+    await store.append_message(conv_id, "user", "hi")  # qualify for recent_conversations
     first = await _last_active_pg(store, user_id)
 
     # Second get_or_create is a display-only lookup -- must NOT bump last_active_at.
@@ -205,6 +206,32 @@ async def test_touch_missing_conversation_is_noop_pg(pool: LazyPool) -> None:
     store = PostgresConversationStore(pool)
     # Touching a non-existent user must not raise or create a row.
     await store.touch(f"no-such-{uuid.uuid4()}")
+
+
+async def test_recent_conversations_excludes_message_less_conversation_pg(
+    pool: LazyPool,
+) -> None:
+    # The bug: a conversation row created via get_or_create for a customer who has only ever
+    # received OUTBOUND messages (no inbound chat -> no rows in `messages`) picks up the column's
+    # creation-time DEFAULT now() and used to surface in recent_conversations as if it were genuine
+    # recent activity, permanently outranking real recency from other sources.
+    store = PostgresConversationStore(pool)
+    user_id = f"+91{uuid.uuid4().int % 10**10:010d}"
+    await store.get_or_create(user_id)  # no append_message call -- mirrors the real bug
+
+    assert await _last_active_pg(store, user_id) is None
+
+
+async def test_recent_conversations_includes_conversation_with_messages_pg(
+    pool: LazyPool,
+) -> None:
+    # Regression guard: the message-less filter must not over-exclude a genuine chat thread.
+    store = PostgresConversationStore(pool)
+    user_id = f"+91{uuid.uuid4().int % 10**10:010d}"
+    conv_id = await store.get_or_create(user_id)
+    await store.append_message(conv_id, "user", "where is my order")
+
+    assert await _last_active_pg(store, user_id) is not None
 
 
 async def test_find_order_actions_by_wa_ids_dual_key_pg(pool: LazyPool) -> None:

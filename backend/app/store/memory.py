@@ -887,8 +887,16 @@ class InMemoryConversationStore:
         return [_message_view(r) for r in self._messages.get(conversation_id, [])[-limit:]]
 
     async def recent_conversations(self, limit: int = 50) -> list[ConversationSummary]:
+        # A conversation row with zero messages must never surface here -- a brand-new row created
+        # by get_or_create's display-only lookup (e.g. a customer who only ever received an
+        # outbound template, never sent one) picks up a creation-time stamp, not real activity.
+        with_messages = [
+            (user_id, conv_id)
+            for user_id, conv_id in self._conversations.items()
+            if self._messages.get(conv_id)
+        ]
         ordered = sorted(
-            self._conversations.items(),
+            with_messages,
             key=lambda item: self._last_active_at.get(item[1], datetime.min.replace(tzinfo=UTC)),
             reverse=True,
         )

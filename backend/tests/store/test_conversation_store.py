@@ -267,3 +267,31 @@ async def test_manual_reply_row_is_eligible_for_delivery_retry_lookup_postgres()
     assert info is not None
     assert info.content == "Delayed by a day, sorry!"
     await pool.close()
+
+
+async def test_mark_read_defaults_to_creation_time_so_new_thread_has_no_unread() -> None:
+    store = InMemoryConversationStore()
+    conversation_id = await store.get_or_create("919999999999")
+    assert await store.count_unread_messages(conversation_id) == 0
+
+
+async def test_unread_count_reflects_only_user_messages_after_last_read() -> None:
+    store = InMemoryConversationStore()
+    conversation_id = await store.get_or_create("919999999999")
+    old = datetime(2020, 1, 1, tzinfo=UTC)
+    await store.mark_read(conversation_id, old)
+    await store.append_message(conversation_id, "user", "hi")
+    await store.append_message(conversation_id, "assistant", "hello")
+    await store.append_message(conversation_id, "user", "still there?")
+    assert await store.count_unread_messages(conversation_id) == 2
+
+
+async def test_mark_read_clears_unread_count() -> None:
+    store = InMemoryConversationStore()
+    conversation_id = await store.get_or_create("919999999999")
+    old = datetime(2020, 1, 1, tzinfo=UTC)
+    await store.mark_read(conversation_id, old)
+    await store.append_message(conversation_id, "user", "hi")
+    assert await store.count_unread_messages(conversation_id) == 1
+    await store.mark_read(conversation_id, datetime.now(UTC))
+    assert await store.count_unread_messages(conversation_id) == 0

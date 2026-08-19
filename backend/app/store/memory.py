@@ -753,6 +753,9 @@ class InMemoryConversationStore:
         # corrupt recency). Needed so recent_conversations can order threads by recency, same as
         # the Postgres index does.
         self._last_active_at: dict[int, datetime] = {}
+        # Mirrors conversations.last_read_at (DEFAULT now() in Postgres). Stamped at row creation
+        # so a brand-new thread starts with zero unread, exactly like the Postgres column default.
+        self._last_read_at: dict[int, datetime] = {}
         self._next_id = 1
 
     async def get_or_create(self, user_id: str) -> int:
@@ -766,6 +769,7 @@ class InMemoryConversationStore:
             # First-creation stamp only (mirrors the Postgres DEFAULT now()); an existing row is
             # left untouched so a display-only lookup never bumps recency.
             self._last_active_at[self._next_id] = datetime.now(UTC)
+            self._last_read_at[self._next_id] = datetime.now(UTC)
             self._next_id += 1
         return self._conversations[user_id]
 
@@ -910,3 +914,17 @@ class InMemoryConversationStore:
 
     async def get_handoff_attempted_at(self, conversation_id: int) -> datetime | None:
         return self._handoff_attempted_at.get(conversation_id)
+
+    async def mark_read(self, conversation_id: int, at: datetime) -> None:
+        self._last_read_at[conversation_id] = at
+
+    async def count_unread_messages(self, conversation_id: int) -> int:
+        last_read = self._last_read_at.get(conversation_id, datetime.min.replace(tzinfo=UTC))
+        count = 0
+        for row in self._messages.get(conversation_id, []):
+            if row.role != "user":
+                continue
+            created = _parse_iso(row.created_at)
+            if created is not None and created > last_read:
+                count += 1
+        return count

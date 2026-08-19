@@ -389,3 +389,16 @@ class ConversationStore(Protocol):
     async def mark_handoff_attempted(self, conversation_id: int, at: datetime) -> None: ...
 
     async def get_handoff_attempted_at(self, conversation_id: int) -> datetime | None: ...
+
+    # Admin "unread" tracking (2026-08-19). Stamps the moment the owner opened this thread in the
+    # admin chat page -- called from GET /admin/conversations/{thread_id}, which fires both on
+    # thread-open and on every 3s poll tick while that thread stays open, so "read on open" and
+    # "stays read while viewing" both fall out of this one call site.
+    async def mark_read(self, conversation_id: int, at: datetime) -> None: ...
+
+    # Count of customer (role="user") messages strictly newer than this conversation's
+    # last_read_at. Encapsulates the "since" comparison in the store so callers never read a
+    # raw last_read_at themselves. A brand-new conversation (mark_read never called) has
+    # last_read_at defaulted to its creation time (mirrors the Postgres column's DEFAULT now()),
+    # so it starts at 0, not a flood of pre-existing history.
+    async def count_unread_messages(self, conversation_id: int) -> int: ...

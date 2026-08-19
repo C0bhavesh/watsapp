@@ -190,22 +190,47 @@ function renderTemplateFieldForm(orderName, tmpl) {
 function renderTemplatePickList(data) {
   const body = el("template-dialog-body");
   body.innerHTML = "";
-  for (const orderEntry of data.orders) {
-    const heading = document.createElement("div");
-    heading.className = "template-pick-heading";
-    heading.textContent = orderEntry.order_name;
-    body.appendChild(heading);
+  if (!data.orders.length) {
+    body.textContent = "No orders found for this customer.";
+    return;
+  }
+
+  // One <option> per order; data.orders is already most-recent-first from the API,
+  // so option 0 (pre-selected) is the newest order -- no extra sorting needed.
+  const select = document.createElement("select");
+  select.className = "template-order-select";
+  data.orders.forEach((orderEntry, index) => {
+    const option = document.createElement("option");
+    option.value = String(index);
+    option.textContent = orderEntry.order_name;
+    select.appendChild(option);
+  });
+  body.appendChild(select);
+
+  const list = document.createElement("div");
+  list.className = "template-pick-list";
+  body.appendChild(list);
+
+  // Re-render only the list container for the selected order; all orders' templates
+  // are already in `data`, so switching orders needs no extra network call.
+  function renderTemplatesFor(index) {
+    const orderEntry = data.orders[index];
+    list.innerHTML = "";
+    if (!orderEntry.templates.length) {
+      list.textContent = "No templates available for this order.";
+      return;
+    }
     for (const tmpl of orderEntry.templates) {
       const row = document.createElement("div");
       row.className = "template-pick-row";
       row.textContent = tmpl.label;
       row.addEventListener("click", () => renderTemplateFieldForm(orderEntry.order_name, tmpl));
-      body.appendChild(row);
+      list.appendChild(row);
     }
   }
-  if (!data.orders.length) {
-    body.textContent = "No orders found for this customer.";
-  }
+
+  select.addEventListener("change", () => renderTemplatesFor(Number(select.value)));
+  renderTemplatesFor(0);
 }
 
 async function openTemplateDialog() {

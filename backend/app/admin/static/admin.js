@@ -324,7 +324,7 @@ async function loadViews() {
     const maps = await api("GET", "/admin/mappings");
     fillTable("mappings-table", maps, ["order_name", "phone_e164", "status", "is_cod", "created_at"]);
     const outbox = await api("GET", "/admin/outbox");
-    fillTable("outbox-table", outbox, ["dedupe_key", "state", "kind", "phone_e164", "attempts", "last_error_code"]);
+    fillTable("outbox-table", outbox, ["dedupe_key", "state", "delivery_status", "kind", "phone_e164", "attempts", "last_error_code"]);
     setStatus("views-status", "");
   } catch (e) { setStatus("views-status", e.message, "err"); }
 }

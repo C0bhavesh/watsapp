@@ -194,6 +194,40 @@ async def test_apply_outbound_delivery_status_returns_unchanged_on_duplicate_fai
     assert second == "unchanged"
 
 
+async def test_apply_outbound_delivery_status_failed_captures_error_code() -> None:
+    # A 'failed' status carrying Meta's error code persists it to last_error_code, surfaced both
+    # in the admin outbox view (recent_outbound) and to the retry logic (get_outbound_retry_info).
+    store = InMemoryIngestStore()
+    await _send_outbound(store, "gid://shopify/Order/1", "+919664290413", "wamid.ERR1")
+
+    applied = await store.apply_outbound_delivery_status(
+        "wamid.ERR1", "failed", error_code="131047"
+    )
+
+    assert applied == "applied"
+    view = (await store.recent_outbound(10))[0]
+    assert view.last_error_code == "131047"
+    assert view.delivery_status == "failed"
+    info = await store.get_outbound_retry_info("wamid.ERR1")
+    assert info is not None
+    assert info.last_error_code == "131047"
+
+
+async def test_apply_outbound_delivery_status_none_error_code_preserves_existing() -> None:
+    # COALESCE semantics: a later status with no error code must not wipe a previously-captured one.
+    store = InMemoryIngestStore()
+    await _send_outbound(store, "gid://shopify/Order/1", "+919664290413", "wamid.ERR2")
+    await store.apply_outbound_delivery_status("wamid.ERR2", "failed", error_code="131026")
+
+    # A non-failed status with no error code applies (still forward for a fresh row is n/a here --
+    # failed is terminal, so re-apply a 'failed' is unchanged) -- assert the code is preserved.
+    again = await store.apply_outbound_delivery_status("wamid.ERR2", "failed", error_code=None)
+
+    assert again == "unchanged"
+    view = (await store.recent_outbound(10))[0]
+    assert view.last_error_code == "131026"
+
+
 # --- IngestStore outbound retry-info + retry-record (Task 2) ---
 
 async def test_get_outbound_retry_info_returns_current_state() -> None:
@@ -452,6 +486,23 @@ async def test_apply_message_delivery_status_returns_unchanged_on_duplicate_fail
 
     assert first == "applied"
     assert second == "unchanged"
+
+
+async def test_apply_message_delivery_status_failed_captures_error_code() -> None:
+    store = InMemoryConversationStore()
+    conv_id = await store.get_or_create("+919876500055")
+    msg_id = await store.append_message(conv_id, "assistant", "hi")
+    await store.set_message_wamid(msg_id, "wamid.MERR1")
+
+    applied = await store.apply_message_delivery_status(
+        "wamid.MERR1", "failed", error_code="131047"
+    )
+
+    assert applied == "applied"
+    # No public view surfaces messages.last_error_code (Fix 2 only surfaces the outbound table);
+    # assert the internal row was written so the column is populated for future readers.
+    row = store._messages_by_id[msg_id]  # type: ignore[attr-defined]
+    assert row.last_error_code == "131047"
 
 
 # --- ConversationStore message retry-info + retry-record (Task 3) ---

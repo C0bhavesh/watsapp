@@ -27,10 +27,12 @@ async def apply_delivery_status(
     # outbound_messages first; only fall back to messages when the wamid was not in the first table.
     # The applied/unchanged distinction is what gates the retry below: "applied" is a fresh failure,
     # "unchanged" is a duplicate/regressive redelivery that must NOT retry-storm.
-    outbound_result = await c.ingest.apply_outbound_delivery_status(status.wamid, status.status)
+    outbound_result = await c.ingest.apply_outbound_delivery_status(
+        status.wamid, status.status, status.error_code
+    )
     if outbound_result == "not_found":
         message_result = await c.conversations.apply_message_delivery_status(
-            status.wamid, status.status
+            status.wamid, status.status, status.error_code
         )
     else:
         message_result = None
@@ -39,7 +41,15 @@ async def apply_delivery_status(
     # delivery failure caught only by prolonged manual diagnosis). Wamids are not secrets/PII, so
     # they are safe to log verbatim. Only a genuinely NEW failure ("applied") drives a resend.
     if status.status == "failed":
-        logger.warning("whatsapp delivery failed for wamid=%s", status.wamid)
+        # error_code/error_title are Meta's own delivery-failure code + label (from the status'
+        # errors[] array); like the wamid they are not PII/secrets, so they are safe to log
+        # verbatim and are the missing "why did this fail" signal this warning previously lacked.
+        logger.warning(
+            "whatsapp delivery failed for wamid=%s (error_code=%s error_title=%s)",
+            status.wamid,
+            status.error_code,
+            status.error_title,
+        )
         # Both retry branches need the same AdminControls (send mode + allowlist + owner alert
         # number), so load it once here rather than duplicating the call inside each branch.
         if outbound_result == "applied" or message_result == "applied":

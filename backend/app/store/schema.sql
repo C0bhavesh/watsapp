@@ -145,6 +145,14 @@ CREATE INDEX IF NOT EXISTS idx_messages_wamid ON messages (wamid) WHERE wamid IS
 -- OWNER-RUN manual migration -- nothing in the app executes schema.sql automatically; documented
 -- here as the source-of-truth DDL.
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS retry_count int NOT NULL DEFAULT 0;
+-- Latest Meta delivery-failure error code captured from a 'failed' delivery status' errors[]
+-- array (the messages-table sibling of outbound_messages.last_error_code, which already exists in
+-- the CREATE TABLE above). apply_message_delivery_status writes it via COALESCE alongside the
+-- guarded delivery_status update. Additive + idempotent (mirrors the wamid/delivery_status/
+-- retry_count ALTERs above), so it can be applied to a live table without a rewrite. NOTE: an
+-- OWNER-RUN manual migration -- nothing in the app executes schema.sql automatically; documented
+-- here as the source-of-truth DDL.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS last_error_code text;
 -- Display-only marker distinguishing a manually-typed admin reply from an AI-generated one
 -- (admin manual-reply feature). NULL means "AI" (every existing row, and every future
 -- AI-generated row); 'admin' marks a row sent via the admin panel's message box. Deliberately

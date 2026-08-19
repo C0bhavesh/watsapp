@@ -221,6 +221,54 @@ async def test_retry_failed_outbound_stops_and_alerts_at_max_retries(
     assert PHONE in str(text.calls[0]["body"])
 
 
+async def test_retry_failed_outbound_at_cap_marks_undeliverable_with_error_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # At the retry cap the row must transition out of 'sent' to 'undeliverable' (previously it was
+    # left as 'sent', rendering as a healthy send in the admin outbox view), stamped with the Meta
+    # error code captured from the failed status.
+    c = get_container()
+    gid = "gid://shopify/Order/9"
+    row_id = await _seed_outbound_sent(gid, "wamid.CAP1")
+    await c.ingest.apply_outbound_delivery_status("wamid.CAP1", "failed", error_code="131047")
+    for _ in range(MAX_RETRIES):
+        await c.ingest.record_outbound_retry(row_id, None)
+    controls = AdminControls(send_mode="live", owner_alert_number="+919999999999")
+    _install_template(monkeypatch, FakeTemplateSender(
+        SendResult(ok=True, status_code=200, wamid="wamid.NOPE", error=None)
+    ))
+    _install_text(monkeypatch, FakeTextSender())
+
+    await retry_failed_outbound(c, await _wa_cfg(), controls, "wamid.CAP1")
+
+    view = (await c.ingest.recent_outbound(10))[0]
+    assert view.state == "undeliverable"
+    assert view.last_error_code == "131047"
+
+
+async def test_retry_failed_outbound_at_cap_falls_back_to_retries_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No Meta error code was ever captured for this row (e.g. failures never carried an errors[]
+    # array) -> a sensible constant is used so the undeliverable state still records a reason.
+    c = get_container()
+    gid = "gid://shopify/Order/10"
+    row_id = await _seed_outbound_sent(gid, "wamid.CAP2")
+    for _ in range(MAX_RETRIES):
+        await c.ingest.record_outbound_retry(row_id, None)
+    controls = AdminControls(send_mode="live", owner_alert_number="+919999999999")
+    _install_template(monkeypatch, FakeTemplateSender(
+        SendResult(ok=True, status_code=200, wamid="wamid.NOPE", error=None)
+    ))
+    _install_text(monkeypatch, FakeTextSender())
+
+    await retry_failed_outbound(c, await _wa_cfg(), controls, "wamid.CAP2")
+
+    view = (await c.ingest.recent_outbound(10))[0]
+    assert view.state == "undeliverable"
+    assert view.last_error_code == "retries_exhausted"
+
+
 async def test_retry_failed_outbound_respects_send_mode_kill_switch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

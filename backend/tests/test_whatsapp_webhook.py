@@ -1960,6 +1960,32 @@ async def test_webhook_status_event_updates_outbound_delivery_status() -> None:
     assert entries[-1].delivery_status == "delivered"
 
 
+async def test_webhook_failed_status_captures_error_code_on_outbound() -> None:
+    # A 'failed' delivery status carrying Meta's errors[] code must persist that code to the
+    # outbound row's last_error_code (previously discarded), so the admin outbox view can show WHY
+    # a send failed. send_mode defaults to 'off', so no resend fires -- only the status is applied.
+    await _seed_sent_outbound("wamid.FAILCODE", phone="+919384880222")
+
+    body = json.dumps({
+        "entry": [{"changes": [{"value": {
+            "metadata": {"phone_number_id": PHONE_NUMBER_ID},
+            "statuses": [{
+                "id": "wamid.FAILCODE",
+                "status": "failed",
+                "timestamp": "1",
+                "errors": [{"code": 131047, "title": "Re-engagement message"}],
+            }],
+        }}]}],
+    }).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    views = await get_container().ingest.recent_outbound(50)
+    view = next(v for v in views if v.dedupe_key == "order_created:wamid.FAILCODE")
+    assert view.delivery_status == "failed"
+    assert view.last_error_code == "131047"
+
+
 async def test_webhook_status_event_updates_ai_reply_delivery_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -82,7 +82,7 @@
 ## [admin] Read-only views — GET /admin/mappings, GET /admin/outbox
 - **Handler:** backend/app/admin/router.py (`list_mappings`, `list_outbox`)
 - **Request:** query `limit` (default 50, ge=1, le=500).
-- **Response:** JSON list of `MappingView` / `OutboundView` rows (most recent first); 422 if limit out of range.
+- **Response:** JSON list of `MappingView` / `OutboundView` rows (most recent first, `asdict`-serialized); 422 if limit out of range. **`OutboundView` gained `delivery_status: str | None` (2026-08-19 bug fix)** so the outbox view distinguishes a permanently-undeliverable send (`state='undeliverable'` or `delivery_status='failed'`) from a healthy `sent` row; surfaced as the new "Delivery" column in the admin outbox table.
 - **Notes:** require_admin (401). Read-only over `IngestStore.recent_mappings/recent_outbound` (Postgres ORDER BY created_at DESC; in-memory reversed-insertion). No mutations.
 
 ## [admin-ui] Static panel — GET /admin/ui/

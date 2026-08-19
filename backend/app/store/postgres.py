@@ -623,7 +623,8 @@ class PostgresIngestStore:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT dedupe_key, state, kind, phone_e164, attempts, last_error_code,"
-                " created_at FROM outbound_messages ORDER BY created_at DESC LIMIT $1",
+                " created_at, delivery_status FROM outbound_messages"
+                " ORDER BY created_at DESC LIMIT $1",
                 limit,
             )
         return [
@@ -637,6 +638,9 @@ class PostgresIngestStore:
                     None if r["last_error_code"] is None else str(r["last_error_code"])
                 ),
                 created_at=r["created_at"].isoformat() if r["created_at"] else None,
+                delivery_status=(
+                    None if r["delivery_status"] is None else str(r["delivery_status"])
+                ),
             )
             for r in rows
         ]
@@ -1062,7 +1066,9 @@ class PostgresIngestStore:
                 wamid,
             )
 
-    async def apply_outbound_delivery_status(self, wamid: str, status: str) -> str:
+    async def apply_outbound_delivery_status(
+        self, wamid: str, status: str, error_code: str | None = None
+    ) -> str:
         # Existence check + single atomic guarded UPDATE, NOT SELECT-then-conditional-UPDATE:
         # Meta commonly delivers 'delivered' and 'read' milliseconds apart as two separate
         # webhook deliveries, which on serverless can be two CONCURRENT invocations. A read-then-
@@ -1083,8 +1089,14 @@ class PostgresIngestStore:
             )
             if exists is None:
                 return "not_found"
+            # last_error_code = COALESCE($3, last_error_code) captures Meta's delivery-failure code
+            # on the applied write without clearing a previously-stored code when $3 is NULL. It
+            # rides inside the SAME guarded UPDATE, so it only writes when the WHERE guard passes --
+            # the WHERE clause itself is unchanged (still a faithful mirror of
+            # should_apply_delivery_status; keep the two in sync).
             applied_id = await conn.fetchval(
-                "UPDATE outbound_messages SET delivery_status = $2, updated_at = now()"
+                "UPDATE outbound_messages SET delivery_status = $2,"
+                " last_error_code = COALESCE($3, last_error_code), updated_at = now()"
                 " WHERE template_wamid = $1"
                 "   AND delivery_status IS DISTINCT FROM 'failed'"
                 "   AND ("
@@ -1101,7 +1113,7 @@ class PostgresIngestStore:
                 "     )"
                 "   )"
                 " RETURNING id",
-                wamid, status,
+                wamid, status, error_code,
             )
         return "applied" if applied_id is not None else "unchanged"
 
@@ -1110,8 +1122,8 @@ class PostgresIngestStore:
         # routing key apply_outbound_delivery_status uses. Read-only.
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT id, phone_e164, payload_json, retry_count FROM outbound_messages"
-                " WHERE template_wamid = $1",
+                "SELECT id, phone_e164, payload_json, retry_count, last_error_code"
+                " FROM outbound_messages WHERE template_wamid = $1",
                 wamid,
             )
         if row is None:
@@ -1121,6 +1133,9 @@ class PostgresIngestStore:
             phone_e164=str(row["phone_e164"]),
             payload_json=str(row["payload_json"]),
             retry_count=int(row["retry_count"]),
+            last_error_code=(
+                None if row["last_error_code"] is None else str(row["last_error_code"])
+            ),
         )
 
     async def record_outbound_retry(self, id: int, new_wamid: str | None) -> None:
@@ -1395,7 +1410,9 @@ class PostgresConversationStore:
                 "UPDATE messages SET delivery_status = $2 WHERE id = $1", message_id, status
             )
 
-    async def apply_message_delivery_status(self, wamid: str, status: str) -> str:
+    async def apply_message_delivery_status(
+        self, wamid: str, status: str, error_code: str | None = None
+    ) -> str:
         # Existence check + single atomic guarded UPDATE (see the sibling
         # apply_outbound_delivery_status for the full rationale): a SELECT-then-conditional-UPDATE
         # races when Meta delivers 'delivered' and 'read' as two concurrent webhook invocations,
@@ -1410,8 +1427,13 @@ class PostgresConversationStore:
             )
             if exists is None:
                 return "not_found"
+            # last_error_code = COALESCE($3, last_error_code): capture Meta's delivery-failure code
+            # inside the SAME guarded UPDATE (writes only when the guard passes; a NULL $3 never
+            # clears a previously-stored code). WHERE clause unchanged -- keep it a faithful mirror
+            # of should_apply_delivery_status.
             applied_id = await conn.fetchval(
-                "UPDATE messages SET delivery_status = $2"
+                "UPDATE messages SET delivery_status = $2,"
+                " last_error_code = COALESCE($3, last_error_code)"
                 " WHERE wamid = $1"
                 "   AND delivery_status IS DISTINCT FROM 'failed'"
                 "   AND ("
@@ -1428,7 +1450,7 @@ class PostgresConversationStore:
                 "     )"
                 "   )"
                 " RETURNING id",
-                wamid, status,
+                wamid, status, error_code,
             )
         return "applied" if applied_id is not None else "unchanged"
 

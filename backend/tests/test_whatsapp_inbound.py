@@ -287,3 +287,57 @@ def test_extract_statuses_no_statuses_key_returns_empty() -> None:
         "metadata": {"phone_number_id": "123456"}, "messages": [],
     }}]}]}
     assert extract_statuses(payload, expected_phone_number_id="123456") == []
+
+
+def test_extract_statuses_captures_failure_error_code_and_title() -> None:
+    payload = {
+        "entry": [{"changes": [{"value": {
+            "metadata": {"phone_number_id": "123456"},
+            "statuses": [{
+                "id": "wamid.FAILED",
+                "status": "failed",
+                "timestamp": "1755500000",
+                "errors": [{
+                    "code": 131047,
+                    "title": "Re-engagement message",
+                    "error_data": {"details": "Message failed to send."},
+                }],
+            }],
+        }}]}]
+    }
+    statuses = extract_statuses(payload, expected_phone_number_id="123456")
+    assert len(statuses) == 1
+    assert statuses[0].status == "failed"
+    assert statuses[0].error_code == "131047"
+    assert statuses[0].error_title == "Re-engagement message"
+
+
+def test_extract_statuses_non_failed_without_errors_has_none_error_fields() -> None:
+    payload = {
+        "entry": [{"changes": [{"value": {
+            "metadata": {"phone_number_id": "123456"},
+            "statuses": [{"id": "wamid.OK", "status": "delivered", "timestamp": "1"}],
+        }}]}]
+    }
+    statuses = extract_statuses(payload, expected_phone_number_id="123456")
+    assert statuses[0].error_code is None
+    assert statuses[0].error_title is None
+
+
+def test_extract_statuses_malformed_errors_array_degrades_to_none() -> None:
+    # errors present but not a usable [ {code,title}, ... ] shape: empty list, non-list,
+    # first element not a dict, and a dict missing code/title -- all degrade to None, never raise.
+    for errors in ([], "not a list", ["not a dict"], [{"detail": "x"}]):
+        payload = {
+            "entry": [{"changes": [{"value": {
+                "metadata": {"phone_number_id": "123456"},
+                "statuses": [{
+                    "id": "wamid.FAILED", "status": "failed", "timestamp": "1",
+                    "errors": errors,
+                }],
+            }}]}]
+        }
+        statuses = extract_statuses(payload, expected_phone_number_id="123456")
+        assert len(statuses) == 1
+        assert statuses[0].error_code is None
+        assert statuses[0].error_title is None

@@ -71,6 +71,10 @@ class _MessageRow:
     # messages.retry_count). record_message_retry increments it; the resend cap is checked against
     # it. Defaulted so the existing append_message construction site stays unchanged.
     retry_count: int = 0
+    # Latest Meta delivery-failure error code captured from a 'failed' status (the in-memory
+    # analogue of messages.last_error_code). Written by apply_message_delivery_status when a code
+    # is present; no public view surfaces it. Defaulted so append_message stays unchanged.
+    last_error_code: str | None = None
     # Display-only marker distinguishing a manually-typed admin reply from an AI-generated one.
     # Defaulted to None (AI) so the existing append_message construction site stays unchanged.
     sender: str | None = None
@@ -322,6 +326,7 @@ class InMemoryIngestStore:
                 attempts=self._outbound_meta[key].attempts,
                 last_error_code=self._outbound_meta[key].last_error_code,
                 created_at=None,
+                delivery_status=self._outbound_meta[key].delivery_status,
             )
             for key, o in self.outbound.items()
         ]
@@ -602,15 +607,21 @@ class InMemoryIngestStore:
             meta.state = "sent"
             meta.template_wamid = wamid
 
-    async def apply_outbound_delivery_status(self, wamid: str, status: str) -> str:
+    async def apply_outbound_delivery_status(
+        self, wamid: str, status: str, error_code: str | None = None
+    ) -> str:
         # Route a Meta delivery/read status by template_wamid. "not_found" means the wamid is not
         # in this table (try messages); "applied" means the ordering guard let the write through
         # (a genuine forward move or a fresh 'failed'); "unchanged" means the wamid IS here but the
         # guard rejected the write (a duplicate/regressive report). See base.py for the contract.
+        # error_code is persisted (COALESCE semantics: only overwrite when non-None) alongside the
+        # applied write, mirroring the Postgres UPDATE that only runs its SET when the guard passes.
         for meta in self._outbound_meta.values():
             if meta.template_wamid == wamid:
                 if should_apply_delivery_status(meta.delivery_status, status):
                     meta.delivery_status = status
+                    if error_code is not None:
+                        meta.last_error_code = error_code
                     return "applied"
                 return "unchanged"
         return "not_found"
@@ -626,6 +637,7 @@ class InMemoryIngestStore:
                     phone_e164=draft.phone_e164,
                     payload_json=draft.payload_json,
                     retry_count=meta.retry_count,
+                    last_error_code=meta.last_error_code,
                 )
         return None
 
@@ -824,16 +836,21 @@ class InMemoryConversationStore:
         if row is not None:
             row.delivery_status = status
 
-    async def apply_message_delivery_status(self, wamid: str, status: str) -> str:
+    async def apply_message_delivery_status(
+        self, wamid: str, status: str, error_code: str | None = None
+    ) -> str:
         # Route a Meta delivery/read status by wamid. "not_found" means the wamid is not in this
         # table (try outbound_messages); "applied" means the ordering guard let the write through
         # (a genuine forward move or a fresh 'failed'); "unchanged" means the wamid IS here but the
         # guard rejected the write (a duplicate/regressive report). See base.py for the contract.
+        # error_code is persisted (COALESCE: only overwrite when non-None) on the applied write.
         row = self._message_by_wamid.get(wamid)
         if row is None:
             return "not_found"
         if should_apply_delivery_status(row.delivery_status, status):
             row.delivery_status = status
+            if error_code is not None:
+                row.last_error_code = error_code
             return "applied"
         return "unchanged"
 

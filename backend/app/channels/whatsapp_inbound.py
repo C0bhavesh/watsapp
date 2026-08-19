@@ -34,6 +34,11 @@ class InboundStatus:
     wamid: str
     status: str
     timestamp: str
+    # Meta's delivery-failure detail, populated only from a 'failed' status' errors[] array
+    # (both None otherwise). error_code is Meta's numeric error code coerced to str (e.g.
+    # "131047"); error_title is its short human label. Neither is PII/secret.
+    error_code: str | None = None
+    error_title: str | None = None
 
 
 InboundEvent = InboundText | InboundInteractive | InboundButton
@@ -220,6 +225,32 @@ def _parse_status(raw: Any) -> InboundStatus | None:
     if not isinstance(wamid, str) or not isinstance(status, str):
         return None
     timestamp = raw.get("timestamp")
+    error_code, error_title = _parse_status_error(raw.get("errors"))
     return InboundStatus(
-        wamid=wamid, status=status, timestamp=str(timestamp) if timestamp is not None else ""
+        wamid=wamid,
+        status=status,
+        timestamp=str(timestamp) if timestamp is not None else "",
+        error_code=error_code,
+        error_title=error_title,
+    )
+
+
+def _parse_status_error(errors: Any) -> tuple[str | None, str | None]:
+    """Defensively pull (code, title) from a 'failed' status' errors[] array.
+
+    Meta attaches errors[] (each with code/title/error_data.details) to a failed delivery. Every
+    field is attacker-typed: only a non-empty list whose first element is a dict yields a value,
+    and code/title are coerced to str (both None when absent). Anything else degrades to
+    (None, None), never raises -- matching this file's other parsers.
+    """
+    if not isinstance(errors, list) or not errors:
+        return None, None
+    first = errors[0]
+    if not isinstance(first, dict):
+        return None, None
+    code = first.get("code")
+    title = first.get("title")
+    return (
+        str(code) if code is not None else None,
+        str(title) if title is not None else None,
     )

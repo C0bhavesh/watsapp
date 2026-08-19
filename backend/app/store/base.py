@@ -82,6 +82,10 @@ class OutboundView:
     attempts: int
     last_error_code: str | None
     created_at: str | None
+    # Latest Meta delivery/read status for the send (None until a status webhook lands). Surfaced
+    # so a permanently-undeliverable row (delivery_status='failed', or state='undeliverable' once
+    # retries are exhausted) is distinguishable in the admin outbox view from a healthy 'sent' row.
+    delivery_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +115,10 @@ class OutboundRetryInfo:
     phone_e164: str
     payload_json: str
     retry_count: int
+    # The most recent Meta delivery-failure error code captured for this row (via
+    # apply_outbound_delivery_status), or None if none was ever recorded. Used at the retry cap to
+    # mark the row undeliverable with a meaningful code instead of a bare "retries_exhausted".
+    last_error_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -206,7 +214,12 @@ class IngestStore(Protocol):
     #                   'failed').
     # The applied/unchanged distinction lets retry wiring fire only on a genuinely new 'failed',
     # never on a Meta-redelivered duplicate webhook (which would double-fire a retry).
-    async def apply_outbound_delivery_status(self, wamid: str, status: str) -> str: ...
+    # error_code (Meta's numeric delivery-failure code, from a 'failed' status' errors[] array) is
+    # persisted to last_error_code via COALESCE only when the guarded write applies -- a None
+    # error_code (or an unchanged/not_found result) never clears a previously-captured code.
+    async def apply_outbound_delivery_status(
+        self, wamid: str, status: str, error_code: str | None = None
+    ) -> str: ...
 
     # Looks up a sent template row by its current template_wamid, returning its retry state
     # (id/phone/payload/retry_count) or None if no row carries this wamid. Read-only.
@@ -368,7 +381,11 @@ class ConversationStore(Protocol):
     #                   'failed').
     # The applied/unchanged distinction lets retry wiring fire only on a genuinely new 'failed',
     # never on a Meta-redelivered duplicate webhook (which would double-fire a retry).
-    async def apply_message_delivery_status(self, wamid: str, status: str) -> str: ...
+    # error_code (see IngestStore.apply_outbound_delivery_status) is persisted to the messages
+    # row's last_error_code via COALESCE only when the guarded write applies.
+    async def apply_message_delivery_status(
+        self, wamid: str, status: str, error_code: str | None = None
+    ) -> str: ...
 
     # Looks up an AI-reply message row by its current wamid, returning its retry state
     # (id/conversation_id/content/retry_count) or None if no row carries this wamid. The

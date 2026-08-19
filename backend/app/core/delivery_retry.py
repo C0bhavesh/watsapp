@@ -29,6 +29,11 @@ logger = logging.getLogger("app.core.delivery_retry")
 
 MAX_RETRIES = 3
 
+# Fallback last_error_code for a row that exhausts its retries without any Meta error code ever
+# having been captured (a 'failed' status that carried no errors[] array). Records WHY the row is
+# terminal so the admin outbox view never shows a bare NULL reason on an undeliverable send.
+_RETRIES_EXHAUSTED_CODE = "retries_exhausted"
+
 # Short, path-specific timeout for every send this module makes -- both the customer resend and the
 # owner alert. Both run inline inside the WhatsApp webhook request (via apply_status), which shares
 # one TURN_TIMEOUT_SECONDS budget with any inbound customer messages in the same payload; a single
@@ -105,6 +110,12 @@ async def retry_failed_outbound(
     if info is None:
         return
     if info.retry_count >= MAX_RETRIES:
+        # Retries exhausted: transition the row OUT of 'sent' to 'undeliverable' so the admin outbox
+        # view stops rendering it as a healthy send. Stamp the Meta error code captured from the
+        # failed status (info.last_error_code), falling back to a constant when none was recorded.
+        await c.ingest.mark_outbound_undeliverable(
+            info.id, info.last_error_code or _RETRIES_EXHAUSTED_CODE
+        )
         await _alert_owner_retry_exhausted(
             c, wa_cfg, controls, info.phone_e164, info.retry_count
         )

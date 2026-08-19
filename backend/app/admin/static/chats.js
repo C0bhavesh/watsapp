@@ -482,6 +482,35 @@ async function loadThread(threadId, phone, silent = false) {
   }
 }
 
+const FILTERS = [
+  { id: "all", label: "All", predicate: () => true },
+  { id: "unread", label: "Unread", predicate: (t) => (t.unread_count || 0) > 0 },
+  { id: "handoff", label: "Handed to human", predicate: (t) => !!t.ai_paused },
+];
+let activeFilterId = "all";
+
+function renderFilterChips() {
+  const container = el("thread-filters");
+  container.innerHTML = "";
+  for (const f of FILTERS) {
+    const btn = document.createElement("button");
+    btn.className = "filter-chip" + (f.id === activeFilterId ? " active" : "");
+    btn.textContent = f.label;
+    btn.addEventListener("click", () => {
+      activeFilterId = f.id;
+      renderFilterChips();
+      renderThreadRows(applyThreadFilters(allThreads));
+    });
+    container.appendChild(btn);
+  }
+}
+
+function applyThreadFilters(threads) {
+  const chip = FILTERS.find((f) => f.id === activeFilterId) || FILTERS[0];
+  const query = el("thread-search").value;
+  return threads.filter((t) => chip.predicate(t) && threadMatchesQuery(t, query));
+}
+
 let allThreads = [];
 
 function normalizeOrderQuery(query) {
@@ -518,6 +547,12 @@ function renderThreadRows(threads) {
     const phone = document.createElement("div");
     phone.className = "phone";
     phone.textContent = t.customer_name || t.phone;
+    if (t.unread_count > 0) {
+      const badge = document.createElement("span");
+      badge.className = "unread-badge";
+      badge.textContent = String(t.unread_count);
+      phone.appendChild(badge);
+    }
     phone.appendChild(ts);
     const preview = document.createElement("div");
     preview.className = "preview";
@@ -532,7 +567,7 @@ function renderThreadRows(threads) {
 async function loadThreadList() {
   try {
     allThreads = await api("/admin/conversations");
-    renderThreadRows(allThreads.filter((t) => threadMatchesQuery(t, el("thread-search").value)));
+    renderThreadRows(applyThreadFilters(allThreads));
     listSnapshotKey = threadListKey(allThreads);
     el("list-status").textContent = "";
   } catch (e) {
@@ -541,7 +576,7 @@ async function loadThreadList() {
 }
 
 el("thread-search").addEventListener("input", () => {
-  renderThreadRows(allThreads.filter((t) => threadMatchesQuery(t, el("thread-search").value)));
+  renderThreadRows(applyThreadFilters(allThreads));
 });
 
 el("refresh-btn").addEventListener("click", async () => {
@@ -590,7 +625,9 @@ let listSnapshotKey = "";
 let threadSnapshotKey = "";
 
 function threadListKey(threads) {
-  return threads.map((t) => t.thread_id + ":" + (t.last_active_at || "")).join("|");
+  return threads
+    .map((t) => t.thread_id + ":" + (t.last_active_at || "") + ":" + t.unread_count + ":" + t.ai_paused)
+    .join("|");
 }
 
 function threadEntriesKey(entries) {
@@ -621,7 +658,7 @@ async function pollTick() {
     if (nextListKey !== listSnapshotKey) {
       allThreads = threads;
       listSnapshotKey = nextListKey;
-      renderThreadRows(allThreads.filter((t) => threadMatchesQuery(t, el("thread-search").value)));
+      renderThreadRows(applyThreadFilters(allThreads));
     }
     if (currentThreadId !== null) {
       const data = await api("/admin/conversations/" + encodeURIComponent(currentThreadId));
@@ -641,4 +678,5 @@ async function pollTick() {
 
 setInterval(pollTick, 3000);
 
+renderFilterChips();
 loadThreadList();

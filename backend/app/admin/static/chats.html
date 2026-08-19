@@ -27,6 +27,14 @@
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .thread-row .ts { font-size: .68rem; color: #8696a0; float: right; }
 
+    #thread-filters { display: flex; gap: .4rem; padding: .5rem 1rem; border-bottom: 1px solid #f0f2f5; }
+    .filter-chip { font-size: .76rem; padding: .28rem .7rem; border-radius: 999px; cursor: pointer;
+      background: #f0f2f5; color: #3b4a54; border: none; white-space: nowrap; }
+    .filter-chip.active { background: #00a884; color: #fff; }
+    .unread-badge { display: inline-block; min-width: 1.1rem; height: 1.1rem; line-height: 1.1rem;
+      text-align: center; border-radius: 999px; background: #00a884; color: #fff;
+      font-size: .68rem; font-weight: 600; margin-left: .4rem; padding: 0 .3rem; }
+
     #chat-pane { flex: 1; display: flex; flex-direction: column; background: #efeae2; }
     #chat-header { background: #f0f2f5; padding: .8rem 1.2rem; font-weight: 600;
       border-bottom: 1px solid #e9edef; min-height: 2.2rem;
@@ -121,6 +129,7 @@
         <button id="refresh-btn">Refresh</button>
       </div>
       <input id="thread-search" type="text" placeholder="Search name, phone, or order #" />
+      <div id="thread-filters"></div>
       <div id="thread-list"></div>
       <div class="status" id="list-status"></div>
     </div>

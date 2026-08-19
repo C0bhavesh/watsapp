@@ -173,6 +173,11 @@ def test_opening_thread_clears_unread_count(client: TestClient) -> None:
     row_before = next(r for r in before if r["thread_id"] == thread_id)
     assert row_before["unread_count"] >= 1
 
+    # Same clock-tie risk as above, mirrored: the "after" assertion needs the mark_read stamp
+    # below to land strictly after the message just appended, or the race described in
+    # error_learnings.md (2026-08-19) could tie the two and make this assertion coincidentally
+    # pass for the wrong reason (or flake on a machine with even coarser clock resolution).
+    time.sleep(0.05)
     client.get(f"/admin/conversations/{thread_id}")
 
     after = client.get("/admin/conversations").json()

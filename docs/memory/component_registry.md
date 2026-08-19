@@ -193,6 +193,23 @@
   "99+" truncation) and an empty filtered-result list shows no explanatory message — both flagged
   in final review as Minor, deferred.
 
+## Admin chat page — date dividers (2026-08-19)
+- **File:** backend/app/admin/static/chats.js, backend/app/admin/static/chats.html.
+- **Purpose:** WhatsApp-style centered date-divider pills inserted before the first message of each
+  new calendar day in the admin chat page's message view.
+- **Public API:** page-local in `chats.js`: `formatBubbleDate(isoTimestamp: string | null | undefined) -> string`
+  (converts ISO timestamp to browser-locale date string, defensive `""` on invalid input, mirrors
+  `formatBubbleTime`'s shape); `renderDateDivider(dateLabel: string) -> HTMLElement` (creates
+  centered pill div). Both used only in `loadThread`'s render loop.
+- **Used in:** admin operators only, no backend/API/DB changes — `entry.timestamp` already present
+  on every entry returned by `GET /admin/conversations/{thread_id}`.
+- **Notes:** inline divider only (no scroll-tracked header); always plain browser-locale date
+  (no "Today"/"Yesterday" relative labels). Render loop tracks `lastRenderedDate` per call
+  (fresh on every thread switch / poll-triggered refresh). Single `.date-divider` CSS rule added
+  to `chats.html`'s existing `<style>` block (centered via `align-self: center` in the flex-column
+  layout, muted WhatsApp-palette colors matching existing elements). Frontend verification
+  (browser pass, manual) not yet performed.
+
 ## LazyPool (asyncpg)
 - **File:** backend/app/store/pg_factory.py
 - **Purpose:** asyncpg connection pool created on FIRST `acquire()`, never at import (serverless cold-start rule).

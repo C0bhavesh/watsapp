@@ -102,6 +102,14 @@ CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations (user_id, las
 -- second request). Distinct from paused_until, which marks a human has already taken over.
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS handoff_attempted_at timestamptz;
 
+-- Admin "unread" tracking (2026-08-19): stamped to now() whenever the owner opens a thread in
+-- the admin chat page (see ConversationStore.mark_read). DEFAULT now() is deliberate -- every
+-- conversation that already exists at migration time starts "read as of now", so pre-existing
+-- message history never floods the admin UI with unread badges the moment this ships. Only
+-- customer messages arriving strictly after a thread's last_read_at ever count as unread
+-- (see count_unread_messages).
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS last_read_at timestamptz NOT NULL DEFAULT now();
+
 -- Enforces one conversation row per WhatsApp sender. Required so
 -- PostgresConversationStore.get_or_create can use a single atomic
 -- `INSERT ... ON CONFLICT (user_id) DO UPDATE` upsert instead of a SELECT-then-INSERT,

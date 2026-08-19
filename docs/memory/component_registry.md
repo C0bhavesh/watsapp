@@ -16,39 +16,80 @@
 ## Template catalog + default-value resolver (admin manual-resend, Task 1 of 3, 2026-08-19)
 - **File:** app/admin/template_catalog.py
 - **Purpose:** registry of the store's 4 Meta-approved WhatsApp templates + a helper that derives
-  every template field's default value from ONE `Order`, for a later admin "resend template"
-  dialog (Task 2/3, not yet built).
+  every template field's default value from ONE `Order`, for the admin "resend template" dialog
+  (Task 2/3, both complete — see below).
 - **Public API:** `TemplateField(key, label, default_from)`, `TemplateDef(label, language,
-  param_style, fields, has_confirm_cancel_buttons=False, supports_image_header=False)`,
-  `TEMPLATE_CATALOG: dict[str, TemplateDef]` (keys: `cod_confirmation`, `prepaid_order`,
-  `order_shipped`, `order_delivered`), `resolve_template_defaults(order: Order) -> dict[str, str]`
-  (always returns every key, `""` when unavailable — no presence check needed by callers).
+  param_style, fields, has_confirm_cancel_buttons=False)`, `TEMPLATE_CATALOG: dict[str,
+  TemplateDef]` (keys: `cod_confirmation`, `prepaid_order`, `order_shipped`, `order_delivered`),
+  `resolve_template_defaults(order: Order) -> dict[str, str]` (always returns every key, `""` when
+  unavailable — no presence check needed by callers).
 - **Used in:** `app/admin/router.py::list_templates`/`send_admin_template` (Task 2, 2026-08-19 —
-  `GET`/`POST /admin/conversations/{thread_id}/templates`, see api_registry.md). Task 3
-  (frontend emoji picker) not yet built.
+  `GET`/`POST /admin/conversations/{thread_id}/templates`, see api_registry.md), consumed by the
+  chat page's template dialog (Task 3, `chats.js`, see below).
 - **Notes:** adding a future Meta-approved template is a one-entry addition to `TEMPLATE_CATALOG`,
   no frontend/send_template change needed (both are generic over the registry per the design doc).
   Depends on `split_variant_options` (now public, see below) and `Order`/`LineItem`/`Fulfillment`/
-  `Customer` from `app/shopify/models.py`, unchanged.
+  `Customer` from `app/shopify/models.py`, unchanged. **`TemplateDef` no longer carries
+  `supports_image_header`** (in the original design draft, dropped as dead — nothing in the send
+  path ever read it — before/during the final fix wave, commit `d9543bd`).
 
 ## Admin template resend send path (Task 2 of 3, 2026-08-19)
 - **File:** app/admin/router.py (`list_templates`, `send_admin_template`, `TemplateSendRequest`);
   app/jobs/outbox_drain.py (`_ADMIN_RESEND_DEDUPE_PREFIXES`).
 - **Purpose:** admin-triggered resend of one of the store's 4 approved templates for a specific
   order, with admin-editable field values, for the chat page's emoji/template picker.
-- **Public API:** `TemplateSendRequest{order_name: str, template: str, values: dict[str,str]}`;
-  `list_templates(thread_id) -> {"orders": [...]}` (read-only); `send_admin_template(request,
-  thread_id, body, response) -> {"ok": bool, "error"?: str}`.
-- **Used in:** admin chat page (frontend Task 3, not yet built).
+- **Public API:** `TemplateSendRequest{order_name: str, template: str, values: dict[str,str]=\{\}}`
+  (`order_name`/`template` ≤64 chars, each `values` entry ≤1024 chars — length bounds added in the
+  final fix wave); `list_templates(thread_id) -> {"orders": [{"order_name", "templates": [{"key",
+  "label", "has_buttons", "fields": [{"key","label","value","read_only"}]}]}]}` (read-only; each
+  order's `templates` list is now FILTERED via `_template_applies_to_order` — a cancelled order
+  drops `cod_confirmation`/`prepaid_order`, an unfulfilled order drops `order_shipped`/
+  `order_delivered` — fix-wave addition); `send_admin_template(request, thread_id, body, response)
+  -> {"ok": True, "status": "sent"|"suppressed"|"queued"} | {"ok": False, "error": str}` (widened
+  in the fix wave from a bare `{"ok": bool}` to distinguish the three non-failure outcomes — `None`
+  outcome from `send_inline_outbound` means the row is queued for the backstop drain, not sent).
+- **Used in:** admin chat page (`chats.js`'s template dialog, Task 3 — see below).
 - **Notes:** goes through the SAME `enqueue_outbound` + `send_inline_outbound` pipeline as every
   automatic template send (order confirmation/shipped/delivered) — respects `send_mode`/
   `allowlist_phones` exactly like those, deliberately UNLIKE the sibling `send_manual_reply` (free
   text), which bypasses the kill switch by design. `cod_confirmation`'s Confirm/Cancel button
   payloads are built from `order.gid` resolved server-side via `find_mirrored_orders_by_phone` —
-  never from the request body. `dedupe_key = f"admin_resend:{order.gid}:{template}:{uuid4()}"` —
-  the `admin_resend:` prefix must stay registered in `outbox_drain.py`'s `_DEDUPE_PREFIXES`
-  (same family as `_FULFILLMENT_DEDUPE_PREFIXES`, no `order_mappings.status` side effect) or every
-  resend silently fails `bad_dedupe_key`.
+  never from the request body; the `order_id`/`order_name` display field is now force-pinned
+  server-side too (fix-wave addition — an admin-editable text field could previously desync from
+  the gid the buttons actually act on; read-only in the UI). `dedupe_key =
+  f"admin_resend:{order.gid}:{template}:{uuid4()}"` — the `admin_resend:` prefix must stay
+  registered in `outbox_drain.py`'s `_DEDUPE_PREFIXES` (same family as
+  `_FULFILLMENT_DEDUPE_PREFIXES`, no `order_mappings.status` side effect) or every resend silently
+  fails `bad_dedupe_key`. **Fix-wave addition:** every resolved field value that is blank
+  (admin-cleared + no default) is substituted with the existing `EMPTY_PARAM_PLACEHOLDER`
+  convention (`app.channels.copy`) before the send, matching every other template send call site —
+  Meta rejects a literal empty string body param.
+
+## Admin chat page — emoji picker + template-resend dialog (Task 3 of 3, 2026-08-19)
+- **File:** app/admin/static/chats.html, app/admin/static/chats.js.
+- **Purpose:** two new icon buttons on the reply bar (left of `#reply-input`, per the owner's
+  mockup) — an emoji picker and a template-resend dialog — completing the Admin Emoji Picker +
+  Template Resend feature on top of the manual-reply reply bar (see that feature's own
+  component_registry entry above).
+- **Public API:** no exports, page-local functions in `chats.js`: `buildEmojiPopup()` (renders
+  `#emoji-popup` from the fixed `EMOJI_LIST` grid, ~30 curated emojis, no external library);
+  `insertAtCursor(input, text)` (inserts at the caret in `#reply-input`, not just appended, then
+  re-focuses); `openTemplateDialog()` → `GET .../templates` → `renderTemplatePickList(data)` (per
+  order, per applicable template) → clicking one calls `renderTemplateFieldForm(orderName, tmpl)`
+  (one text input per field, `read_only` fields disabled) → its Send button `POST`s to
+  `.../templates` and reloads the thread; `closeTemplateDialog()`.
+- **Used in:** admin operators only, same page/auth as the rest of the chat page (`require_admin`
+  session cookie, no new auth mechanism).
+- **Notes:** fix-wave hardening (commit `d9543bd`): a send failure now renders INSIDE the dialog
+  (`#template-status`, a previous version wrote to `#reply-status`, which sits behind the modal
+  overlay and was invisible) and the Send button relabels to "Retry" + stays disabled until a
+  fresh click — closes a real duplicate-send risk (the button previously silently re-armed with a
+  fresh dedupe key every click while the error was invisible). A non-`"sent"` success outcome
+  (`"queued"`/`"suppressed"`) keeps the dialog open with an explanatory note
+  (`TEMPLATE_STATUS_NOTES`) instead of closing as if the message went out. Zero behavioral test
+  coverage for this frontend (same accepted structural gap as the rest of `chats.js` — only
+  Python `TestClient` substring-presence checks against the served JS text exist, no browser/JS
+  test runner in this repo).
 
 ## split_variant_options (public, was `_split_variant_options`, 2026-08-19)
 - **File:** app/channels/shopify_orders.py

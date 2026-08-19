@@ -62,7 +62,8 @@
     #reply-status { padding: 0 1.2rem .3rem; min-height: 1em; }
     #emoji-btn, #template-btn { background: none; border: none; font-size: 1.3rem;
       cursor: pointer; padding: .2rem .4rem; }
-    #emoji-popup { position: absolute; bottom: 4.2rem; left: 1.2rem; background: #fff;
+    #emoji-popup { position: absolute; bottom: calc(100% + .4rem); left: 0;
+      width: max-content; max-width: calc(100% - 1rem); background: #fff;
       border: 1px solid #d1d7db; border-radius: 8px; padding: .5rem; box-shadow: 0 2px 8px rgba(0,0,0,.15);
       display: grid; grid-template-columns: repeat(8, 1fr); gap: .2rem; z-index: 10; }
     #emoji-popup button { background: none; border: none; font-size: 1.15rem; cursor: pointer;
@@ -132,8 +133,8 @@
         <button id="template-btn" type="button" title="Send a template">📋</button>
         <input id="reply-input" type="text" placeholder="Type a message" />
         <button id="reply-send-btn">Send</button>
+        <div id="emoji-popup" style="display:none"></div>
       </div>
-      <div id="emoji-popup" style="display:none"></div>
       <div id="template-dialog" style="display:none">
         <div id="template-dialog-inner">
           <div id="template-dialog-header">

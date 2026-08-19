@@ -443,7 +443,7 @@
 - **Purpose:** signed expiring session token + constant-time password check (cafe-verbatim, dependency-free).
 - **Public API:** `issue_token(secret, now: datetime, ttl_hours=12) -> str` (format `<unix_exp>.<b64url_hmac_sha256>`; empty secret → `ValueError`); `verify_token(secret, token, now) -> bool` (False, never raises, on empty secret / malformed / bad sig / expiry); `check_password(supplied, expected) -> bool` (constant-time; empty `expected` → False, fail closed).
 - **Used in:** admin.router (login issues, require_admin verifies).
-- **Notes:** the session token is signed with `settings.app_master_key` (not `admin_password`) so rotating the display password doesn't need re-keying. `verify_token` fails closed on every error path.
+- **Notes:** the session token is signed with `settings.app_master_key` (not `admin_password`) so rotating the display password doesn't need re-keying. `verify_token` fails closed on every error path. `issue_token`'s own default (`ttl_hours=12`) is unused by the app — `admin.router::login` (2026-08-19, client-directed, Q20/A) passes `ttl_hours=ADMIN_SESSION_TTL_HOURS` (`= 24 * 30`, 30 days), a module-level constant in `router.py` also used for the session cookie's `max_age`, so the two can never drift out of sync. No session-revocation mechanism exists (no `/admin/logout`; rotating `app_master_key` would also break decryption of every stored credential) — a known, pre-existing, client-flagged gap, not something this TTL change introduced.
 
 ## Admin JSON API router
 - **File:** backend/app/admin/router.py

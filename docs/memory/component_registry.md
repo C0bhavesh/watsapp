@@ -144,6 +144,55 @@
 - **Delivery/Read Receipts (2026-08-18, sub-project 1c) — WhatsApp-style tick marks.** New `renderDeliveryMark(entry)` in `chats.js` appends a small `.delivery-mark` span next to the bubble timestamp — eligible entries are `ai_reply` (always, no `status` field to gate on) and `template_sent` with `status === "sent"` (a queued/suppressed/failed template already shows its own `.bubble-status` label instead, so no tick is added on top). Renders `"✓"` (`.delivery-mark-sent`, grey, `entry.delivery_status` null/`"sent"`), `"✓✓"` grey (`.delivery-mark-delivered`), `"✓✓"` blue (`.delivery-mark-read`), or `"!"` (`.delivery-mark-failed`, `entry.delivery_status === "failed"`). `renderBubble(entry)` calls it and appends the mark into the existing `.bubble-ts` timestamp div. The 3-second poll's `threadEntriesKey`/diff-check was widened in the same feature to fold each entry's `delivery_status` into the snapshot key (joined via `deliveryStatuses`) — the pre-existing key only hashed `status`, a different field, so a delivery→read transition on an already-rendered bubble would never have triggered a re-render without this.
 - **Admin Manual Reply (2026-08-18, sub-project 1f) — free-text send box, no more switching to WhatsApp Web.** `chats.html`/`chats.js` gained a reply bar (`#reply-input` + `#reply-send-btn` + `#reply-status`) under the bubble pane, POSTing to `POST /admin/conversations/{thread_id}/messages` (see api_registry.md for the full endpoint contract). **24h-window gating (client-side, advisory only):** `loadThread` computes `lastCustomerAt` from the loaded entries and sets module-level `replyWithinWindow = (Date.now() - lastCustomerAt) < REPLY_WINDOW_MS` (`REPLY_WINDOW_MS = 24*60*60*1000`); disables `#reply-input`/`#reply-send-btn` and swaps the placeholder to "Outside the 24-hour reply window — send a template instead" when false or when there's no customer message at all. The send handler's `finally` re-enables the button only if `replyWithinWindow` (not unconditionally) so a thread that scrolled out of the window during a send stays disabled. **Thread-switch draft clearing:** `loadThread`, on a genuine switch to a DIFFERENT thread id (not a poll-triggered silent refresh of the same thread), clears `#reply-input`'s value and `#reply-status`'s text — prevents a draft typed for customer A from surviving into customer B's thread and misfiring on Enter. **`api()` extended:** `api(path, method, body)` now accepts an optional body (POSTs a bodyless request as `{}` to dodge Vercel's edge 411-on-no-Content-Length); its error branch prefers `data.error` (a plain string, this endpoint's `{"ok": false, "error": ...}` shape on 502/503) over `data.detail` (every other admin route's `HTTPException` shape) when present. **Sender-aware bubble label:** `renderBubble` labels an `ai_reply` entry `"you"` (instead of `"ai reply"`) when `entry.sender === "admin"`, sourced from the new `sender` field on `GET /admin/conversations/{thread_id}` entries (see api_registry.md). **Fix-wave addition:** on a send failure, `set_message_delivery_status` (see `ConversationStore` entry below) marks the row `"failed"` so it renders the same red `"!"` tick as any other failed delivery instead of being indistinguishable from a successful send.
 
+## ConversationStore.mark_read / count_unread_messages (admin chat unread marker, 2026-08-19)
+- **File:** backend/app/store/base.py (Protocol, lines 393-404), backend/app/store/postgres.py
+  (`PostgresConversationStore`, ~1502-1526), backend/app/store/memory.py
+  (`InMemoryConversationStore`, ~918-929).
+- **Purpose:** admin "unread" tracking — stamp the moment the owner opened a thread in the admin
+  chat page, and count customer messages newer than that stamp, for the chat page's per-thread
+  unread badge + "Unread" filter chip.
+- **Public API:** `mark_read(conversation_id: int, at: datetime) -> None`; `count_unread_messages(conversation_id: int) -> int`
+  (counts `messages` rows with `role="user"`/customer and `created_at` strictly after the
+  conversation's `last_read_at`).
+- **Used in:** `app/admin/router.py` — `list_conversations` (`GET /admin/conversations`, calls
+  `count_unread_messages` per thread → `unread_count` field) and `get_conversation_thread`
+  (`GET /admin/conversations/{thread_id}`, calls `mark_read` as a side effect on every open/poll —
+  see api_registry.md's GET-with-write-side-effect note).
+- **Notes:** Postgres `mark_read` writes `last_read_at = GREATEST($1, now())`, not the raw `$1` —
+  fixes a real clock-domain bug (app-process clock vs. DB-server clock stamping
+  `messages.created_at`) caught in final whole-branch review, see error_learnings.md 2026-08-19
+  "two clock domains, one comparison"; in-memory `mark_read` stores `at` raw (single clock domain,
+  no skew possible). `messages.created_at`/`conversations.last_read_at` are Postgres `timestamptz`
+  (DB-clock-comparable); a brand-new conversation defaults `last_read_at` to its creation time
+  (schema `DEFAULT now()`, in-memory falls back to `datetime.min` when `mark_read` was never
+  called) so pre-existing history never floods the UI with unread badges on first ship. The
+  `get_conversation_thread` call site wraps `mark_read` in `try/except Exception:
+  logger.warning(...)` — a failure there can never break the entries/orders response. Requires the
+  `conversations.last_read_at` schema migration — see `_pipeline_status.md` CHECKPOINT.
+  **Known, accepted trade-off (final-review ruling, not a TODO):** `list_conversations` now does 2
+  additional per-thread round trips (`count_unread_messages` + `get_paused_until`) on its existing
+  documented N+1 loop (capped `limit<=100`, hit every 3s by `pollTick`) — reviewer flagged it as
+  worth noting, orchestrator ruled ACCEPT (batching would be scope creep beyond the approved
+  design), same trade-off class as the loop's pre-existing N+1.
+
+## Admin chat page — unread badge + filter chips (2026-08-19)
+- **File:** backend/app/admin/static/chats.html, backend/app/admin/static/chats.js.
+- **Purpose:** per-thread unread-count badge + a single-select filter-chip row (`All`/`Unread`/
+  `Handed to human`) above the thread list, AND-combined with the existing thread-search box.
+- **Public API:** page-local in `chats.js`: `FILTERS` (array of `{id, label, predicate(thread)}` —
+  adding a future filter chip is a one-entry addition, no other code change); `renderFilterChips()`
+  (renders `#thread-filters` from `FILTERS`, highlights `activeFilterId`, re-renders the thread list
+  on click); `applyThreadFilters(threads)` (filters `allThreads` by the active chip's predicate AND
+  `threadMatchesQuery` against the search box — both conditions must pass). Unread badge rendered
+  inline in the thread-row renderer (`.unread-badge` class) from each thread's `unread_count`.
+- **Used in:** admin operators only, same page/auth as the rest of the chat page.
+- **Notes:** `unread` predicate is `(t.unread_count || 0) > 0`; `handoff` predicate is
+  `!!t.ai_paused` (existing AI-handoff pause mechanism, `paused_until` in the future — not a new
+  concept). Zero behavioral test coverage for this frontend (same accepted structural gap as the
+  rest of `chats.js`). **Known limitation (parked, not fixed):** the unread badge is uncapped (no
+  "99+" truncation) and an empty filtered-result list shows no explanatory message — both flagged
+  in final review as Minor, deferred.
+
 ## LazyPool (asyncpg)
 - **File:** backend/app/store/pg_factory.py
 - **Purpose:** asyncpg connection pool created on FIRST `acquire()`, never at import (serverless cold-start rule).

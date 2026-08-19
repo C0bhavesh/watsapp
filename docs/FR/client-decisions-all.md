@@ -283,6 +283,34 @@ would be rejected by Meta and break delivery again.
 Shipped as A (English-pinned) by default since it is the only option that does not block any
 customer's message; flag if B is actually wanted.
 
+## Part 8 — New question (2026-08-19)
+
+**20. How much friction should logging into the WhatsApp admin chat page carry?** The page at
+`thetavas-bot.vercel.app/admin/ui/chats.html` is the only place to see and respond to WhatsApp
+conversations (the number is "headless" — it does not appear in the WhatsApp app or Meta
+Business Suite). It currently asks for the admin password, and that login lasts 12 hours before
+asking again; it also has to be typed once per device/browser, since a login can never be shared
+across different devices — that is standard for any password-protected page, not something
+specific to how this was built. This page shows customer names, phone numbers, addresses, and
+full order/chat history for every customer.
+
+- A (recommended): keep the password, but make a login last much longer — for example 30 or 90
+  days instead of 12 hours — so in practice it is rarely asked for again on a device already in
+  use. Each new device/browser still asks once, the first time.
+- B: a bookmarkable link with a long-lived access code built into the address itself, so opening
+  the bookmark works without typing anything — closer to "just open it," while the access code can
+  still be changed later to cut off access if the link is ever shared somewhere it shouldn't be.
+  More work to build than A, and if the link itself leaks (forwarded, screenshotted, saved in an
+  insecure place) anyone with it can see all customer data until the code is changed.
+- C: remove the password entirely. Simplest and matches "should just work everywhere" exactly —
+  anyone who ever obtains this address, by any means, can see every customer's name, phone,
+  address, and full order/chat history, indefinitely, with no way to require anything from them
+  first. Given the store's own Privacy Policy already commits to sharing customer data only with
+  payment gateways/couriers/service providers as needed to fulfil orders, this option is worth
+  weighing against that commitment before choosing it.
+
+Marked ON HOLD pending your answer — nothing has been changed yet.
+
 ## ✅ ANSWERED (2026-08-12)
 
 **16. Whose phone number should unlock an order in WhatsApp chat?** When a customer messages

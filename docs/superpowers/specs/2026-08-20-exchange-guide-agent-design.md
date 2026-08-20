@@ -126,13 +126,19 @@ to the resolved phone, done once per turn regardless of which agent ends up hand
 
 ## Router change
 
-`app/agents/router.py`'s `_ROUTER_PROMPT` gains a 6th intent:
+`app/agents/router.py`'s `_ROUTER_PROMPT` gains a 6th intent, covering BOTH starting a new
+exchange and asking about the status of one already requested (the original version of this
+doc specified only the first half, missing that the agent it describes below also answers
+"where is my exchange" — corrected here after the final whole-branch review caught the gap
+between this doc's two sections):
 
 ```
 - exchange: the customer wants to actually exchange an item from THEIR OWN order for a
   different size (not just asking about the exchange policy in the abstract -- that is
-  policy). Reports of a damaged, defective, or wrong item are NOT this -- route those to
-  customer_support instead, since they need photo/video proof this bot cannot yet collect.
+  policy), OR is asking about the progress of an exchange they already requested ("where is
+  my exchange", "exchange update") -- that is this too, not order_tracking. Reports of a
+  damaged, defective, or wrong item are NOT this -- route those to customer_support instead,
+  since they need photo/video proof this bot cannot yet collect.
 ```
 
 `policy`'s existing bullet is narrowed the same way the delivery-timing split narrowed it
@@ -142,10 +148,16 @@ exclusion for "a customer who wants to actually exchange their own order — tha
 
 ## Conversation flow (`app/agents/exchange.py`)
 
-New agent, same shape as `order_tracking.py`/`policy.py`: a system-prompt template +
-`HANDOFF_JSON_CONTRACT`, fed a Python-rendered context block per eligible/ineligible order
-plus any existing exchange requests (status + return-tracking link, so the agent can
-answer "where is my exchange" from real data, never invented).
+New agent, same shape as `order_tracking.py`/`policy.py`: a system-prompt template, fed a
+Python-rendered context block per eligible/ineligible order plus any existing exchange
+requests (status + return-tracking link, so the agent can answer "where is my exchange" from
+real data, never invented). **Deviation from this doc's original description (decided during
+Task 4's implementation, not this doc):** the agent does NOT use the shared
+`HANDOFF_JSON_CONTRACT` from `app/agents/base.py` — its JSON reply needs a third field
+(`create_exchange`) beyond `reply`/`handoff`, and appending the shared contract after a local
+instruction risks exactly the contradiction bug class this session's `error_learnings.md`
+already documents for `policy.py`. The agent writes its own self-contained handoff wording
+instead, following the precedent `customer_support.py` already set.
 
 1. Agent is given each order's `ExchangeEligibility` fact. If ineligible, it explains why
    using the given reason and does not proceed further for that order.

@@ -56,6 +56,8 @@ ORDER_NODE = {
     },
 }
 
+ORDER_NODE_WITH_CREATED_AT = {**ORDER_NODE, "createdAt": "2026-08-14T03:14:46Z"}
+
 # A (partially) fulfilled order IS the only kind that can carry fulfillments -- _with_fulfillments
 # now skips the tracking sub-fetch entirely for None/UNFULFILLED orders (nothing to fetch), so the
 # tracking-parse tests must drive a genuinely fulfilled node for the follow-up query to fire.
@@ -75,6 +77,43 @@ async def test_get_order_parses_full_node(settings, master_key) -> None:
     assert order.best_phone() == "+919999999999"
     assert order.customer_locale == "en-IN"
     assert order.total is not None and order.total.currency == "INR"
+
+
+async def test_get_order_parses_created_at(settings, master_key) -> None:
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"node": ORDER_NODE_WITH_CREATED_AT}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    order = await client.get_order("gid://shopify/Order/12187547894128")
+    assert order is not None
+    assert order.created_at == "2026-08-14T03:14:46Z"
+
+
+async def test_get_order_missing_created_at_is_none(settings, master_key) -> None:
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"node": ORDER_NODE}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    order = await client.get_order("gid://shopify/Order/12187547894128")
+    assert order is not None
+    assert order.created_at is None
+
+
+async def test_get_order_query_selects_created_at(settings, master_key) -> None:
+    # The read path must SELECT createdAt, not just parse it -- mirrors the existing
+    # test_get_order_populates_updated_at_for_the_mirrors_staleness_guard pattern.
+    captured: dict[str, str] = {}
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        captured["query"] = json.loads(request.content)["query"]
+        return httpx.Response(200, json={"data": {"node": ORDER_NODE}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    await client.get_order("gid://shopify/Order/12187547894128")
+    assert "createdAt" in captured["query"]
 
 
 _FULFILLMENTS_PAYLOAD = [

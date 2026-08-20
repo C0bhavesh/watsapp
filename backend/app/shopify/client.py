@@ -61,7 +61,7 @@ ORDER_FIELDS = (
     # write guard. Without selecting it, every row this path writes lands with
     # `updated_at = NULL`, which the guard treats as "always overwritable", so a later stale
     # webhook replay could revert it.
-    "displayFulfillmentStatus cancelledAt customerLocale updatedAt "
+    "displayFulfillmentStatus cancelledAt customerLocale createdAt updatedAt "
     "totalPriceSet { shopMoney { amount currencyCode } } "
     "shippingAddress { phone address1 address2 city province zip country } "
     "billingAddress { phone } "
@@ -185,6 +185,7 @@ def _order_from_node(node: dict[str, Any]) -> Order:
         line_items=_line_items_from_node(node),
         customer=_customer_from_node(node),
         updated_at=node.get("updatedAt"),  # selected by ORDER_FIELDS; see the note there
+        created_at=node.get("createdAt"),  # selected by ORDER_FIELDS; see the note there
         # fulfillments are fetched separately (get_order_fulfillments) and attached by the caller,
         # so a missing read_fulfillments scope can never fail the core order query.
     )

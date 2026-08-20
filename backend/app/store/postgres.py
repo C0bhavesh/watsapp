@@ -63,7 +63,7 @@ _MIRROR_ORDER_SELECT = (
     "SELECT o.gid, o.name, o.email, o.phone, o.shipping_phone, o.billing_phone, "
     "o.financial_status, o.fulfillment_status, o.cancelled_at, o.tags, "
     "o.payment_gateway_names, o.total_amount, o.total_currency, o.customer_locale, "
-    "o.updated_at, "
+    "o.updated_at, o.order_created_at, "
     "c.gid AS c_gid, c.first_name AS c_first_name, c.last_name AS c_last_name, "
     "c.email AS c_email, c.phone AS c_phone, c.address_line1 AS c_address_line1, "
     "c.address_line2 AS c_address_line2, c.city AS c_city, c.state AS c_state, "
@@ -100,6 +100,7 @@ def _order_from_row(
         total=total, customer_locale=row["customer_locale"],
         line_items=tuple(items), customer=customer,
         updated_at=row["updated_at"].isoformat() if row["updated_at"] else None,
+        created_at=row["order_created_at"].isoformat() if row["order_created_at"] else None,
         fulfillments=tuple(fulfillments or ()),
     )
 
@@ -524,15 +525,16 @@ class PostgresIngestStore:
                     "INSERT INTO orders (gid, name, order_number, customer_gid, email, "
                     "phone, shipping_phone, billing_phone, financial_status, "
                     "fulfillment_status, cancelled_at, tags, payment_gateway_names, "
-                    "total_amount, total_currency, customer_locale, updated_at, synced_at) "
+                    "total_amount, total_currency, customer_locale, updated_at, "
+                    "order_created_at, synced_at) "
                     "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, "
-                    "$16, $17, now()) ON CONFLICT (gid) DO UPDATE SET name = $2, "
+                    "$16, $17, $18, now()) ON CONFLICT (gid) DO UPDATE SET name = $2, "
                     "order_number = $3, "
                     "customer_gid = $4, email = $5, phone = $6, shipping_phone = $7, "
                     "billing_phone = $8, financial_status = $9, fulfillment_status = $10, "
                     "cancelled_at = $11, tags = $12, payment_gateway_names = $13, "
                     "total_amount = $14, total_currency = $15, customer_locale = $16, "
-                    "updated_at = $17, synced_at = now() "
+                    "updated_at = $17, order_created_at = $18, synced_at = now() "
                     # Out-of-order-delivery guard (see _upsert_customer_on_conn): a late RETRY
                     # of an older orders/updated must not revert newer state -- on a terminal
                     # order (cancelled/fulfilled) nothing would ever correct it again.
@@ -547,6 +549,7 @@ class PostgresIngestStore:
                     list(order.tags),
                     list(order.payment_gateway_names), total_amount, total_currency,
                     order.customer_locale, _parse_timestamp(order.updated_at),
+                    _parse_timestamp(order.created_at),
                 )
                 if applied is None:
                     # The guard rejected this write as stale; leave the stored items alone

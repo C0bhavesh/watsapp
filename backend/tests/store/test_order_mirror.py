@@ -463,12 +463,44 @@ async def test_pg_line_items_are_capped_and_inserted_in_one_batch() -> None:
     assert len(rows) == MAX_MIRROR_LINE_ITEMS
 
 
+async def test_pg_mirror_upsert_writes_created_at() -> None:
+    conn = _RecordingConn()
+    await _pg(conn).upsert_order_mirror(
+        _order(created_at="2026-07-28T03:14:46-04:00")
+    )
+    orders_sql = [
+        (sql, args) for sql, args in conn.executed if sql.startswith("INSERT INTO orders")
+    ]
+    assert len(orders_sql) == 1
+    sql, args = orders_sql[0]
+    assert "order_created_at" in sql
+    assert args[17] == datetime.fromisoformat("2026-07-28T03:14:46-04:00")  # $18
+
+
+async def test_pg_mirror_select_reads_order_created_at() -> None:
+    # The read query must SELECT the column, not just the write side populate it.
+    # PostgresIngestStore.get_mirrored_order uses conn.fetchrow, but find_mirrored_orders_by_phone
+    # uses conn.fetch, which _FakeReadConn implements -- use that path to inspect the query text.
+    conn = _FakeReadConn([_fake_order_row("gid://a")], [])
+    store = PostgresIngestStore(_FakePool(conn))  # type: ignore[arg-type]
+    await store.find_mirrored_orders_by_phone("+919876500000")
+    assert "o.order_created_at" in conn.fetch_calls[0][0]
+
+
 async def test_get_mirrored_order_returns_stored_order() -> None:
     store = InMemoryIngestStore()
     await store.upsert_order_mirror(_order())
     result = await store.get_mirrored_order("gid://shopify/Order/1")
     assert result is not None
     assert result.name == "tavas3733"
+
+
+async def test_upsert_order_mirror_memory_round_trips_created_at() -> None:
+    store = InMemoryIngestStore()
+    await store.upsert_order_mirror(_order(created_at="2026-07-28T03:14:46-04:00"))
+    result = await store.get_mirrored_order("gid://shopify/Order/1")
+    assert result is not None
+    assert result.created_at == "2026-07-28T03:14:46-04:00"
 
 
 async def test_get_mirrored_order_missing_returns_none() -> None:
@@ -553,7 +585,8 @@ def _fake_order_row(gid: str, name: str = "tavas1") -> dict[str, object]:
         "shipping_phone": None, "billing_phone": None, "financial_status": None,
         "fulfillment_status": None, "cancelled_at": None, "tags": None,
         "payment_gateway_names": None, "total_amount": None, "total_currency": None,
-        "customer_locale": None, "updated_at": None, "c_gid": None,
+        "customer_locale": None, "updated_at": None, "order_created_at": None,
+        "c_gid": None,
     }
 
 
@@ -757,6 +790,18 @@ async def test_upsert_fulfillment_pg_round_trips_onto_get_mirrored_order(pool: L
     assert len(result.fulfillments) == 1
     assert result.fulfillments[0].tracking_number == "AWB123"
     assert result.fulfillments[0].tracking_company == "Delhivery"
+
+
+@pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")
+async def test_upsert_order_mirror_pg_created_at_round_trips(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    gid = f"gid://shopify/Order/{uuid.uuid4()}"
+    await store.upsert_order_mirror(
+        _order(gid=gid, customer=None, created_at="2026-07-28T03:14:46-04:00")
+    )
+    result = await store.get_mirrored_order(gid)
+    assert result is not None
+    assert result.created_at == "2026-07-28T03:14:46-04:00"
 
 
 @pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")

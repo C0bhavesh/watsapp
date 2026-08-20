@@ -13,6 +13,58 @@
 ---
 <!-- entries below -->
 
+## estimate_delivery / DeliveryEstimate (delivery-date estimation, 2026-08-20)
+- **File:** app/core/delivery_estimate.py
+- **Purpose:** formula-based delivery-date estimate for the order-tracking WhatsApp agent, so a
+  customer asking "when will my order arrive" always gets an answer. Deliberately does NOT read or
+  scrape any courier tracking page (see `docs/superpowers/specs/2026-08-20-delivery-date-estimation-design.md`
+  — that would reopen `client-decisions-all.md` Q10, "no live courier integration," already closed).
+  A pure function of `(Order, date)`, no I/O.
+- **Public API:** `DeliveryEstimate(expected_date: date)` (frozen dataclass);
+  `estimate_delivery(order: Order, today: date) -> DeliveryEstimate | None`.
+- **Used in:** `app/agents/order_tracking.py::_delivery_estimate_line` (renders the result as a
+  plain-text line in the LLM's order context; the LLM only relays it verbatim, never computes its
+  own date).
+- **Notes:** rules, in order: (1) `order.is_cancelled()` → `None`; (2) any fulfillment has
+  `delivered_at` set → `None` (NOTE: the webhook-mirrored ingestion path never populates
+  `delivered_at` — see `app/channels/shopify_orders.py`'s own comment on this — so this guard is
+  reliable only for a live-Shopify-sourced `Order`, not a mirror-sourced one; the past-date clamp
+  below is what actually protects the realistic mirror-backed runtime path); (3) missing
+  `order.created_at` → `None`; (4) otherwise `created_at + 2 (prep) + zone_days`, `+2` more if
+  `(today - created).days > 3` and still undispatched (`fulfillment_status in (None,
+  "UNFULFILLED")`); (5) **if the resulting date is `< today`, return `None` instead** — added in
+  the final whole-branch review's fix wave (commit `043e9b4`) after the review found the formula
+  could otherwise state a delivery date already in the past as a future promise. Zone lookup
+  (`_STATE_ZONE`, case-insensitive on `Order.customer.state`) covers all Indian states/UTs across
+  4 buckets (west=2, north=3, east=5, south=5 days); Madhya Pradesh/Chhattisgarh grouped into west,
+  Northeast states grouped into east (no official 4-bucket mapping exists — documented as an
+  owner-revisitable choice); unknown/missing state defaults to the 5-day zone. Known parked
+  minors (not fixed, not load-bearing): the "undispatched" predicate is duplicated across 4 files
+  (`delivery_estimate.py`, `order_tracking.py`, `order_actions.py`, `shopify/client.py`) rather
+  than sharing one `Order.is_dispatched()`; `created_at` string parsing doesn't normalize timezone
+  between webhook-sourced (`-04:00`-style offsets) and GraphQL-sourced (`Z`) values, which could
+  shift the late-ship boundary by up to a day; `order_tracking.py` calls `datetime.now(UTC)`
+  internally rather than taking an injectable clock, so prompt-layer tests can only assert
+  substring presence, not the exact rendered date.
+
+## Order.created_at (Shopify Order.createdAt, 2026-08-20)
+- **File:** app/shopify/models.py (`Order.created_at: str | None = None`).
+- **Purpose:** raw ISO-8601 order-creation timestamp, the starting point for
+  `delivery_estimate.estimate_delivery`'s formula. Additive field, same convention as the
+  pre-existing `Order.updated_at`/`Order.cancelled_at`.
+- **Used in:** wired through every order-construction path — `app/shopify/client.py`
+  (`ORDER_FIELDS` selects `createdAt`, `_order_from_node` parses it — covers every live-Shopify
+  order query, since they all share `ORDER_FIELDS`); `app/channels/shopify_orders.py`
+  (`order_from_webhook_payload`, via the existing `_c()` coercion helper); `app/store/postgres.py`
+  (`_MIRROR_ORDER_SELECT`/`_order_from_row`/`upsert_order_mirror` — the `orders.order_created_at`
+  timestamptz column already existed in `schema.sql`, pre-dating this feature and already deployed;
+  no new migration was needed, only code wiring); `app/store/memory.py`'s `InMemoryIngestStore`
+  needed zero code change (it stores whole `Order` objects and round-trips new fields
+  automatically).
+- **Notes:** `upsert_order_mirror`'s new SQL param was appended at the END of the existing
+  `INSERT INTO orders` column list/VALUES/SET clause (as `$18`) specifically so no pre-existing
+  positional-index-based test assertion elsewhere in `test_order_mirror.py` shifted.
+
 ## Template catalog + default-value resolver (admin manual-resend, Task 1 of 3, 2026-08-19)
 - **File:** app/admin/template_catalog.py
 - **Purpose:** registry of the store's 4 Meta-approved WhatsApp templates + a helper that derives

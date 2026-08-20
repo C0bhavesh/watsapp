@@ -283,6 +283,26 @@ would be rejected by Meta and break delivery again.
 Shipped as A (English-pinned) by default since it is the only option that does not block any
 customer's message; flag if B is actually wanted.
 
+## Part 9 — New question (2026-08-20)
+
+**21. Real courier-supplied delivery estimate (would reopen Q10).** We're building a
+delivery-date *estimate* for the WhatsApp bot ("when will my order arrive?") using a
+fixed formula (prep time + regional transit days), always labeled as an estimate that
+may vary by 1-2 days. A more accurate option exists: reading the actual expected-delivery
+date shown on the courier's own tracking page (Delhivery/DTDC/etc.) once an order ships.
+That was explicitly ruled out earlier (Q10, answered 2026-08-06: "No live courier
+integration... Decisively closes Q10") because it requires ongoing per-courier
+integration work and is fragile (courier sites change their page layout without notice).
+
+- A (recommended): keep Q10's answer as-is. Ship the formula-based estimate only, for
+  every order, shipped or not. Simpler, no ongoing maintenance burden, matches what was
+  already agreed.
+- B: reopen Q10. Build real courier-ETA lookup as a separate, larger follow-up project
+  (own design/estimate), used only for orders that have already shipped; the formula
+  still covers everything before that.
+
+Not blocking — the formula-based estimate is being built now regardless of this answer.
+
 ## Part 8 — New question (2026-08-19)
 
 **20. How much friction should logging into the WhatsApp admin chat page carry?** The page at

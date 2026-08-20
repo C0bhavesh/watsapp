@@ -293,5 +293,13 @@ CREATE INDEX IF NOT EXISTS idx_exchange_requests_phone ON exchange_requests (pho
 -- order for a fresh bot-created request; any further exchange on that order goes to a human. So
 -- this index applies unconditionally (no WHERE clause) and must never allow two rows for the
 -- same order_gid, qc_failed included -- matching the Python-level guard above exactly.
-CREATE UNIQUE INDEX IF NOT EXISTS ux_exchange_requests_active_order
+--
+-- The DROP below is required, not decorative: Postgres matches "CREATE ... IF NOT EXISTS" by
+-- INDEX NAME, not by definition. An earlier version of this file created a PARTIAL index under
+-- this exact same name (WHERE status != 'qc_failed', the wrong policy this fix wave corrects) --
+-- on any database where that version already ran, a bare "CREATE UNIQUE INDEX IF NOT EXISTS"
+-- here would silently no-op and leave the stale partial index in place, so the corrected
+-- constraint would never actually take effect despite this file reading as fixed.
+DROP INDEX IF EXISTS ux_exchange_requests_active_order;
+CREATE UNIQUE INDEX ux_exchange_requests_active_order
     ON exchange_requests (order_gid);

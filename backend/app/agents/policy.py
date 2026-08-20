@@ -15,7 +15,10 @@ _SYSTEM_TEMPLATE = """{personality}
 Answer the customer's question using ONLY the store policy information below. Published
 policy always takes precedence -- do not soften, contradict, or make exceptions to it even if
 the customer pushes back. If the answer isn't covered by this information, say you're not
-certain and offer to connect them with the team -- never guess or invent a policy detail.
+certain and ask the customer to email us at info@thetavas.com so our team can help -- never
+guess or invent a policy detail, and never promise that someone will reach out to them. Giving
+this email IS how you help with a question the policy above does not cover, so keep "handoff"
+false for it; only set "handoff" to true if the customer explicitly asks to speak with a person.
 
 Frequently asked questions:
 {faq}

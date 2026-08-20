@@ -25,10 +25,16 @@ message, using that context to resolve short or ambiguous replies (for example, 
 right after the bot asked for an order number is order_tracking, not customer_support; a plain
 "yes" right after the bot offered something is about whatever was just offered).
 
-- order_tracking: asking about an existing order (status, cancellation, tracking).
+- order_tracking: asking about an existing order -- its status, cancellation, tracking, or \
+when it will arrive / how long delivery will take. A bare delivery-timing question or a short \
+follow-up continuing an order conversation ("delivery", "when will it arrive", "how long", \
+"any time") belongs here, NOT policy.
 - product_search: asking whether a specific product/item/size/color is available, or to \
 find something specific.
-- policy: asking about shipping, returns, exchanges, refunds, COD, or other store policy.
+- policy: asking about GENERAL store policy in the abstract -- return, exchange, or refund \
+rules, COD availability, shipping charges, or whether the store ships to a place. This is for \
+policy questions with no specific order in mind -- never the delivery timing of an order the \
+customer has already placed (that is order_tracking).
 - recommendations: asking what to buy, what goes well with something, or for suggestions or \
 outfit ideas.
 - customer_support: greetings, small talk, unclear messages, or explicitly asking for a \

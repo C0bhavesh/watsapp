@@ -109,3 +109,35 @@ async def test_classify_intent_with_no_history_still_works() -> None:
     provider = _FixedProvider(text='{"intent": "order_tracking"}')
     result = await classify_intent(provider, "m", "k", "where is my order", history=None)
     assert result == "order_tracking"
+
+
+async def test_router_prompt_assigns_order_delivery_timing_to_order_tracking() -> None:
+    """A bare delivery-timing question or short follow-up about an order the customer has
+    already placed ("Delivery", "when will it arrive", "any time", "how long") must route to
+    order_tracking, not policy -- otherwise conversation.py never resolves the order and the
+    delivery-date estimate never fires (2026-08-20 misroute bug). The classification is a live
+    LLM judgment (mocked in the unit tests above), so this asserts the prompt guidance that
+    steers it: order_tracking explicitly owns an existing order's delivery/arrival timing."""
+    from app.agents.router import _ROUTER_PROMPT
+
+    lowered = _ROUTER_PROMPT.lower()
+    # order_tracking must own "when will it arrive / how long delivery takes" for a placed order.
+    assert "arrive" in lowered
+    assert "delivery" in lowered
+    # The bare short-follow-up examples the misroute hit must be named as order_tracking cues.
+    assert "any time" in lowered
+
+
+async def test_router_prompt_scopes_policy_to_general_store_policy_only() -> None:
+    """policy must stay scoped to GENERAL/abstract store policy (return/exchange/refund rules,
+    COD availability, shipping charges, whether the store ships somewhere) and explicitly NOT
+    claim the delivery timing of an order the customer has already placed -- that exclusion is
+    what stops a bare "Delivery" follow-up from being swallowed as policy again."""
+    from app.agents.router import _ROUTER_PROMPT
+
+    lowered = _ROUTER_PROMPT.lower()
+    # Genuine policy topics stay in policy.
+    assert "return" in lowered
+    assert "cod" in lowered
+    # The exclusion carving order-timing OUT of policy must be present.
+    assert "already placed" in lowered

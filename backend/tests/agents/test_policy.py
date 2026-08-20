@@ -148,3 +148,17 @@ async def test_system_prompt_requests_the_handoff_field() -> None:
     await run(_context(provider, "return window", {"faq": "[]", "business": "{}"}))
     assert provider.captured_messages is not None
     assert '"handoff"' in provider.captured_messages[0].content
+
+
+async def test_system_prompt_directs_uncovered_questions_to_contact_email() -> None:
+    """When the policy knowledge does not cover a question, the model is told to give the real
+    contact email info@thetavas.com rather than a vague "we'll connect you with the team"
+    promise (owner-requested). The email is stated in the English system instruction; the model
+    localises the surrounding reply into the customer's language per the shared personality."""
+    provider = _CapturingProvider('{"reply": "Sure.", "handoff": false}')
+    await run(_context(provider, "do you gift wrap", {"faq": "[]", "business": "{}"}))
+    assert provider.captured_messages is not None
+    system_prompt = provider.captured_messages[0].content
+    assert "info@thetavas.com" in system_prompt
+    # The vague "connect you with the team" promise for the uncovered-answer case is gone.
+    assert "connect them with the team" not in system_prompt

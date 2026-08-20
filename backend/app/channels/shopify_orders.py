@@ -54,6 +54,11 @@ class IncomingOrder:
     product_color: str | None = None
     product_size: str | None = None
     product_gid: str | None = None
+    # The ordered VARIANT's own gid (built from the same line item's numeric variant_id). A
+    # multi-colour product shares ONE featuredImage across every colour, so the header photo must
+    # be resolved from the specific ordered variant, not just the product -- product_gid remains
+    # the fallback for when the variant has no dedicated image of its own (bug fix, 2026-08-20).
+    product_variant_gid: str | None = None
 
     def is_cod(self) -> bool:
         if any("cash on delivery" in g.lower() for g in self.gateways):
@@ -115,6 +120,7 @@ def parse_order_created(payload: dict) -> IncomingOrder | None:  # type: ignore[
         product_color=product_color,
         product_size=product_size,
         product_gid=_product_gid_from_line_item(first_item),
+        product_variant_gid=_variant_gid_from_line_item(first_item),
     )
 
 
@@ -150,6 +156,24 @@ def _product_gid_from_line_item(item: dict[str, object]) -> str | None:
         return f"gid://shopify/Product/{raw}"
     if isinstance(raw, str) and raw.isascii() and raw.isdigit():
         return f"gid://shopify/Product/{raw}"
+    return None
+
+
+def _variant_gid_from_line_item(item: dict[str, object]) -> str | None:
+    """Build the ordered variant's own gid from a line item's numeric ``variant_id``.
+
+    Sibling to ``_product_gid_from_line_item``, same guard: ``bool`` is an ``int`` subclass so it
+    is rejected explicitly, and a string id must be ASCII digits only so nothing path-like is
+    interpolated into the gid. Lets the header photo be resolved from the specific ordered colour
+    variant rather than only the product's shared featured image (bug fix, 2026-08-20).
+    """
+    raw = item.get("variant_id")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return f"gid://shopify/ProductVariant/{raw}"
+    if isinstance(raw, str) and raw.isascii() and raw.isdigit():
+        return f"gid://shopify/ProductVariant/{raw}"
     return None
 
 

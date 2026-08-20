@@ -814,10 +814,15 @@ async def test_list_orders_created_since_empty_result(settings, master_key) -> N
     assert orders == []
 
 
-async def test_get_product_image_url_returns_featured_image(settings, master_key) -> None:
+async def test_get_product_image_url_no_variant_gid_uses_product_only_path(
+    settings, master_key
+) -> None:
+    # Regression guard: with no variant gid available at all (e.g. a legacy/malformed payload),
+    # the query/behaviour must be IDENTICAL to before this bug fix -- a single product-only query.
     def gql(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.read())
         assert "product(id: $id)" in body["query"]
+        assert "productVariant" not in body["query"]
         assert body["variables"] == {"id": "gid://shopify/Product/15061451407728"}
         return httpx.Response(200, json={"data": {"product": {
             "featuredImage": {"url": "https://cdn.shopify.com/s/files/1/x.jpg"}}}})
@@ -825,6 +830,72 @@ async def test_get_product_image_url_returns_featured_image(settings, master_key
     client, config = make_client(settings, master_key, grant_or(gql))
     await seed(config)
     url = await client.get_product_image_url("gid://shopify/Product/15061451407728")
+    assert url == "https://cdn.shopify.com/s/files/1/x.jpg"
+
+
+async def test_get_product_image_url_falls_back_to_product_when_variant_has_no_image(
+    settings, master_key
+) -> None:
+    # Bug fix: Shopify returns a null variant image when the colour shares the product's one
+    # photo (normal, not an error) -- the resolver must fall back to the product's featuredImage,
+    # in ONE round trip (both gids resolved together, so the <5s webhook-ack budget isn't doubled).
+    def gql(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.read())
+        assert "productVariant(id: $vid)" in body["query"]
+        assert "product(id: $pid)" in body["query"]
+        assert body["variables"] == {
+            "vid": "gid://shopify/ProductVariant/1",
+            "pid": "gid://shopify/Product/15061451407728",
+        }
+        return httpx.Response(200, json={"data": {
+            "productVariant": {"image": None},
+            "product": {"featuredImage": {"url": "https://cdn.shopify.com/s/files/1/x.jpg"}},
+        }})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    url = await client.get_product_image_url(
+        "gid://shopify/Product/15061451407728", "gid://shopify/ProductVariant/1"
+    )
+    assert url == "https://cdn.shopify.com/s/files/1/x.jpg"
+
+
+async def test_get_product_image_url_variant_image_wins_over_product_featured(
+    settings, master_key
+) -> None:
+    # The whole point of the fix: when the ordered variant HAS its own dedicated photo, that photo
+    # -- not the product's shared/default one -- is what goes into the confirmation header.
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {
+            "productVariant": {"image": {"url": "https://cdn.shopify.com/s/files/1/cream.jpg"}},
+            "product": {"featuredImage": {"url": "https://cdn.shopify.com/s/files/1/black.jpg"}},
+        }})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    url = await client.get_product_image_url(
+        "gid://shopify/Product/15061451407728", "gid://shopify/ProductVariant/1"
+    )
+    assert url == "https://cdn.shopify.com/s/files/1/cream.jpg"
+
+
+async def test_get_product_image_url_rejects_invalid_variant_image_falls_back_to_product(
+    settings, master_key
+) -> None:
+    # Mirrors test_get_product_image_url_rejects_non_shopify_host for the variant field: an
+    # invalid (non-Shopify-host) variant image must not be trusted -- it degrades to the product's
+    # featuredImage rather than being returned as-is.
+    def gql(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {
+            "productVariant": {"image": {"url": "https://evil.example.com/x.jpg"}},
+            "product": {"featuredImage": {"url": "https://cdn.shopify.com/s/files/1/x.jpg"}},
+        }})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    url = await client.get_product_image_url(
+        "gid://shopify/Product/15061451407728", "gid://shopify/ProductVariant/1"
+    )
     assert url == "https://cdn.shopify.com/s/files/1/x.jpg"
 
 

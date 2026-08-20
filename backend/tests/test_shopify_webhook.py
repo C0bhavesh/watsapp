@@ -133,6 +133,7 @@ def _payload_with_product(gid: str = "gid://shopify/Order/img1") -> dict:
     p["line_items"] = [
         {
             "title": "Chic Kurta Set", "product_id": 15061451407728,
+            "variant_id": 53472318620016,
             "variant_title": "Cream / M", "quantity": 1, "price": "1299.00",
         }
     ]
@@ -147,8 +148,9 @@ async def test_orders_create_resolves_product_image_into_payload(
     c = get_container()
     seen: dict = {}
 
-    async def fake_image(product_gid: str) -> str:
+    async def fake_image(product_gid: str, variant_gid: str | None = None) -> str:
         seen["gid"] = product_gid
+        seen["variant_gid"] = variant_gid
         return "https://cdn.shopify.com/s/files/1/kurta.jpg"
 
     monkeypatch.setattr(c.shopify, "get_product_image_url", fake_image)
@@ -160,6 +162,9 @@ async def test_orders_create_resolves_product_image_into_payload(
     draft = c.ingest.outbound["order_created:gid://shopify/Order/img1"]  # type: ignore[attr-defined]
     params = json.loads(draft.payload_json)
     assert seen["gid"] == "gid://shopify/Product/15061451407728"
+    # Bug fix: the ordered variant's own gid must be threaded all the way to the client call, not
+    # just the product gid -- this is the assertion that would have caught the original bug.
+    assert seen["variant_gid"] == "gid://shopify/ProductVariant/53472318620016"
     assert params["body_params"]["product_name"] == "Chic Kurta Set"
     assert params["body_params"]["product_color"] == "Cream"
     assert params["body_params"]["product_size"] == "M"
@@ -173,7 +178,7 @@ async def test_orders_create_degrades_gracefully_when_image_fetch_fails(
     # queued, just no image_url (the send goes out with no header).
     c = get_container()
 
-    async def boom(product_gid: str) -> str:
+    async def boom(product_gid: str, variant_gid: str | None = None) -> str:
         raise RuntimeError("shopify down")
 
     monkeypatch.setattr(c.shopify, "get_product_image_url", boom)
@@ -1227,7 +1232,7 @@ async def test_slow_image_fetch_alone_stays_bounded_and_drops_image(
     # send_mode is the default `off` here, so no inline send runs — this isolates the image bound.
     c = get_container()
 
-    async def _slow_image(product_gid: str) -> str:
+    async def _slow_image(product_gid: str, variant_gid: str | None = None) -> str:
         await asyncio.sleep(8)
         raise AssertionError("image fetch should have been cancelled by the timeout")
 
@@ -1258,7 +1263,7 @@ async def test_slow_image_fetch_and_slow_send_together_stay_under_ack_budget(
     # bounds stack: 1.0s image + 3.0s send = ~4.0s worst case, with real margin under 5s.
     await _enable_live_sending()
 
-    async def _slow_image(product_gid: str) -> str:
+    async def _slow_image(product_gid: str, variant_gid: str | None = None) -> str:
         await asyncio.sleep(8)
         raise AssertionError("image fetch should have been cancelled by the timeout")
 

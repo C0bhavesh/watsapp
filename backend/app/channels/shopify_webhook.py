@@ -262,12 +262,20 @@ async def _enqueue_and_send_fulfillment_notification(
         _log_notify_failure(order_gid, exc)
 
 
-async def _resolve_product_image(c: Container, product_gid: str | None) -> str | None:
-    """Resolve the first product's photo URL for the cod_confirmation header — best-effort.
+async def _resolve_product_image(
+    c: Container, product_gid: str | None, variant_gid: str | None
+) -> str | None:
+    """Resolve the ordered line item's photo URL for the cod_confirmation header — best-effort.
+
+    Bug fix (2026-08-20): resolves from the ordered VARIANT's own image first, falling back to
+    the product's shared featured image only when the variant has no dedicated photo — previously
+    this only ever read the product's featuredImage, so every colour of a multi-colour product
+    showed the same (often wrong) photo. Both gids are resolved in ONE GraphQL call
+    (``get_product_image_url``), so this fix does not add a second Shopify round trip.
 
     Q19a: the header is the live product image, but a Shopify hiccup must NEVER block the
-    confirmation. ``get_product_image_url`` already swallows any ``ShopifyError`` (missing product,
-    ACCESS_DENIED, outage) into None; this wraps it in a short total-elapsed bound
+    confirmation. ``get_product_image_url`` already swallows any ``ShopifyError`` (missing product/
+    variant, ACCESS_DENIED, outage) into None; this wraps it in a short total-elapsed bound
     (``asyncio.wait_for``) because it runs on the orders/create webhook's tight <5s ack path, and
     catches the timeout (and anything else) so the ack can never be delayed past budget or turned
     into a 5xx. Any failure -> None -> the template sends with no header.
@@ -276,7 +284,7 @@ async def _resolve_product_image(c: Container, product_gid: str | None) -> str |
         return None
     try:
         return await asyncio.wait_for(
-            c.shopify.get_product_image_url(product_gid),
+            c.shopify.get_product_image_url(product_gid, variant_gid),
             timeout=_IMAGE_FETCH_TIMEOUT_SECONDS,
         )
     except Exception as exc:
@@ -458,7 +466,9 @@ async def shopify_webhook(request: Request) -> Response:
         # _resolve_product_image); its worst-case latency shares the handler's pre-existing ack
         # headroom, and a rare overrun is a SAFE idempotent Shopify retry (webhook_id dedupe -> no
         # duplicate row; the inline send's claim-by-id -> no double send).
-        image_url = await _resolve_product_image(c, incoming.product_gid)
+        image_url = await _resolve_product_image(
+            c, incoming.product_gid, incoming.product_variant_gid
+        )
         template_name = TEMPLATE_NAME_COD if incoming.is_cod() else TEMPLATE_NAME_PREPAID
         template_params: dict[str, object] = {
             "template": template_name,

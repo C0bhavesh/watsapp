@@ -321,22 +321,53 @@ class ShopifyClient:
             return ()
         return _fulfillments_from_node(node)
 
-    async def get_product_image_url(self, product_gid: str) -> str | None:
-        """Fetch a product's featured image URL for the cod_confirmation template header.
+    async def get_product_image_url(
+        self, product_gid: str, variant_gid: str | None = None
+    ) -> str | None:
+        """Fetch the ordered VARIANT's own image for the cod_confirmation template header,
+        falling back to the product's shared featured image when the variant has no dedicated
+        photo of its own -- Shopify returns a null variant image for a colour that shares the
+        product's one photo (normal, not an error). Bug fix (2026-08-20): the header previously
+        always came from the product's featuredImage, so every colour of a multi-colour product
+        showed the same (default) photo regardless of which colour was actually ordered.
+
+        When ``variant_gid`` is available both gids are resolved in ONE GraphQL query, so the
+        existing <5s webhook-ack timeout budget is not doubled by a second round trip. When it is
+        unavailable (e.g. a legacy/malformed payload with no variant_id), this falls back to the
+        exact product-only query used before this fix -- a genuine regression guard, not just a
+        subset of the combined query.
 
         Best-effort and fully isolated (same posture as ``get_order_fulfillments``): any
-        ``ShopifyError`` (product missing, ACCESS_DENIED, throttle, outage) or an image-less
-        product degrades to ``None`` so the confirmation still sends without a header — a Shopify
-        hiccup must never block the customer's message (Q19a). The URL is validated at THIS source
-        (``_is_shopify_image_url``: https + ``*.shopify.com`` host + length cap) — the real check,
-        since the value is then persisted and fetched by Meta; the downstream https-prefix checks
-        are only defense-in-depth.
+        ``ShopifyError`` (product/variant missing, ACCESS_DENIED, throttle, outage) or an
+        image-less product/variant degrades to ``None`` so the confirmation still sends without a
+        header — a Shopify hiccup must never block the customer's message (Q19a). The URL is
+        validated at THIS source (``_is_shopify_image_url``: https + ``*.shopify.com`` host +
+        length cap) regardless of which field it came from — the real check, since the value is
+        then persisted and fetched by Meta; the downstream https-prefix checks are only
+        defense-in-depth.
         """
-        query = "query($id: ID!) { product(id: $id) { featuredImage { url } } }"
+        if variant_gid:
+            query = (
+                "query($vid: ID!, $pid: ID!) { "
+                "productVariant(id: $vid) { image { url } } "
+                "product(id: $pid) { featuredImage { url } } }"
+            )
+            variables: dict[str, Any] = {"vid": variant_gid, "pid": product_gid}
+        else:
+            query = "query($id: ID!) { product(id: $id) { featuredImage { url } } }"
+            variables = {"id": product_gid}
         try:
-            data = await self._graphql(query, {"id": product_gid})
+            data = await self._graphql(query, variables)
         except ShopifyError:
             return None
+        if variant_gid:
+            variant_node = data.get("productVariant")
+            if isinstance(variant_node, dict):
+                variant_image = variant_node.get("image")
+                if isinstance(variant_image, dict):
+                    variant_url = variant_image.get("url")
+                    if isinstance(variant_url, str) and _is_shopify_image_url(variant_url):
+                        return variant_url
         node = data.get("product")
         if not isinstance(node, dict):
             return None

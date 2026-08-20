@@ -204,6 +204,42 @@ def test_parse_order_created_extracts_first_line_item_product_fields() -> None:
     # The REST order webhook line item carries product_id but NO image URL, so the product gid is
     # built from product_id and the photo is fetched live from that product.
     assert order.product_gid == "gid://shopify/Product/15061451407728"
+    # Bug fix (image-shows-wrong-colour): the ordered VARIANT's own gid is also built, from the
+    # same line item's variant_id, so the header image can be resolved from the specific ordered
+    # colour rather than only the product's shared featured image.
+    assert order.product_variant_gid == "gid://shopify/ProductVariant/53472318620016"
+
+
+def test_parse_order_created_no_line_items_leaves_variant_gid_none() -> None:
+    order = parse_order_created(PAYLOAD)  # PAYLOAD has no line_items
+    assert order is not None
+    assert order.product_variant_gid is None
+
+
+def test_parse_order_created_rejects_bad_variant_id() -> None:
+    # Same guard as product_id: bool is an int subclass; non-numeric/None/dict must not build a gid.
+    for bad in (True, "not-a-number", None, {"x": 1}):
+        p = {
+            **PAYLOAD,
+            "line_items": [
+                {"title": "X", "product_id": 5, "variant_id": bad, "variant_title": "A"}
+            ],
+        }
+        order = parse_order_created(p)
+        assert order is not None
+        assert order.product_variant_gid is None, bad
+
+
+def test_parse_order_created_accepts_string_variant_id() -> None:
+    p = {
+        **PAYLOAD,
+        "line_items": [
+            {"title": "X", "product_id": 5, "variant_id": "12345", "variant_title": "A"}
+        ],
+    }
+    order = parse_order_created(p)
+    assert order is not None
+    assert order.product_variant_gid == "gid://shopify/ProductVariant/12345"
 
 
 def test_parse_order_created_single_option_variant_leaves_size_none() -> None:

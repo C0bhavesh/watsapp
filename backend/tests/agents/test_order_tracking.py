@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 from app.agents.base import DEFAULT_REVEAL_FIELDS, AgentContext
 from app.agents.order_tracking import _format_money, run
 from app.providers.base import CompletionResult, Message, ProviderError, ProviderErrorKind
@@ -420,15 +422,35 @@ def _customer(state: str = "Gujarat") -> Customer:
 
 async def test_order_line_includes_estimated_delivery_when_computable() -> None:
     provider = _CapturingProvider('{"reply": "ok"}')
+    # created "today" (whenever the suite runs) so the formula date always lands in the future,
+    # regardless of run date -- order_tracking.py computes "today" from the real clock.
+    created_at = datetime.now(UTC).date().isoformat() + "T00:00:00+00:00"
     order = _order(
         "tavas1", "+919999999999",
-        customer=_customer("Gujarat"), created_at="2026-08-10T00:00:00+00:00",
+        customer=_customer("Gujarat"), created_at=created_at,
     )
     authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
     await run(_context(provider, "when will my order arrive", [authorized]))
     prompt = _system_prompt(provider)
     assert "Estimated delivery:" in prompt
     assert "estimate" in prompt.lower() and "1-2 days" in prompt.replace("1–2 days", "1-2 days")
+
+
+async def test_order_line_omits_estimate_for_mirror_delivered_order() -> None:
+    # Mirror-shaped "delivered" order: fulfillment_status is FULFILLED but no fulfillment carries
+    # a delivered_at timestamp (the REST fulfillment webhook never populates it -- see
+    # app/channels/shopify_orders.py). created_at is old enough that the raw formula date would
+    # already be in the past. The past-date suppression in estimate_delivery must still keep this
+    # off the prompt so the customer is never told a stale/past "estimated delivery" date.
+    provider = _CapturingProvider('{"reply": "ok"}')
+    order = _order(
+        "tavas1", "+919999999999", fulfillment_status="FULFILLED",
+        customer=_customer("Gujarat"), created_at="2026-07-01T00:00:00+00:00",
+    )
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+    await run(_context(provider, "when will my order arrive", [authorized]))
+    prompt = _system_prompt(provider)
+    assert "Estimated delivery:" not in prompt
 
 
 async def test_order_line_omits_estimated_delivery_without_created_at() -> None:

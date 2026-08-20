@@ -13,7 +13,7 @@ from app.agents.base import (
 from app.channels.copy import copy_for
 from app.core.delivery_estimate import estimate_delivery
 from app.providers.base import Message, ProviderError
-from app.shopify.models import AuthorizedOrder, Fulfillment, LineItem, Money
+from app.shopify.models import AuthorizedOrder, Fulfillment, LineItem, Money, Order
 
 _SYSTEM_TEMPLATE = """{personality}
 
@@ -110,8 +110,8 @@ def _tracking_line(fulfillment: Fulfillment) -> str:
     return "  - Tracking: " + ", ".join(parts)
 
 
-def _delivery_estimate_line(order: AuthorizedOrder) -> str | None:
-    result = estimate_delivery(order.order, today=datetime.now(UTC).date())
+def _delivery_estimate_line(order: Order) -> str | None:
+    result = estimate_delivery(order, today=datetime.now(UTC).date())
     if result is None:
         return None
     return (
@@ -152,7 +152,7 @@ def _order_line(order: AuthorizedOrder, reveal_fields: Sequence[str]) -> str:
         lines.extend(
             _tracking_line(f) for f in order.order.fulfillments if f.has_tracking()
         )
-    estimate_line = _delivery_estimate_line(order)
+    estimate_line = _delivery_estimate_line(order.order)
     if estimate_line is not None:
         lines.append(estimate_line)
     return "\n".join(lines)

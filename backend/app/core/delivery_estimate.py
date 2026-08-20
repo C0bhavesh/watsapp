@@ -70,11 +70,15 @@ def _parse_date(raw: str) -> date | None:
 def estimate_delivery(order: Order, today: date) -> DeliveryEstimate | None:
     """Compute a formula-based delivery estimate, or None if one cannot/should not be given.
 
-    Returns None when the order is already delivered (nothing to estimate -- the caller shows
-    the real delivery info instead) or when order.created_at is missing (a legacy order synced
-    before this field existed; guessing from an unknown start point would be worse than no
-    estimate).
+    Returns None when the order is cancelled (nothing to estimate), already delivered (nothing
+    to estimate -- the caller shows the real delivery info instead), when order.created_at is
+    missing (a legacy order synced before this field existed; guessing from an unknown start
+    point would be worse than no estimate), or when the formula's computed date has already
+    passed relative to ``today`` (a stale/past "estimate" would read as a broken promise to the
+    customer -- safer to give no estimate than a false one).
     """
+    if order.is_cancelled():
+        return None
     if _is_delivered(order):
         return None
     if order.created_at is None:
@@ -90,4 +94,7 @@ def estimate_delivery(order: Order, today: date) -> DeliveryEstimate | None:
     if undispatched and (today - created).days > _LATE_SHIP_THRESHOLD_DAYS:
         total_days += _LATE_SHIP_EXTRA_DAYS
 
-    return DeliveryEstimate(expected_date=created + timedelta(days=total_days))
+    expected_date = created + timedelta(days=total_days)
+    if expected_date < today:
+        return None
+    return DeliveryEstimate(expected_date=expected_date)

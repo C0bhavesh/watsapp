@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.channels.copy import DEFAULT_LANGUAGE
+from app.core.exchange_models import ExchangeRequest
 from app.providers.base import LLMProvider, Message
 from app.shopify.models import AuthorizedOrder
 
@@ -102,6 +103,10 @@ class AgentContext:
     # doesn't match the store's order-ID digit count -- lets order_tracking ask the customer to
     # double-check it instead of silently treating the turn as "no order mentioned."
     order_number_format_hint: str | None = None
+    # This customer's existing exchange requests (across all their orders), so the exchange
+    # agent can answer "where is my exchange" from real data. Empty for every other agent --
+    # only fetched by conversation.py when intent == "exchange" (Task 5).
+    exchange_requests: list[ExchangeRequest] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

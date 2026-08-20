@@ -410,6 +410,85 @@ function renderOrderDetail(order) {
     link.style.wordBreak = "break-all";
     container.appendChild(link);
   }
+
+  renderExchangeDetail(order);
+}
+
+// The 6 fixed stages of ExchangeStatus (app/core/exchange_models.py) -- no courier/QC
+// integration exists, so this is the only place either field advances (via POST /admin/exchanges/{id}).
+const EXCHANGE_STATUSES = [
+  "requested", "return_picked_up", "qc_passed", "qc_failed",
+  "replacement_dispatched", "delivered",
+];
+
+function renderExchangeDetail(order) {
+  const container = el("order-exchange");
+  container.innerHTML = "";
+  if (!order.exchange) {
+    container.style.display = "none";
+    return;
+  }
+  container.style.display = "block";
+  const heading = document.createElement("h4");
+  heading.textContent = "Exchange";
+  container.appendChild(heading);
+
+  const infoFields = [
+    ["Requested size", order.exchange.requested_size],
+    // requested_at is a raw ISO-8601 timestamp -- formatBubbleDate is this file's existing
+    // convention for rendering an ISO timestamp as a readable date (used for the chat date dividers).
+    ["Requested on", formatBubbleDate(order.exchange.requested_at)],
+  ];
+  for (const [label, value] of infoFields) {
+    if (!value) continue;
+    const row = document.createElement("div");
+    row.className = "order-field";
+    row.innerHTML = "<span class='label'>" + label + ":</span> ";
+    row.appendChild(document.createTextNode(value));
+    container.appendChild(row);
+  }
+
+  const statusSelect = document.createElement("select");
+  statusSelect.className = "exchange-status-select";
+  for (const s of EXCHANGE_STATUSES) {
+    const opt = document.createElement("option");
+    opt.value = s;
+    opt.textContent = s.replace(/_/g, " ");
+    if (s === order.exchange.status) opt.selected = true;
+    statusSelect.appendChild(opt);
+  }
+  container.appendChild(statusSelect);
+
+  const trackingInput = document.createElement("input");
+  trackingInput.type = "text";
+  trackingInput.className = "exchange-tracking-input";
+  trackingInput.placeholder = "Return tracking URL";
+  trackingInput.value = order.exchange.return_tracking_url || "";
+  container.appendChild(trackingInput);
+
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "exchange-save-btn";
+  saveBtn.textContent = "Save";
+  const saveStatus = document.createElement("div");
+  saveStatus.className = "exchange-status-msg";
+  saveBtn.addEventListener("click", async () => {
+    saveBtn.disabled = true;
+    saveStatus.textContent = "";
+    try {
+      await api("/admin/exchanges/" + encodeURIComponent(order.exchange.id), "POST", {
+        status: statusSelect.value,
+        return_tracking_url: trackingInput.value || null,
+      });
+    } catch (e) {
+      // Mirrors reply-status/template-status: empty on success, error text on failure.
+      saveStatus.textContent = e.message;
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
+  container.appendChild(saveBtn);
+  container.appendChild(saveStatus);
 }
 
 function renderOrderPanel(orders) {
@@ -425,6 +504,8 @@ function renderOrderPanel(orders) {
     el("order-number").textContent = "";
     el("order-customer").innerHTML = "";
     el("order-products").innerHTML = "";
+    el("order-exchange").innerHTML = "";
+    el("order-exchange").style.display = "none";
     return;
   }
   empty.style.display = "none";

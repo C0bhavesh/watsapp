@@ -119,11 +119,19 @@
     .order-field .label { color: #667781; }
     #order-empty { font-size: .82rem; color: #667781; }
     #order-number { font-size: .95rem; font-weight: 700; margin-bottom: .5rem; }
-    #order-customer, #order-products, #order-detail { margin-top: .6rem;
+    #order-customer, #order-products, #order-detail, #order-exchange { margin-top: .6rem;
       border-top: 1px solid #e9edef; padding-top: .6rem; }
-    #order-customer h4, #order-products h4, #order-detail h4 { font-size: .78rem;
-      color: #667781; margin-bottom: .4rem; }
+    #order-customer h4, #order-products h4, #order-detail h4, #order-exchange h4 {
+      font-size: .78rem; color: #667781; margin-bottom: .4rem; }
     .product-row { font-size: .78rem; color: #3b4a54; margin-bottom: .3rem; }
+    .exchange-status-select, .exchange-tracking-input { display: block; width: 100%;
+      padding: .4rem .5rem; border: 1px solid #d1d7db; border-radius: 6px; font-size: .8rem;
+      margin-bottom: .4rem; background: #fff; }
+    .exchange-save-btn { background: #00a884; color: #fff; border: none; border-radius: 6px;
+      padding: .5rem 1rem; font-size: .82rem; cursor: pointer; margin-top: .5rem; }
+    .exchange-save-btn:disabled { background: #8fd3c4; cursor: default; }
+    .exchange-status-msg { margin-top: .5rem; font-size: .78rem; color: #b00020;
+      white-space: pre-wrap; }
 
     .status { font-size: .78rem; padding: .3rem 1rem; color: #dc2626; }
   </style>
@@ -173,6 +181,7 @@
       <div id="order-customer"></div>
       <div id="order-products"></div>
       <div id="order-detail"></div>
+      <div id="order-exchange" style="display:none"></div>
     </div>
   </div>
   <script src="chats.js"></script>

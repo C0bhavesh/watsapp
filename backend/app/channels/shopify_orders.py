@@ -276,6 +276,7 @@ def order_from_webhook_payload(payload: dict) -> Order | None:  # type: ignore[t
         line_items=_line_items_from_webhook(payload.get("line_items")),
         customer=_customer_from_order_payload(payload),
         updated_at=_c(payload.get("updated_at")),
+        created_at=_c(payload.get("created_at")),
     )
 
 

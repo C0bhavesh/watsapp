@@ -141,3 +141,27 @@ async def test_router_prompt_scopes_policy_to_general_store_policy_only() -> Non
     assert "cod" in lowered
     # The exclusion carving order-timing OUT of policy must be present.
     assert "already placed" in lowered
+
+
+def test_router_prompt_routes_exchange_requests_to_the_exchange_intent() -> None:
+    from app.agents.router import _ROUTER_PROMPT
+
+    assert "exchange:" in _ROUTER_PROMPT
+    assert "different size" in _ROUTER_PROMPT
+
+
+def test_router_prompt_excludes_damaged_incorrect_items_from_exchange() -> None:
+    from app.agents.router import _ROUTER_PROMPT
+
+    assert "damaged" in _ROUTER_PROMPT.lower()
+    assert "customer_support" in _ROUTER_PROMPT
+
+
+def test_router_prompt_policy_no_longer_claims_actual_exchange_requests() -> None:
+    # policy still owns the ABSTRACT exchange-policy question; it must explicitly exclude a
+    # customer actually wanting to exchange their own order now that `exchange` exists.
+    from app.agents.router import _ROUTER_PROMPT
+
+    policy_bullet_start = _ROUTER_PROMPT.index("- policy:")
+    exchange_intent_mention = _ROUTER_PROMPT.index("that is `exchange`")
+    assert policy_bullet_start < exchange_intent_mention

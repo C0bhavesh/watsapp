@@ -9,6 +9,7 @@ Intent = Literal[
     "policy",
     "recommendations",
     "customer_support",
+    "exchange",
 ]
 
 _INTENTS: tuple[Intent, ...] = (
@@ -17,6 +18,7 @@ _INTENTS: tuple[Intent, ...] = (
     "policy",
     "recommendations",
     "customer_support",
+    "exchange",
 )
 
 _ROUTER_PROMPT = """Classify the customer's LATEST WhatsApp message into exactly one category.
@@ -34,13 +36,19 @@ find something specific.
 - policy: asking about GENERAL store policy in the abstract -- return, exchange, or refund \
 rules, COD availability, shipping charges, or whether the store ships to a place. This is for \
 policy questions with no specific order in mind -- never the delivery timing of an order the \
-customer has already placed (that is order_tracking).
+customer has already placed (that is order_tracking), and never a customer who actually wants \
+to exchange something from an order they placed (that is `exchange`).
 - recommendations: asking what to buy, what goes well with something, or for suggestions or \
 outfit ideas.
+- exchange: the customer wants to actually exchange an item from THEIR OWN order for a \
+different size -- not just asking about the exchange policy in the abstract (that is policy). \
+A report that an item arrived damaged, defective, or wrong is NOT this -- route those to \
+customer_support instead, since checking that needs photo/video proof this bot cannot yet \
+collect.
 - customer_support: greetings, small talk, unclear messages, or explicitly asking for a \
-human -- use this for anything that doesn't clearly fit the other four.
+human -- use this for anything that doesn't clearly fit the other five.
 
-Respond with STRICT JSON only, no other text: {"intent": "<one of the five categories above>"}
+Respond with STRICT JSON only, no other text: {"intent": "<one of the six categories above>"}
 """
 
 # How many of the most recent history messages to include for classification context -- kept

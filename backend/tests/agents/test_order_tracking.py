@@ -1,7 +1,7 @@
 from app.agents.base import DEFAULT_REVEAL_FIELDS, AgentContext
 from app.agents.order_tracking import _format_money, run
 from app.providers.base import CompletionResult, Message, ProviderError, ProviderErrorKind
-from app.shopify.models import AuthorizedOrder, Fulfillment, LineItem, Money, Order
+from app.shopify.models import AuthorizedOrder, Customer, Fulfillment, LineItem, Money, Order
 
 
 def _order(
@@ -13,13 +13,16 @@ def _order(
     payment_gateway_names: tuple[str, ...] = (),
     tags: tuple[str, ...] = (),
     fulfillments: tuple[Fulfillment, ...] = (),
+    customer: Customer | None = None,
+    created_at: str | None = None,
 ) -> Order:
     return Order(
         gid=f"gid://{name}", name=name, email="c@example.com", phone=phone,
         shipping_phone=None, billing_phone=None, financial_status="paid",
         fulfillment_status=fulfillment_status, cancelled_at=cancelled_at, tags=tags,
         payment_gateway_names=payment_gateway_names, total=None, customer_locale=None,
-        line_items=line_items, fulfillments=fulfillments,
+        line_items=line_items, fulfillments=fulfillments, customer=customer,
+        created_at=created_at,
     )
 
 
@@ -405,3 +408,50 @@ async def test_non_cod_order_has_no_cash_on_delivery_note() -> None:
     await run(_context(provider, "is my payment done", [order]))
 
     assert "(Cash on Delivery)" not in _system_prompt(provider)
+
+
+def _customer(state: str = "Gujarat") -> Customer:
+    return Customer(
+        gid="gid://c/1", first_name=None, last_name=None, email=None, phone=None,
+        address_line1=None, address_line2=None, city=None, state=state,
+        postal_code=None, country=None,
+    )
+
+
+async def test_order_line_includes_estimated_delivery_when_computable() -> None:
+    provider = _CapturingProvider('{"reply": "ok"}')
+    order = _order(
+        "tavas1", "+919999999999",
+        customer=_customer("Gujarat"), created_at="2026-08-10T00:00:00+00:00",
+    )
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+    await run(_context(provider, "when will my order arrive", [authorized]))
+    prompt = _system_prompt(provider)
+    assert "Estimated delivery:" in prompt
+    assert "estimate" in prompt.lower() and "1-2 days" in prompt.replace("1–2 days", "1-2 days")
+
+
+async def test_order_line_omits_estimated_delivery_without_created_at() -> None:
+    provider = _CapturingProvider('{"reply": "ok"}')
+    order = _order("tavas1", "+919999999999", customer=_customer("Gujarat"), created_at=None)
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+    await run(_context(provider, "when will my order arrive", [authorized]))
+    prompt = _system_prompt(provider)
+    assert "Estimated delivery:" not in prompt
+
+
+async def test_order_line_omits_estimated_delivery_when_status_not_revealed() -> None:
+    provider = _CapturingProvider('{"reply": "ok"}')
+    order = _order(
+        "tavas1", "+919999999999",
+        customer=_customer("Gujarat"), created_at="2026-08-10T00:00:00+00:00",
+    )
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+    await run(
+        _context(
+            provider, "when will my order arrive", [authorized],
+            reveal_fields=("order_number",),
+        )
+    )
+    prompt = _system_prompt(provider)
+    assert "Estimated delivery:" not in prompt

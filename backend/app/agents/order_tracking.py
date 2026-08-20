@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from datetime import UTC, datetime
 
 from app.agents.base import (
     HANDOFF_JSON_CONTRACT,
@@ -10,6 +11,7 @@ from app.agents.base import (
     personality_for,
 )
 from app.channels.copy import copy_for
+from app.core.delivery_estimate import estimate_delivery
 from app.providers.base import Message, ProviderError
 from app.shopify.models import AuthorizedOrder, Fulfillment, LineItem, Money
 
@@ -27,10 +29,14 @@ tell them clearly and do not offer a cancel option for it.
 
 If an order has shipped and tracking details are shown above, share the courier name, tracking
 number, and the tracking link exactly as given so the customer can track it. Never invent a
-tracking number, courier, or delivery date, and do not estimate an arrival time beyond what the
-tracking data states. If no tracking details are available for an order, do not claim it has not
-shipped -- go by the fulfillment status field above instead, tell the customer the tracking
-details are not available yet, and offer to have the team check.
+tracking number or courier. If no tracking details are available for an order, do not claim it
+has not shipped -- go by the fulfillment status field above instead, tell the customer the
+tracking details are not available yet, and offer to have the team check.
+
+If an "Estimated delivery" line is shown above for an order, relay it to the customer exactly
+as given, including the caveat that it is an estimate and may vary -- never state it as a firm
+promised date, and never compute or guess a different delivery date yourself. If no estimated
+delivery line is shown for an order, do not invent one.
 
 If the customer wants to cancel an order that IS still eligible, tell them you'll bring up a
 Confirm/Cancel button for them to tap -- you never cancel anything yourself.
@@ -104,6 +110,16 @@ def _tracking_line(fulfillment: Fulfillment) -> str:
     return "  - Tracking: " + ", ".join(parts)
 
 
+def _delivery_estimate_line(order: AuthorizedOrder) -> str | None:
+    result = estimate_delivery(order.order, today=datetime.now(UTC).date())
+    if result is None:
+        return None
+    return (
+        f"  - Estimated delivery: {result.expected_date.isoformat()} "
+        "(this is an estimate and may vary by 1-2 days)"
+    )
+
+
 def _order_line(order: AuthorizedOrder, reveal_fields: Sequence[str]) -> str:
     """Render one order using ONLY the fields the admin approved for disclosure.
 
@@ -136,6 +152,9 @@ def _order_line(order: AuthorizedOrder, reveal_fields: Sequence[str]) -> str:
         lines.extend(
             _tracking_line(f) for f in order.order.fulfillments if f.has_tracking()
         )
+    estimate_line = _delivery_estimate_line(order)
+    if estimate_line is not None:
+        lines.append(estimate_line)
     return "\n".join(lines)
 
 

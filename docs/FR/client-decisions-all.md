@@ -303,6 +303,19 @@ integration work and is fragile (courier sites change their page layout without 
 
 Not blocking — the formula-based estimate is being built now regardless of this answer.
 
+## Part 10 — New question (2026-08-20)
+
+**22. Order-confirmation photo for a product that has one photo per colour, when a colour's own photo is missing.** A customer (Amita Chadha) received an order confirmation for a cream item, but the photo attached to the message showed a different, black item from the same product. Root cause: the confirmation message's photo was being pulled from the product's one general photo instead of the specific colour ordered — already being fixed so the message uses the correct colour's own photo going forward, matching what the order text already says.
+
+One remaining question: for a colour that does not have its own photo on file in the catalog (not every colour variant necessarily has a dedicated photo), what should the confirmation message show?
+
+- A (recommended): show the product's general photo instead, so the message still has some visual reference. Matches what happens today for every order; the fix makes it correct whenever the colour DOES have its own photo, and only falls back to the general photo for the colour that doesn't.
+- B: show no photo at all in that case, so the message never risks showing the wrong colour, even at the cost of the message having no image.
+
+Not blocking — the primary fix (use the correct colour's own photo whenever one exists) is being built now regardless of this answer, using option A as the interim default for the no-dedicated-photo case until you confirm.
+
+**Separately, a data note, not a question:** the confirmation image chosen for an order is saved at the time the order comes in, and reused if that message is ever resent (e.g. the automatic 1-hour reminder for an unconfirmed order). Fixing the code going forward does not correct already-placed orders, including Amita's — those keep whatever photo was originally saved unless someone manually resends that specific confirmation after the fix ships. No action needed from you; flagging so it's not a surprise if an old reminder still shows the old photo.
+
 ## Part 8 — New question (2026-08-19)
 
 **20. How much friction should logging into the WhatsApp admin chat page carry?** The page at

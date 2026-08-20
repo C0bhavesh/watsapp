@@ -218,6 +218,21 @@
 
 > All client questions are consolidated in `client-decisions-all.md`. Send that one doc.
 
+- **[CHECKPOINT] Order-confirmation image bug (Q22) — fallback-behaviour question, ON HOLD.**
+  Root cause CONFIRMED (systematic-debugger, code-level proof, not order-specific runtime
+  evidence — see `docs/memory/error_learnings.md`): `get_product_image_url` resolves the
+  `cod_confirmation` template's header photo from the PRODUCT's shared `featuredImage`, not the
+  ordered VARIANT's own image, so a multi-colour product can attach any colour's photo
+  regardless of what was actually ordered (reported: Amita Chadha, +919831021121, ordered
+  cream, received a black product photo; order text was correct — colour text and header image
+  come from different fields). The primary fix (use the ordered variant's own image when one
+  exists) is unambiguous and NOT blocked. The ONLY open question is what to show when a colour
+  has no dedicated image on file — client-decisions-all.md Part 10/Q22. Being built now with
+  option A (fall back to the product's general photo, matching today's existing behaviour) as
+  the interim default per CLAUDE.md Rule 8, pending confirmation. **Not a migration — no
+  Supabase action needed.** Already-placed orders (including Amita's) keep their originally
+  saved image even after this ships — a separate, non-blocking data note, not a decision.
+
 - ~~[CHECKPOINT] Delivery/Read Receipts (sub-project 1c) + Delivery-Failure Auto-Retry (sub-project
   1e) — schema migration.~~ **RESOLVED (2026-08-18): owner confirmed the migration has been run in
   production** (all four statements — the two `messages` ALTERs + index for 1c, the two

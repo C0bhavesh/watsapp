@@ -670,7 +670,7 @@ def test_conversation_thread_includes_exchange_details_when_a_request_exists(
     assert len(orders) == 1
     assert orders[0]["exchange"] == {
         "id": created.id, "requested_size": "M", "status": "requested",
-        "return_tracking_url": None,
+        "requested_at": created.requested_at, "return_tracking_url": None,
     }
 
 

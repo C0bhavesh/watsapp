@@ -859,6 +859,7 @@ def _order_summary(
             "id": exchange.id,
             "requested_size": exchange.requested_size,
             "status": exchange.status,
+            "requested_at": exchange.requested_at,
             "return_tracking_url": exchange.return_tracking_url,
         }
     return summary
@@ -939,20 +940,26 @@ async def get_conversation_thread(thread_id: int) -> dict[str, object]:
 
 
 @admin_router.post("/exchanges/{exchange_id}", dependencies=[Depends(require_admin)])
-async def update_exchange(exchange_id: int, body: ExchangeUpdateRequest) -> dict[str, object]:
+@limiter.limit("30/minute")
+async def update_exchange(
+    request: Request, exchange_id: int, body: ExchangeUpdateRequest
+) -> dict[str, object]:
     """Advance an exchange request's status and/or set its return-tracking URL.
 
     No courier/QC integration exists (design doc) -- this is the only way either field ever
-    changes after the exchange agent creates the request.
+    changes after the exchange agent creates the request. Same require_admin + rate-limit
+    pattern as the sibling admin-mutation endpoints (send_manual_reply, send_admin_template).
     """
     c = get_container()
     existing = await c.exchanges.get(exchange_id)
     if existing is None:
+        _audit("exchange_update", "failure", resource=f"exchange:{exchange_id}")
         raise HTTPException(status_code=404, detail="exchange request not found")
     if body.status is not None:
         await c.exchanges.set_status(exchange_id, body.status)
     if body.return_tracking_url is not None:
         await c.exchanges.set_return_tracking_url(exchange_id, body.return_tracking_url)
+    _audit("exchange_update", "success", resource=f"exchange:{exchange_id}")
     return {"ok": True}
 
 

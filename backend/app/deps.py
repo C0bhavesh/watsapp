@@ -10,10 +10,11 @@ from app.providers.litellm_provider import LiteLLMProvider, VertexConfig
 from app.providers.registry import get_provider
 from app.shopify.client import ShopifyClient
 from app.shopify.token_manager import TokenManager
-from app.store.base import ConfigRepo, ConversationStore, IngestStore, MessageStore
+from app.store.base import ConfigRepo, ConversationStore, ExchangeStore, IngestStore, MessageStore
 from app.store.memory import (
     InMemoryConfigRepo,
     InMemoryConversationStore,
+    InMemoryExchangeStore,
     InMemoryIngestStore,
     InMemoryMessageStore,
 )
@@ -21,6 +22,7 @@ from app.store.pg_factory import LazyPool
 from app.store.postgres import (
     PostgresConfigRepo,
     PostgresConversationStore,
+    PostgresExchangeStore,
     PostgresIngestStore,
     PostgresMessageStore,
 )
@@ -38,6 +40,7 @@ class Container:
     ingest: IngestStore
     messages: MessageStore
     conversations: ConversationStore
+    exchanges: ExchangeStore
 
 
 _container: Container | None = None
@@ -54,18 +57,20 @@ def get_container() -> Container:
             ingest: IngestStore = PostgresIngestStore(pool)
             messages: MessageStore = PostgresMessageStore(pool)
             conversations: ConversationStore = PostgresConversationStore(pool)
+            exchanges: ExchangeStore = PostgresExchangeStore(pool)
         else:
             config_repo = InMemoryConfigRepo()
             ingest = InMemoryIngestStore()
             messages = InMemoryMessageStore()
             conversations = InMemoryConversationStore()
+            exchanges = InMemoryExchangeStore()
         config = ConfigService(config_repo, vault)
         http = httpx.AsyncClient(follow_redirects=False)  # never replay the token to a redirect
         tokens = TokenManager(http, config, settings)
         shopify = ShopifyClient(http, tokens, settings)
         _container = Container(
             settings, vault, config_repo, config, http, tokens, shopify, ingest, messages,
-            conversations,
+            conversations, exchanges,
         )
     return _container
 

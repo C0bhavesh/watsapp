@@ -5,6 +5,7 @@ from datetime import datetime
 
 import asyncpg
 
+from app.core.exchange_models import ExchangeRequest, ExchangeStatus
 from app.core.phone import normalize_phone
 from app.shopify.models import (
     Customer,
@@ -1550,3 +1551,67 @@ class PostgresConversationStore:
                 conversation_id,
             )
         return int(row["n"]) if row is not None else 0
+
+
+def _exchange_from_row(row: asyncpg.Record) -> ExchangeRequest:
+    return ExchangeRequest(
+        id=row["id"], order_gid=row["order_gid"], order_name=row["order_name"],
+        phone_e164=row["phone_e164"], requested_size=row["requested_size"],
+        status=row["status"], requested_at=row["requested_at"].isoformat(),
+        return_tracking_url=row["return_tracking_url"],
+        updated_at=row["updated_at"].isoformat(),
+    )
+
+
+class PostgresExchangeStore:
+    def __init__(self, pool: LazyPool) -> None:
+        self._pool = pool
+
+    async def create(
+        self, order_gid: str, order_name: str, phone_e164: str, requested_size: str,
+    ) -> ExchangeRequest:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "INSERT INTO exchange_requests "
+                "(order_gid, order_name, phone_e164, requested_size) "
+                "VALUES ($1, $2, $3, $4) "
+                "RETURNING id, order_gid, order_name, phone_e164, requested_size, status, "
+                "requested_at, return_tracking_url, updated_at",
+                order_gid, order_name, phone_e164, requested_size,
+            )
+        return _exchange_from_row(row)
+
+    async def list_for_phone(self, phone_e164: str) -> list[ExchangeRequest]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, order_gid, order_name, phone_e164, requested_size, status, "
+                "requested_at, return_tracking_url, updated_at "
+                "FROM exchange_requests WHERE phone_e164 = $1 ORDER BY requested_at DESC",
+                phone_e164,
+            )
+        return [_exchange_from_row(r) for r in rows]
+
+    async def get(self, id: int) -> ExchangeRequest | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, order_gid, order_name, phone_e164, requested_size, status, "
+                "requested_at, return_tracking_url, updated_at "
+                "FROM exchange_requests WHERE id = $1",
+                id,
+            )
+        return _exchange_from_row(row) if row else None
+
+    async def set_status(self, id: int, status: ExchangeStatus) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE exchange_requests SET status = $1, updated_at = now() WHERE id = $2",
+                status, id,
+            )
+
+    async def set_return_tracking_url(self, id: int, url: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE exchange_requests SET return_tracking_url = $1, updated_at = now() "
+                "WHERE id = $2",
+                url, id,
+            )

@@ -2,6 +2,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 from app.core.delivery_status import should_apply_delivery_status
+from app.core.exchange_models import ExchangeRequest, ExchangeStatus
 from app.shopify.models import Customer, Fulfillment, LineItem, Order, normalize_order_name
 from app.store.base import (
     ConversationSummary,
@@ -953,3 +954,42 @@ class InMemoryConversationStore:
             if created is not None and created > last_read:
                 count += 1
         return count
+
+
+class InMemoryExchangeStore:
+    def __init__(self) -> None:
+        self._rows: dict[int, ExchangeRequest] = {}
+        self._next_id = 1
+
+    async def create(
+        self, order_gid: str, order_name: str, phone_e164: str, requested_size: str,
+    ) -> ExchangeRequest:
+        now = datetime.now(UTC).isoformat()
+        row = ExchangeRequest(
+            id=self._next_id, order_gid=order_gid, order_name=order_name,
+            phone_e164=phone_e164, requested_size=requested_size, status="requested",
+            requested_at=now, return_tracking_url=None, updated_at=now,
+        )
+        self._rows[row.id] = row
+        self._next_id += 1
+        return row
+
+    async def list_for_phone(self, phone_e164: str) -> list[ExchangeRequest]:
+        return [r for r in self._rows.values() if r.phone_e164 == phone_e164]
+
+    async def get(self, id: int) -> ExchangeRequest | None:
+        return self._rows.get(id)
+
+    async def set_status(self, id: int, status: ExchangeStatus) -> None:
+        row = self._rows.get(id)
+        if row is None:
+            return
+        self._rows[id] = replace(row, status=status, updated_at=datetime.now(UTC).isoformat())
+
+    async def set_return_tracking_url(self, id: int, url: str) -> None:
+        row = self._rows.get(id)
+        if row is None:
+            return
+        self._rows[id] = replace(
+            row, return_tracking_url=url, updated_at=datetime.now(UTC).isoformat()
+        )

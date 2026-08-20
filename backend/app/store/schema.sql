@@ -267,3 +267,20 @@ ALTER TABLE fulfillments ADD COLUMN IF NOT EXISTS delivered_at timestamptz;
 -- always writable (backfill path / payloads without the field).
 ALTER TABLE orders    ADD COLUMN IF NOT EXISTS updated_at timestamptz;
 ALTER TABLE customers ADD COLUMN IF NOT EXISTS updated_at timestamptz;
+
+-- Size-exchange requests (2026-08-20, exchange guide agent). App-owned state, no Shopify
+-- counterpart. status is a fixed set matching the store's 4-step process message, advanced
+-- by the admin panel -- no courier/QC integration exists to auto-advance it.
+CREATE TABLE IF NOT EXISTS exchange_requests (
+    id                  bigserial PRIMARY KEY,
+    order_gid           text NOT NULL,
+    order_name          text NOT NULL,
+    phone_e164          text NOT NULL,
+    requested_size      text NOT NULL,
+    status              text NOT NULL DEFAULT 'requested',
+    requested_at        timestamptz NOT NULL DEFAULT now(),
+    return_tracking_url text,
+    updated_at          timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_exchange_requests_order ON exchange_requests (order_gid);
+CREATE INDEX IF NOT EXISTS idx_exchange_requests_phone ON exchange_requests (phone_e164);

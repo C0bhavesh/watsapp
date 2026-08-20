@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
+from app.core.exchange_models import ExchangeRequest, ExchangeStatus
 from app.shopify.models import Customer, Fulfillment, Order
 
 
@@ -419,3 +420,24 @@ class ConversationStore(Protocol):
     # last_read_at defaulted to its creation time (mirrors the Postgres column's DEFAULT now()),
     # so it starts at 0, not a flood of pre-existing history.
     async def count_unread_messages(self, conversation_id: int) -> int: ...
+
+
+class ExchangeStore(Protocol):
+    """Size-exchange requests: create, look up by customer phone, advance status/tracking.
+
+    See app/core/exchange_eligibility.py for the eligibility check that gates a create() call
+    (enforced in app/agents/exchange.py, not here -- this store trusts its caller, same as
+    every other store in this codebase).
+    """
+
+    async def create(
+        self, order_gid: str, order_name: str, phone_e164: str, requested_size: str,
+    ) -> ExchangeRequest: ...
+
+    async def list_for_phone(self, phone_e164: str) -> list[ExchangeRequest]: ...
+
+    async def get(self, id: int) -> ExchangeRequest | None: ...
+
+    async def set_status(self, id: int, status: ExchangeStatus) -> None: ...
+
+    async def set_return_tracking_url(self, id: int, url: str) -> None: ...

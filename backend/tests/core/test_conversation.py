@@ -264,6 +264,30 @@ class _PoisonedShopify:
         return []
 
 
+class _FakeLiveShopify:
+    """Answers ``get_order``/``find_order_by_name`` directly and records every call it
+    receives -- the mirror-image of ``_PoisonedShopify`` above. Used by the ``exchange``-intent
+    test to prove order resolution hit Shopify directly (never ``MirrorOrderSource``):
+    ``check_exchange_eligibility`` depends on ``Fulfillment.delivered_at``, which only a genuine
+    live Shopify read ever populates -- the mirror-ingestion path never sets it."""
+
+    def __init__(self, order: Order) -> None:
+        self._order = order
+        self.calls: list[str] = []
+
+    async def get_order(self, gid: str) -> Order | None:
+        self.calls.append("get_order")
+        return self._order if gid == self._order.gid else None
+
+    async def find_order_by_name(self, raw_name: str) -> Order | None:
+        self.calls.append("find_order_by_name")
+        return None
+
+    async def find_customer_orders_by_phone(self, phone_e164: str) -> list[Order]:
+        self.calls.append("find_customer_orders_by_phone")
+        return []
+
+
 async def test_agent_reply_order_tracking_reads_from_mirror_not_shopify(
     monkeypatch, master_key: str
 ) -> None:
@@ -320,3 +344,81 @@ async def test_agent_reply_order_tracking_reads_from_mirror_not_shopify(
     assert len(resolved) == 1  # type: ignore[arg-type]
     assert resolved[0].order.gid == "gid://1"  # type: ignore[index]
     assert ingest.mirror_calls == ["get_mirrored_order", "find_mirrored_order_by_name"]
+
+
+async def test_agent_reply_exchange_intent_resolves_orders_and_exchange_requests(
+    monkeypatch, master_key: str
+) -> None:
+    """The exchange intent must get context.orders AND context.exchange_requests populated,
+    AND -- unlike order_tracking -- must resolve orders via a genuine live Shopify call, never
+    MirrorOrderSource: check_exchange_eligibility depends on Fulfillment.delivered_at, which the
+    mirror-ingestion path never populates (only a real live Shopify GraphQL read does)."""
+    order = _order("gid://1", "tavas3733", "+919999999999")
+    mapping = MappingView(
+        order_gid="gid://1", order_name="tavas3733", phone_e164="+919999999999",
+        status="pending", is_cod=False, created_at=None,
+    )
+    ingest = _FakeMirrorIngestFull(mappings=[mapping], mirrored_order=order)
+    shopify = _FakeLiveShopify(order)
+
+    monkeypatch.setenv("APP_MASTER_KEY", master_key)
+    reset_container()
+    c = get_container()
+    monkeypatch.setattr(c, "ingest", ingest)
+    monkeypatch.setattr(c, "shopify", shopify)
+    # "vertex" is an env-auth provider (no stored key needed) -- see test_deps.py's
+    # test_active_llm_env_provider_needs_no_stored_key for the same pattern -- so active_llm
+    # below resolves to a real, usable tuple without a fake key ever entering the config store.
+    await c.config.set_plain("llm:active_provider", "vertex")
+
+    from app.core.exchange_models import ExchangeRequest
+
+    existing = ExchangeRequest(
+        id=1, order_gid="gid://1", order_name="tavas3733", phone_e164="+919999999999",
+        requested_size="M", status="requested", requested_at="2026-08-20T00:00:00+00:00",
+        return_tracking_url=None, updated_at="2026-08-20T00:00:00+00:00",
+    )
+
+    class _FakeExchanges:
+        async def list_for_phone(self, phone_e164: str) -> list[ExchangeRequest]:
+            return [existing] if phone_e164 == "+919999999999" else []
+
+    monkeypatch.setattr(c, "exchanges", _FakeExchanges())
+
+    captured: dict[str, object] = {}
+
+    async def fake_classify_intent(*args: object, **kwargs: object) -> str:
+        return "exchange"
+
+    async def fake_assemble_all(self: object) -> dict[str, str]:
+        return {}
+
+    async def fake_run_agent(context: object, intent: str, container: object) -> AgentReply:
+        captured["orders"] = context.orders  # type: ignore[attr-defined]
+        captured["exchange_requests"] = context.exchange_requests  # type: ignore[attr-defined]
+        return AgentReply(text="ok", handoff=False)
+
+    monkeypatch.setattr("app.core.conversation.classify_intent", fake_classify_intent)
+    monkeypatch.setattr(
+        "app.core.conversation.KnowledgeLoader.assemble_all", fake_assemble_all
+    )
+    monkeypatch.setattr("app.core.conversation._run_agent", fake_run_agent)
+
+    from app.deps import active_llm
+
+    llm = await active_llm(c.settings, c.config)
+    assert llm is not None
+    event = InboundText(
+        message_id="wamid.2", wa_id="919999999999", text="I want to exchange this",
+        timestamp="1699999999",
+    )
+
+    await _agent_reply(c, event, [], "+919999999999", False, llm, AdminControls())
+
+    assert len(captured["orders"]) == 1  # type: ignore[arg-type]
+    assert captured["orders"][0].order.name == "tavas3733"  # type: ignore[index]
+    assert captured["exchange_requests"] == [existing]
+    # The correction under test: a genuine live Shopify call happened (get_order), and the
+    # mirror's own read methods were never touched at all.
+    assert "get_order" in shopify.calls
+    assert ingest.mirror_calls == []

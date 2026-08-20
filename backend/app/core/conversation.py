@@ -16,13 +16,21 @@ import re
 from datetime import UTC, datetime, timedelta
 
 from app.admin.controls import AdminControls, load_controls
-from app.agents import customer_support, order_tracking, policy, product_search, recommendations
+from app.agents import (
+    customer_support,
+    exchange,
+    order_tracking,
+    policy,
+    product_search,
+    recommendations,
+)
 from app.agents.base import AgentContext, AgentReply
 from app.agents.router import Intent, classify_intent
 from app.channels.copy import copy_for
 from app.channels.whatsapp_config import WhatsAppConfig, load_whatsapp_config
 from app.channels.whatsapp_inbound import InboundText
 from app.channels.whatsapp_sender import WhatsAppSendError, send_text
+from app.core.exchange_models import ExchangeRequest
 from app.core.memory import load_history, persist_turn
 from app.core.mirror_order_source import MirrorOrderSource
 from app.core.order_resolver import OrderSource, resolve_by_order_name, resolve_by_phone
@@ -109,6 +117,8 @@ async def _run_agent(context: AgentContext, intent: Intent, c: Container) -> Age
         return await policy.run(context)
     if intent == "recommendations":
         return await recommendations.run(context, c.shopify)
+    if intent == "exchange":
+        return await exchange.run(context, c.exchanges)
     return await customer_support.run(context)
 
 
@@ -327,17 +337,29 @@ async def _agent_reply(
         provider, model, api_key, event.text, history=history, extra_params=extra_params
     )
     # Classify FIRST, then resolve: resolve_by_phone re-fetches every mapped order live from
-    # Shopify, and order_tracking is the only agent that reads context.orders. Doing it
-    # unconditionally put that latency on every "hi".
+    # Shopify, and order_tracking/exchange are the only agents that read context.orders. Doing
+    # it unconditionally put that latency on every "hi".
     orders: list[AuthorizedOrder] = []
     order_number_format_hint: str | None = None
-    if intent == "order_tracking":
-        # Q&A reads from our database first (near-real-time via the orders/create,
-        # orders/updated, customers/update webhooks), falling back to live Shopify on a miss
-        # or database error. This does NOT apply to the Confirm/Cancel mutation path
-        # (order_actions.py's resolve_by_gid) -- that keeps re-fetching from Shopify directly,
-        # per Critical Rule 3.
-        order_source = MirrorOrderSource(c.ingest, c.shopify)
+    exchange_requests: list[ExchangeRequest] = []
+    if intent in ("order_tracking", "exchange"):
+        # order_tracking Q&A reads from our database first (near-real-time via the
+        # orders/create, orders/updated, customers/update webhooks), falling back to live
+        # Shopify on a miss or database error. This does NOT apply to the Confirm/Cancel
+        # mutation path (order_actions.py's resolve_by_gid) -- that keeps re-fetching from
+        # Shopify directly, per Critical Rule 3.
+        #
+        # exchange CANNOT use the mirror-first path: check_exchange_eligibility depends
+        # entirely on Fulfillment.delivered_at being accurate, and that field is populated
+        # ONLY by a genuine live Shopify GraphQL read (see its docstring in shopify/models.py)
+        # -- the webhook/mirror-ingestion path never sets it. A mirror-served order would
+        # almost always show delivered_at=None, wrongly telling an eligible customer their
+        # order "hasn't been delivered yet". So exchange always resolves via c.shopify
+        # directly, accepting the extra live-Shopify latency on this rarer intent in exchange
+        # for eligibility correctness.
+        order_source: OrderSource = (
+            c.shopify if intent == "exchange" else MirrorOrderSource(c.ingest, c.shopify)
+        )
         orders = await resolve_by_phone(order_source, c.ingest, event.wa_id)
         # Always attempted, not only when the phone path found nothing: a customer can own
         # more than one order, or ask about one placed under different contact info.
@@ -348,6 +370,10 @@ async def _agent_reply(
         for extra in extra_orders:
             if not any(o.order.name == extra.order.name for o in orders):
                 orders.append(extra)
+        if intent == "exchange":
+            # A cheap DB-only read of our own store -- no mirror/live distinction applies here,
+            # unlike order resolution above.
+            exchange_requests = await c.exchanges.list_for_phone(phone or event.wa_id)
     loader = KnowledgeLoader(c.config_repo, SEEDS_DIR)
     knowledge = await loader.assemble_all()
     context = AgentContext(
@@ -367,6 +393,7 @@ async def _agent_reply(
         reveal_fields=tuple(controls.reveal_fields),
         language=controls.default_language,
         order_number_format_hint=order_number_format_hint,
+        exchange_requests=exchange_requests,
     )
     agent_reply = await _run_agent(context, intent, c)
     return strip_markdown(agent_reply.text), agent_reply.handoff

@@ -1,4 +1,7 @@
+import logging
 from datetime import UTC, datetime, timedelta
+
+import pytest
 
 from app.agents.base import DEFAULT_REVEAL_FIELDS, AgentContext
 from app.agents.exchange import run
@@ -266,3 +269,105 @@ async def test_create_exchange_is_rejected_when_size_is_too_long() -> None:
     provider = _CapturingProvider(reply)
     await run(_context(provider, "size please", [authorized]), store)
     assert store.created == []
+
+
+async def test_create_exchange_is_blocked_when_the_existing_request_is_qc_failed() -> None:
+    """Final-review fix wave, finding 3: owner decision -- a qc_failed predecessor is TERMINAL
+    for that order's bot-driven exchange flow, it must still block a fresh bot-created request
+    for the same order (a human handles any further exchange on it), not free the order up
+    again. This is distinct from the existing any-status guard test above, which uses a
+    "requested" predecessor -- qc_failed is the one status the schema comment previously (and
+    wrongly) claimed should be exempt."""
+    store = _FakeExchangeStore()
+    order = _order(gid="gid://o/42", name="tavas42")
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+    existing = ExchangeRequest(
+        id=1, order_gid="gid://o/42", order_name="tavas42", phone_e164="+919999999999",
+        requested_size="M", status="qc_failed", requested_at=_ELIGIBLE_DELIVERED_AT,
+        return_tracking_url=None, updated_at=_ELIGIBLE_DELIVERED_AT,
+    )
+    reply = (
+        '{"reply": "Done!", "handoff": false, '
+        '"create_exchange": {"order_gid": "gid://o/42", "size": "L"}}'
+    )
+    provider = _CapturingProvider(reply)
+    await run(
+        _context(provider, "size L please", [authorized], exchange_requests=[existing]), store,
+    )
+    assert store.created == []
+
+
+async def test_rejected_create_exchange_claim_logs_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Final-review fix wave, finding 1: a rejected create_exchange claim (order ineligible
+    here) must leave an operator-visible signal -- the reply the customer sees is whatever the
+    model composed, by construction a confirmation, so a silent reject is otherwise
+    undiscoverable."""
+    store = _FakeExchangeStore()
+    order = _order(
+        gid="gid://o/42", name="tavas42",
+        fulfillments=(
+            Fulfillment(
+                gid="gid://f/1", status="SUCCESS", tracking_company="Delhivery",
+                tracking_number="AWB1", tracking_url="https://track/AWB1",
+                delivered_at=_INELIGIBLE_DELIVERED_AT,
+            ),
+        ),
+    )
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+    reply = (
+        '{"reply": "Done!", "handoff": false, '
+        '"create_exchange": {"order_gid": "gid://o/42", "size": "M"}}'
+    )
+    provider = _CapturingProvider(reply)
+    with caplog.at_level(logging.WARNING, logger="app.agents.exchange"):
+        await run(_context(provider, "size M please", [authorized]), store)
+    assert store.created == []
+    assert "gid://o/42" in caplog.text
+    assert "not eligible" in caplog.text
+
+
+class _RaisingExchangeStore:
+    """A store whose write always fails -- exercises the previously-untested store-failure
+    path: the customer-facing reply must still go through unchanged, and the failure must now
+    be logged (final-review fix wave, finding 1)."""
+
+    async def create(
+        self, order_gid: str, order_name: str, phone_e164: str, requested_size: str,
+    ) -> ExchangeRequest:
+        raise RuntimeError("store is down")
+
+    async def list_for_phone(self, phone_e164: str) -> list[ExchangeRequest]:
+        return []
+
+    async def get(self, id: int) -> ExchangeRequest | None:
+        return None
+
+    async def set_status(self, id: int, status: str) -> None:
+        pass
+
+    async def set_return_tracking_url(self, id: int, url: str) -> None:
+        pass
+
+
+async def test_store_failure_on_create_still_returns_the_composed_reply_and_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Gap flagged in an earlier review round: a store failure on the actual `create()` write
+    must not sacrifice the reply the model already composed for this turn, AND must now be
+    logged rather than silently swallowed."""
+    order = _order(gid="gid://o/42", name="tavas42")
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+    reply = (
+        '{"reply": "Done!", "handoff": false, '
+        '"create_exchange": {"order_gid": "gid://o/42", "size": "M"}}'
+    )
+    provider = _CapturingProvider(reply)
+    with caplog.at_level(logging.ERROR, logger="app.agents.exchange"):
+        result = await run(
+            _context(provider, "size M please", [authorized]), _RaisingExchangeStore(),
+        )
+    assert result.text == "Done!"
+    assert "gid://o/42" in caplog.text
+    assert "write failed" in caplog.text

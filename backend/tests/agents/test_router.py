@@ -165,3 +165,16 @@ def test_router_prompt_policy_no_longer_claims_actual_exchange_requests() -> Non
     policy_bullet_start = _ROUTER_PROMPT.index("- policy:")
     exchange_intent_mention = _ROUTER_PROMPT.index("that is `exchange`")
     assert policy_bullet_start < exchange_intent_mention
+
+
+def test_router_prompt_exchange_covers_status_questions_not_order_tracking() -> None:
+    """Final-review fix wave, finding 2: "where is my exchange" must route to `exchange`
+    (which can answer it from context.exchange_requests), not `order_tracking` (which cannot --
+    it has no exchange data at all)."""
+    from app.agents.router import _ROUTER_PROMPT
+
+    exchange_bullet_start = _ROUTER_PROMPT.index("- exchange:")
+    next_bullet_start = _ROUTER_PROMPT.index("- customer_support:")
+    exchange_bullet = _ROUTER_PROMPT[exchange_bullet_start:next_bullet_start]
+    assert "where is my exchange" in exchange_bullet
+    assert "not order_tracking" in exchange_bullet

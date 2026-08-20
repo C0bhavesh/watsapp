@@ -285,10 +285,13 @@ CREATE TABLE IF NOT EXISTS exchange_requests (
 CREATE INDEX IF NOT EXISTS idx_exchange_requests_order ON exchange_requests (order_gid);
 CREATE INDEX IF NOT EXISTS idx_exchange_requests_phone ON exchange_requests (phone_e164);
 
--- Repeat-write guard (2026-08-20, Task 4 review fix). app/agents/exchange.py already refuses to
--- create a second exchange request for an order that already has one -- this partial unique
--- index is the DB-level backstop against a race between two concurrent turns for the same
--- order. qc_failed is excluded: a failed quality-check return has no exchange left in flight,
--- so a fresh request for the same order is a legitimate case, not a duplicate.
+-- Repeat-write guard (2026-08-20, Task 4 review fix; corrected 2026-08-20 final-review fix wave,
+-- finding 3). app/agents/exchange.py already refuses to create a second exchange request for an
+-- order that already has one, REGARDLESS of status -- this unique index is the DB-level backstop
+-- against a race between two concurrent turns for the same order. Owner decision: a qc_failed
+-- predecessor is TERMINAL for that order's bot-driven exchange flow -- it does NOT free up the
+-- order for a fresh bot-created request; any further exchange on that order goes to a human. So
+-- this index applies unconditionally (no WHERE clause) and must never allow two rows for the
+-- same order_gid, qc_failed included -- matching the Python-level guard above exactly.
 CREATE UNIQUE INDEX IF NOT EXISTS ux_exchange_requests_active_order
-    ON exchange_requests (order_gid) WHERE status != 'qc_failed';
+    ON exchange_requests (order_gid);

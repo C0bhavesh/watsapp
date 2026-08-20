@@ -13,6 +13,7 @@ already sets the precedent of writing its own self-contained handoff wording ins
 shared contract; this agent follows the same precedent, one level further.
 """
 
+import logging
 from datetime import UTC, datetime
 
 from app.agents.base import (
@@ -30,6 +31,8 @@ from app.providers.base import Message, ProviderError
 from app.shopify.models import AuthorizedOrder
 from app.store.base import ExchangeStore
 
+logger = logging.getLogger(__name__)
+
 _SYSTEM_TEMPLATE = """{personality}
 
 The customer wants to exchange an item from their own order for a DIFFERENT SIZE. This store
@@ -38,9 +41,10 @@ anything other than a size change, tell them plainly that only size exchanges ar
 
 Below is each of the customer's orders and whether Thetavas' automated eligibility check
 allows an exchange for it right now (delivered within the last 48 hours, order not
-cancelled). This fact is already decided -- relay the reason given exactly as stated, never
-recompute or guess the window yourself, and never offer an exchange for an order marked not
-eligible.
+cancelled). This fact is already decided -- state the reason faithfully in the customer's own
+language (English, Hindi, or Hinglish, per your instructions above), keeping the delivery date
+and the 48-hour window exactly as given -- never recompute or guess the window yourself -- and
+never offer an exchange for an order marked not eligible.
 
 {order_context}
 
@@ -115,9 +119,10 @@ def _validated_create_exchange(
 ) -> tuple[str, str, str] | None:
     """Re-derive (order_gid, order_name, size) ONLY if the model's claim checks out against
     real data -- never trust the model's own claim of eligibility or of which order/gid it
-    means. Returns None on any mismatch (the caller does not log or surface a reason -- there
-    is no logger in this package, and nothing downstream currently consumes one; a future
-    consumer of the rejection reason is Task 5's job, not this one)."""
+    means. Returns None on any mismatch. Every rejection of an ACTUAL create_exchange claim
+    (as opposed to a turn that simply made none) is logged with its reason, so a customer
+    told "done" by the model's own reply text never fails silently with zero operator-visible
+    signal (final-review fix wave, finding 1)."""
     if data is None:
         return None
     raw = data.get("create_exchange")
@@ -126,22 +131,41 @@ def _validated_create_exchange(
     order_gid = raw.get("order_gid")
     size = raw.get("size")
     if not isinstance(order_gid, str) or not isinstance(size, str):
+        logger.warning(
+            "exchange create_exchange rejected: order_gid/size not both strings (order_gid=%r)",
+            order_gid,
+        )
         return None
     stripped_size = size.strip()
     if not stripped_size or len(stripped_size) > _MAX_SIZE_LENGTH:
+        logger.warning(
+            "exchange create_exchange rejected for order %s: size blank or over %d chars",
+            order_gid, _MAX_SIZE_LENGTH,
+        )
         return None
     matching = next((o for o in orders if o.order.gid == order_gid), None)
     if matching is None:
+        logger.warning("exchange create_exchange rejected: unknown order_gid %s", order_gid)
         return None
     if not check_exchange_eligibility(matching.order, now).eligible:
+        logger.warning(
+            "exchange create_exchange rejected for order %s: order not eligible", order_gid,
+        )
         return None
     # Repeat-write guard: an eligible order stays eligible for the rest of its 48h window, so
     # without this ANY later turn where the model re-emits create_exchange (a "yes"/"confirm",
     # or the model re-reading its own prior confirmation from history) would pass every check
     # above again and insert a second row -- a real duplicate courier pickup. There is no
     # cancel-and-re-request flow in scope, so any existing request for this order, regardless
-    # of status, blocks a new one. (backed by a DB-level partial unique index too, schema.sql.)
+    # of status, blocks a new one (a qc_failed predecessor included -- owner decision: that is
+    # terminal for this order's bot-driven flow, a human handles any further exchange on it).
+    # Backed by a DB-level unique index too, schema.sql.
     if any(r.order_gid == matching.order.gid for r in existing_requests):
+        logger.warning(
+            "exchange create_exchange rejected for order %s: an exchange request already "
+            "exists for it",
+            order_gid,
+        )
         return None
     return matching.order.gid, matching.order.name, stripped_size
 
@@ -188,7 +212,20 @@ async def run(context: AgentContext, exchanges: ExchangeStore) -> AgentReply:
                 # A store failure must not sacrifice the reply the model already composed for
                 # this turn -- the customer still gets `reply_text`; whether the write actually
                 # landed is unknown to them either way, same as any other silent-reject case
-                # above. No new logger is introduced (this package has none).
-                pass
+                # above. Logged (not swallowed) so it is operator-discoverable.
+                logger.exception(
+                    "exchange request write failed for order %s (%s)", order_name, order_gid,
+                )
+            else:
+                # The admin panel only surfaces an exchange request by joining onto a MIRRORED
+                # order (find_mirrored_orders_by_phone) -- but this agent resolves orders via
+                # LIVE Shopify, not the mirror (see the mirror-first-breaks-eligibility error
+                # learning), so a create can land for an order the mirror never ingested,
+                # invisible to that view forever. Logging every successful create unconditionally
+                # keeps it discoverable via log search regardless of mirror status (final-review
+                # fix wave, finding 4).
+                logger.info(
+                    "exchange request created for order %s (%s)", order_name, order_gid,
+                )
 
     return AgentReply(text=reply_text, handoff=handoff)

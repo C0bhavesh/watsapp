@@ -41,10 +41,11 @@ to exchange something from an order they placed (that is `exchange`).
 - recommendations: asking what to buy, what goes well with something, or for suggestions or \
 outfit ideas.
 - exchange: the customer wants to actually exchange an item from THEIR OWN order for a \
-different size -- not just asking about the exchange policy in the abstract (that is policy). \
-A report that an item arrived damaged, defective, or wrong is NOT this -- route those to \
-customer_support instead, since checking that needs photo/video proof this bot cannot yet \
-collect.
+different size (not just asking about the exchange policy in the abstract -- that is policy), \
+OR is asking about the progress of an exchange they already requested ("where is my \
+exchange", "exchange update") -- that is this too, not order_tracking. A report that an item \
+arrived damaged, defective, or wrong is NOT this -- route those to customer_support instead, \
+since checking that needs photo/video proof this bot cannot yet collect.
 - customer_support: greetings, small talk, unclear messages, or explicitly asking for a \
 human -- use this for anything that doesn't clearly fit the other five.
 

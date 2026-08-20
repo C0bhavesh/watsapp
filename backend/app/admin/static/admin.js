@@ -176,6 +176,29 @@ function addPatternRow(p) {
 }
 el("pat-add").addEventListener("click", () => addPatternRow(null));
 
+function addSizeChartRow(row) {
+  const r = row || {};
+  const div = document.createElement("div");
+  div.className = "row-size";
+  const sizeI = document.createElement("input"); sizeI.placeholder = "Size"; sizeI.value = r.size || "";
+  const bustI = document.createElement("input"); bustI.placeholder = "Bust"; bustI.value = r.bust || "";
+  const waistI = document.createElement("input"); waistI.placeholder = "Waist"; waistI.value = r.waist || "";
+  const hipI = document.createElement("input"); hipI.placeholder = "Hip"; hipI.value = r.hip || "";
+  const klI = document.createElement("input"); klI.placeholder = "Kurta length"; klI.value = r.kurta_length || "";
+  const pwI = document.createElement("input"); pwI.placeholder = "Pant waist"; pwI.value = r.pant_waist || "";
+  const plI = document.createElement("input"); plI.placeholder = "Pant length"; plI.value = r.pant_length || "";
+  const availLabel = document.createElement("label");
+  const availI = document.createElement("input"); availI.type = "checkbox";
+  availI.checked = r.available !== false; // default true, matches SizeChartRow's Pydantic default
+  availLabel.appendChild(availI);
+  availLabel.appendChild(document.createTextNode("Available"));
+  div.appendChild(sizeI); div.appendChild(bustI); div.appendChild(waistI); div.appendChild(hipI);
+  div.appendChild(klI); div.appendChild(pwI); div.appendChild(plI); div.appendChild(availLabel);
+  div.appendChild(rowRemoveBtn(div));
+  el("sc-rows").appendChild(div);
+}
+el("sc-add").addEventListener("click", () => addSizeChartRow(null));
+
 const BIZ_FIELDS = ["store_name", "website", "instagram", "support_phone", "support_email", "support_hours"];
 function buildBizFields() {
   const wrap = el("biz-fields");
@@ -205,6 +228,11 @@ async function loadKnowledge() {
   const pats = JSON.parse((await api("GET", "/admin/knowledge/patterns")).content);
   el("pat-rows").innerHTML = "";
   pats.forEach((p) => addPatternRow(p));
+  const sc = JSON.parse((await api("GET", "/admin/knowledge/size_chart")).content);
+  el("sc-unit").value = sc.unit || "";
+  el("sc-note").value = sc.note || "";
+  el("sc-rows").innerHTML = "";
+  (sc.rows || []).forEach((r) => addSizeChartRow(r));
 }
 
 el("bv-save").addEventListener("click", async () => {
@@ -248,6 +276,30 @@ el("pat-save").addEventListener("click", async () => {
     await api("PUT", "/admin/knowledge/patterns", { items });
     setStatus("pat-status", "Saved " + items.length + " patterns.", "ok");
   } catch (e) { setStatus("pat-status", e.message, "err"); }
+});
+
+el("sc-save").addEventListener("click", async () => {
+  const rows = [];
+  el("sc-rows").querySelectorAll(".row-size").forEach((row) => {
+    // Explicit filter (not a "input[type=text], input:not([type])" CSS selector) -- more
+    // obviously correct than relying on attribute-selector nuances for separating the 7 plain
+    // text inputs from the checkbox; see addSizeChartRow above for the DOM order this relies on.
+    const inputs = Array.from(row.querySelectorAll("input")).filter((i) => i.type !== "checkbox");
+    const [sizeI, bustI, waistI, hipI, klI, pwI, plI] = inputs;
+    const availI = row.querySelector("input[type=checkbox]");
+    if (sizeI.value.trim()) {
+      rows.push({
+        size: sizeI.value.trim(), bust: bustI.value.trim(), waist: waistI.value.trim(),
+        hip: hipI.value.trim(), kurta_length: klI.value.trim(), pant_waist: pwI.value.trim(),
+        pant_length: plI.value.trim(), available: availI.checked,
+      });
+    }
+  });
+  const body = { unit: el("sc-unit").value.trim(), rows, note: el("sc-note").value.trim() };
+  try {
+    await api("PUT", "/admin/knowledge/size_chart", body);
+    setStatus("sc-status", "Saved " + rows.length + " sizes.", "ok");
+  } catch (e) { setStatus("sc-status", e.message, "err"); }
 });
 
 // ---- controls -----------------------------------------------------------------

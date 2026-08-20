@@ -7,11 +7,15 @@ DEFAULT_LANGUAGE: Final = "en"
 EMPTY_PARAM_PLACEHOLDER: Final = "-"
 
 _COPY: Final[dict[str, dict[str, str]]] = {
+    # {order_name} is interpolated via str.format() at the call site (order_actions.py).
     "order_confirmed": {
-        "en": "Thank you, your order has been confirmed. We will ship it soon.",
-        "hi": "धन्यवाद, आपका ऑर्डर कन्फर्म हो गया है। हम इसे जल्द भेजेंगे।",
-        "hinglish": "Thank you, aapka order confirm ho gaya hai. Hum ise jaldi ship karenge.",
-        "gu": "આભાર, તમારો ઓર્ડર કન્ફર્મ થઈ ગયો છે. અમે તેને જલ્દી મોકલીશું.",
+        "en": "Your order {order_name} has been confirmed. Thank you for shopping with us!",
+        "hi": "आपका ऑर्डर {order_name} कन्फर्म हो गया है। हमारे साथ शॉपिंग करने के लिए धन्यवाद!",
+        "hinglish": (
+            "Aapka order {order_name} confirm ho gaya hai. "
+            "Humare saath shopping karne ke liye dhanyawad!"
+        ),
+        "gu": "તમારો ઓર્ડર {order_name} કન્ફર્મ થઈ ગયો છે. અમારી સાથે શોપિંગ કરવા બદલ આભાર!",
     },
     "cancel_confirm_prompt": {
         "en": "Are you sure you want to cancel this order? This cannot be undone.",
@@ -97,23 +101,12 @@ _COPY: Final[dict[str, dict[str, str]]] = {
         "hinglish": "Nahi, rakhein",
         "gu": "ના, રહેવા દો",
     },
+    # {order_name} is interpolated via str.format() at the call site (order_actions.py).
     "cancel_requested": {
-        "en": (
-            "We have requested cancellation of your order. "
-            "We will confirm once it is done."
-        ),
-        "hi": (
-            "हमने आपके ऑर्डर को कैंसल करने का अनुरोध कर दिया है। "
-            "पूरा होने पर हम आपको बता देंगे।"
-        ),
-        "hinglish": (
-            "Humne aapke order ko cancel karne ka request kar diya hai. "
-            "Ho jaane par bata denge."
-        ),
-        "gu": (
-            "અમે તમારા ઓર્ડરને કેન્સલ કરવાની વિનંતી કરી છે. "
-            "પૂરું થતાં અમે જણાવીશું."
-        ),
+        "en": "Your order {order_name} has been cancelled.",
+        "hi": "आपका ऑर्डर {order_name} कैंसल कर दिया गया है।",
+        "hinglish": "Aapka order {order_name} cancel kar diya gaya hai.",
+        "gu": "તમારો ઓર્ડર {order_name} કેન્સલ કરવામાં આવ્યો છે.",
     },
     "cancel_kept": {
         "en": "No problem, we have kept your order as it is.",

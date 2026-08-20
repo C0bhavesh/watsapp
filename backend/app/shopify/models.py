@@ -88,6 +88,10 @@ class Order:
     customer: Customer | None = None
     # See Customer.updated_at — the mirror's out-of-order-delivery guard.
     updated_at: str | None = None
+    # Shopify Order.createdAt, raw ISO-8601 -- the starting point for the delivery-date
+    # estimate formula (app/core/delivery_estimate.py). None for orders synced before this
+    # field existed; callers that need it must handle that (they do -- see delivery_estimate).
+    created_at: str | None = None
     # Split shipments: an order can have several fulfillments, each with its own tracking. Empty
     # until the order is fulfilled. Populated on both read paths (live Shopify query + DB mirror).
     fulfillments: tuple[Fulfillment, ...] = ()

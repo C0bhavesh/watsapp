@@ -361,6 +361,19 @@ def test_order_from_webhook_payload_parses_full_order() -> None:
     assert order.billing_phone is None
 
 
+def test_order_from_webhook_payload_parses_created_at() -> None:
+    order = order_from_webhook_payload(ORDER_WEBHOOK_PAYLOAD)
+    assert order is not None
+    assert order.created_at == "2026-07-28T03:14:46-04:00"
+
+
+def test_order_from_webhook_payload_missing_created_at_is_none() -> None:
+    p = {k: v for k, v in ORDER_WEBHOOK_PAYLOAD.items() if k != "created_at"}
+    order = order_from_webhook_payload(p)
+    assert order is not None
+    assert order.created_at is None
+
+
 def test_order_from_webhook_payload_parses_line_items() -> None:
     order = order_from_webhook_payload(ORDER_WEBHOOK_PAYLOAD)
     assert order is not None

@@ -65,9 +65,12 @@ null}}
 
 Only set "handoff" to true if the customer explicitly asks to speak with a person, or you
 genuinely cannot help them with what you know -- never merely because one detail is still
-missing. Set "create_exchange" ONLY on the turn where you have confirmed BOTH a specific
-ELIGIBLE order and the exact size the customer wants -- otherwise it must be null. Never set
-both "handoff" and "create_exchange" together.
+missing. When you do set "handoff" to true, your reply must also tell the customer you are
+connecting them with the team -- the flag alone tells them nothing, and it is what actually
+brings a teammate into this chat. Set "handoff" to false on every reply you handle yourself.
+Set "create_exchange" ONLY on the turn where you have confirmed BOTH a specific ELIGIBLE order
+and the exact size the customer wants -- otherwise it must be null. Never set both "handoff"
+and "create_exchange" together.
 """
 
 
@@ -101,12 +104,20 @@ def _existing_requests_block(requests: list[ExchangeRequest]) -> str:
     return f"This customer's existing exchange requests, for status questions:\n{lines}"
 
 
+_MAX_SIZE_LENGTH = 20
+
+
 def _validated_create_exchange(
-    data: dict[str, object] | None, orders: list[AuthorizedOrder], now: datetime,
+    data: dict[str, object] | None,
+    orders: list[AuthorizedOrder],
+    existing_requests: list[ExchangeRequest],
+    now: datetime,
 ) -> tuple[str, str, str] | None:
     """Re-derive (order_gid, order_name, size) ONLY if the model's claim checks out against
     real data -- never trust the model's own claim of eligibility or of which order/gid it
-    means. Returns None (silently, the caller logs) on any mismatch."""
+    means. Returns None on any mismatch (the caller does not log or surface a reason -- there
+    is no logger in this package, and nothing downstream currently consumes one; a future
+    consumer of the rejection reason is Task 5's job, not this one)."""
     if data is None:
         return None
     raw = data.get("create_exchange")
@@ -114,14 +125,25 @@ def _validated_create_exchange(
         return None
     order_gid = raw.get("order_gid")
     size = raw.get("size")
-    if not isinstance(order_gid, str) or not isinstance(size, str) or not size.strip():
+    if not isinstance(order_gid, str) or not isinstance(size, str):
+        return None
+    stripped_size = size.strip()
+    if not stripped_size or len(stripped_size) > _MAX_SIZE_LENGTH:
         return None
     matching = next((o for o in orders if o.order.gid == order_gid), None)
     if matching is None:
         return None
     if not check_exchange_eligibility(matching.order, now).eligible:
         return None
-    return matching.order.gid, matching.order.name, size.strip()
+    # Repeat-write guard: an eligible order stays eligible for the rest of its 48h window, so
+    # without this ANY later turn where the model re-emits create_exchange (a "yes"/"confirm",
+    # or the model re-reading its own prior confirmation from history) would pass every check
+    # above again and insert a second row -- a real duplicate courier pickup. There is no
+    # cancel-and-re-request flow in scope, so any existing request for this order, regardless
+    # of status, blocks a new one. (backed by a DB-level partial unique index too, schema.sql.)
+    if any(r.order_gid == matching.order.gid for r in existing_requests):
+        return None
+    return matching.order.gid, matching.order.name, stripped_size
 
 
 async def run(context: AgentContext, exchanges: ExchangeStore) -> AgentReply:
@@ -151,9 +173,22 @@ async def run(context: AgentContext, exchanges: ExchangeStore) -> AgentReply:
     reply_text = extract_reply_text(result.text, fallback)
     handoff = model_asked_for_handoff(data)
 
-    validated = _validated_create_exchange(data, context.orders, now)
-    if validated is not None:
-        order_gid, order_name, size = validated
-        await exchanges.create(order_gid, order_name, context.phone_e164, size)
+    # Never write on a turn where the customer is shown the generic fallback reply -- a
+    # completion with a usable create_exchange but a missing/blank reply would otherwise create
+    # a record the customer was never told succeeded (a phantom write behind an error message).
+    if reply_text != fallback:
+        validated = _validated_create_exchange(
+            data, context.orders, context.exchange_requests, now,
+        )
+        if validated is not None:
+            order_gid, order_name, size = validated
+            try:
+                await exchanges.create(order_gid, order_name, context.phone_e164, size)
+            except Exception:
+                # A store failure must not sacrifice the reply the model already composed for
+                # this turn -- the customer still gets `reply_text`; whether the write actually
+                # landed is unknown to them either way, same as any other silent-reject case
+                # above. No new logger is introduced (this package has none).
+                pass
 
     return AgentReply(text=reply_text, handoff=handoff)

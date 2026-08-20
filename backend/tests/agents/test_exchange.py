@@ -1,8 +1,15 @@
+from datetime import UTC, datetime, timedelta
+
 from app.agents.base import DEFAULT_REVEAL_FIELDS, AgentContext
 from app.agents.exchange import run
 from app.core.exchange_models import ExchangeRequest
 from app.providers.base import CompletionResult, Message
 from app.shopify.models import AuthorizedOrder, Fulfillment, Order
+
+# Computed relative to "now" (not a hardcoded date) so these never become wall-clock time bombs
+# -- mirrors test_order_tracking.py's own `datetime.now(UTC)`-relative date pattern.
+_ELIGIBLE_DELIVERED_AT = (datetime.now(UTC) - timedelta(hours=6)).isoformat()
+_INELIGIBLE_DELIVERED_AT = (datetime.now(UTC) - timedelta(days=30)).isoformat()
 
 
 class _FakeExchangeStore:
@@ -52,14 +59,16 @@ class _CapturingProvider:
 def _order(
     gid: str = "gid://o/1", name: str = "tavas1", phone: str = "+919999999999",
     cancelled_at: str | None = None,
-    fulfillments: tuple[Fulfillment, ...] = (
-        Fulfillment(
-            gid="gid://f/1", status="SUCCESS", tracking_company="Delhivery",
-            tracking_number="AWB1", tracking_url="https://track/AWB1",
-            delivered_at="2026-08-19T00:00:00+00:00",
-        ),
-    ),
+    fulfillments: tuple[Fulfillment, ...] | None = None,
 ) -> Order:
+    if fulfillments is None:
+        fulfillments = (
+            Fulfillment(
+                gid="gid://f/1", status="SUCCESS", tracking_company="Delhivery",
+                tracking_number="AWB1", tracking_url="https://track/AWB1",
+                delivered_at=_ELIGIBLE_DELIVERED_AT,
+            ),
+        )
     return Order(
         gid=gid, name=name, email=None, phone=phone, shipping_phone=None,
         billing_phone=None, financial_status="paid", fulfillment_status="FULFILLED",
@@ -97,7 +106,7 @@ async def test_prompt_includes_ineligible_fact_for_an_old_order() -> None:
             Fulfillment(
                 gid="gid://f/1", status="SUCCESS", tracking_company="Delhivery",
                 tracking_number="AWB1", tracking_url="https://track/AWB1",
-                delivered_at="2026-01-01T00:00:00+00:00",
+                delivered_at=_INELIGIBLE_DELIVERED_AT,
             ),
         ),
     )
@@ -141,7 +150,7 @@ async def test_create_exchange_for_an_ineligible_order_is_silently_ignored() -> 
             Fulfillment(
                 gid="gid://f/1", status="SUCCESS", tracking_company="Delhivery",
                 tracking_number="AWB1", tracking_url="https://track/AWB1",
-                delivered_at="2026-01-01T00:00:00+00:00",  # long past the 48h window
+                delivered_at=_INELIGIBLE_DELIVERED_AT,  # long past the 48h window
             ),
         ),
     )
@@ -194,3 +203,66 @@ async def test_existing_exchange_requests_are_rendered_for_status_questions() ->
     prompt = provider.captured_messages[0].content
     assert "return_picked_up" in prompt
     assert "https://track/return1" in prompt
+
+
+async def test_create_exchange_is_blocked_when_the_order_already_has_a_request() -> None:
+    """Critical review fix: an eligible order stays eligible for the rest of its 48h window, so
+    without a repeat-write guard ANY later turn where the model re-emits create_exchange (a
+    "yes"/"confirm", or the model re-reading its own prior confirmation from history) would
+    insert a second row -- a real duplicate courier pickup. Any existing request for the order,
+    regardless of status, must block a new one."""
+    store = _FakeExchangeStore()
+    order = _order(gid="gid://o/42", name="tavas42")
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+    existing = ExchangeRequest(
+        id=1, order_gid="gid://o/42", order_name="tavas42", phone_e164="+919999999999",
+        requested_size="M", status="requested", requested_at=_ELIGIBLE_DELIVERED_AT,
+        return_tracking_url=None, updated_at=_ELIGIBLE_DELIVERED_AT,
+    )
+    reply = (
+        '{"reply": "Done!", "handoff": false, '
+        '"create_exchange": {"order_gid": "gid://o/42", "size": "L"}}'
+    )
+    provider = _CapturingProvider(reply)
+    result = await run(
+        _context(provider, "size L please", [authorized], exchange_requests=[existing]), store,
+    )
+    assert store.created == []
+    # The reply text is still whatever the model composed -- only the write is blocked -- but a
+    # customer asking "did that work?" on a later turn must never trigger a second write either,
+    # which this same guard also covers (nothing store-specific about the reply text itself).
+    assert result.text == "Done!"
+
+
+async def test_create_exchange_is_skipped_when_the_reply_resolves_to_the_fallback() -> None:
+    """Important review fix: a completion with a usable create_exchange but a missing/blank
+    reply must not create a phantom record behind an error message the customer actually
+    sees."""
+    store = _FakeExchangeStore()
+    order = _order(gid="gid://o/42", name="tavas42")
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+    reply = (
+        '{"reply": "", "handoff": false, '
+        '"create_exchange": {"order_gid": "gid://o/42", "size": "M"}}'
+    )
+    provider = _CapturingProvider(reply)
+    await run(_context(provider, "size M please", [authorized]), store)
+    assert store.created == []
+
+
+async def test_create_exchange_is_rejected_when_size_is_too_long() -> None:
+    """Important review fix: a length cap keeps the model from persisting a color/product name
+    (or anything else long) into `requested_size`, defending the size-only scope at the data
+    level too, not just in the prompt wording."""
+    store = _FakeExchangeStore()
+    order = _order(gid="gid://o/42", name="tavas42")
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+    reply = (
+        '{"reply": "Done!", "handoff": false, '
+        '"create_exchange": {"order_gid": "gid://o/42", "size": "'
+        + ("x" * 21)
+        + '"}}'
+    )
+    provider = _CapturingProvider(reply)
+    await run(_context(provider, "size please", [authorized]), store)
+    assert store.created == []

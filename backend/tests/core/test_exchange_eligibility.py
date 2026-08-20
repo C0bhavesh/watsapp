@@ -77,3 +77,21 @@ def test_unparsable_delivered_at_is_treated_as_not_delivered() -> None:
     result = check_exchange_eligibility(order, now=datetime(2026, 8, 10, tzinfo=UTC))
     assert result.eligible is False
     assert "not been delivered" in result.reason
+
+
+def test_naive_now_within_window_is_eligible() -> None:
+    """Naive (tz-unaware) `now` input should not crash and should work correctly."""
+    order = _order(fulfillments=(_delivered("2026-08-10T00:00:00+00:00"),))
+    now_naive = datetime(2026, 8, 11, 12, 0)  # no tzinfo, 36 hours later
+    result = check_exchange_eligibility(order, now=now_naive)
+    assert result.eligible is True
+    assert "2026-08-10" in result.reason
+
+
+def test_naive_now_past_48_hour_window_is_not_eligible() -> None:
+    """Naive (tz-unaware) `now` input should correctly reject orders past the window."""
+    order = _order(fulfillments=(_delivered("2026-08-10T00:00:00+00:00"),))
+    now_naive = datetime(2026, 8, 12, 0, 1)  # no tzinfo, 48h1m later
+    result = check_exchange_eligibility(order, now=now_naive)
+    assert result.eligible is False
+    assert "outside the 48-hour" in result.reason

@@ -7,7 +7,7 @@ the LLM only relays ExchangeEligibility.reason verbatim, it never computes or gu
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from app.shopify.models import Order
 
@@ -22,7 +22,12 @@ class ExchangeEligibility:
 
 def _parse_datetime(raw: str) -> datetime | None:
     try:
-        return datetime.fromisoformat(raw)
+        dt = datetime.fromisoformat(raw)
+        # Ensure all parsed datetimes are tz-aware; treat naive as UTC (Shopify always provides
+        # timezone info, but guard defensively in case of edge cases or mocked data).
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt
     except ValueError:
         return None
 
@@ -41,7 +46,14 @@ def check_exchange_eligibility(order: Order, now: datetime) -> ExchangeEligibili
     ``reason`` is always populated, both when eligible and not -- app/agents/exchange.py
     relays it to the customer verbatim rather than composing its own explanation, so the
     exact wording here is what the customer sees.
+
+    Defensively normalizes `now` to be tz-aware (UTC if naive) so that subtraction with
+    tz-aware parsed ``delivered_at`` never raises TypeError, regardless of what the caller passes.
     """
+    # Normalize `now` to tz-aware; treat naive as UTC.
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+
     if order.is_cancelled():
         return ExchangeEligibility(eligible=False, reason="this order is cancelled.")
 

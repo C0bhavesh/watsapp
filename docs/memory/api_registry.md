@@ -63,9 +63,9 @@
 
 ## [admin] Knowledge — GET|PUT /admin/knowledge/{kind}
 - **Handler:** backend/app/admin/router.py (`get_knowledge`, `put_knowledge`)
-- **Request:** kind ∈ {brand_voice, faq, business, patterns}; PUT body is kind-specific (brand_voice `{content}`; faq `{items:[{q,a}]}`; patterns `{items:[{pattern,examples,reply}]}`; business `{store_name,website,...,extra}`).
-- **Response:** GET `{"kind", "content"}` (DB override else seed file, raw string); PUT 400 unknown kind, 422 malformed body (incl. business `extra` over-length key/value and patterns over-length example — **422 not 500 after security-review 2026-07-30**), 200 `{"ok": true}`.
-- **Notes:** require_admin (401). Validated by `validate_and_serialize` into cafe-loader-compatible stored formats (faq/patterns JSON list, business JSON object). Each PUT stores the override in `knowledge_overrides` and bumps `knowledge_version` (Phase 4 cache invalidation). A custom field_validator's `ValueError` lands in pydantic `ctx` (non-serializable); the handler drops url/input/context so the response is a clean 422.
+- **Request:** kind ∈ {brand_voice, faq, business, patterns, size_chart}; PUT body is kind-specific (brand_voice `{content}`; faq `{items:[{q,a}]}`; patterns `{items:[{pattern,examples,reply}]}`; business `{store_name,website,...,extra}`; size_chart `{unit?, rows:[{size,bust?,waist?,hip?,kurta_length?,pant_waist?,pant_length?,available?},...],note?}`).
+- **Response:** GET `{"kind", "content"}` (DB override else seed file, raw string); PUT 400 unknown kind, 422 malformed body (incl. business `extra` over-length key/value, patterns over-length example, or size_chart invalid measurements/row count — **422 not 500 after security-review 2026-07-30**), 200 `{"ok": true}`.
+- **Notes:** require_admin (401). Validated by `validate_and_serialize` into cafe-loader-compatible stored formats (faq/patterns/size_chart JSON list, business JSON object). Each PUT stores the override in `knowledge_overrides` and bumps `knowledge_version` (Phase 4 cache invalidation). A custom field_validator's `ValueError` lands in pydantic `ctx` (non-serializable); the handler drops url/input/context so the response is a clean 422. Size chart's `available` field (bool, default true) controls whether that size is offered to customers — `available=false` rows are never quoted as purchasable in LLM replies.
 
 ## [admin] Controls — GET|PUT /admin/controls
 - **Handler:** backend/app/admin/router.py (`get_controls`, `put_controls`)

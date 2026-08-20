@@ -58,6 +58,8 @@ DEFAULT_REVEAL_FIELDS: tuple[str, ...] = ("order_number", "email", "status", "it
 # uncovered-FAQ reply (which points the customer to a contact email) would otherwise match the
 # "genuinely cannot answer or resolve their request" trigger below and re-arm the 24h pause -- so
 # policy explicitly marks that email reply as answering the customer, keeping handoff false.
+# (Note: PERSONALITY above carries its own separately-worded "no useful answer at all" handoff
+# trigger; it is conceptually related but not part of this contract-vs-policy reconciliation.)
 HANDOFF_JSON_CONTRACT = """Only offer to connect the customer with the team in two cases: the \
 customer explicitly asks to speak with a human, person, agent, or team member, OR you genuinely \
 cannot answer or resolve their request with what you know. In those two cases -- and only those \

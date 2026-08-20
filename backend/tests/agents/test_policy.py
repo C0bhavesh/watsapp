@@ -172,6 +172,8 @@ async def test_system_prompt_reconciles_email_case_with_the_appended_handoff_con
     The rendered prompt must therefore mark the email case as NOT that handoff trigger, so the two
     instructions do not contradict each other. (Honest limitation: this asserts the prompt text is
     unambiguous, not that the live LLM obeys it -- like the other prompt-substring tests here.)"""
+    from app.agents.base import HANDOFF_JSON_CONTRACT
+
     provider = _CapturingProvider('{"reply": "Sure.", "handoff": false}')
     await run(_context(provider, "do you gift wrap", {"faq": "[]", "business": "{}"}))
     assert provider.captured_messages is not None
@@ -180,7 +182,10 @@ async def test_system_prompt_reconciles_email_case_with_the_appended_handoff_con
     assert "genuinely cannot answer or resolve their request" in system_prompt
     # ...and policy.py explicitly excludes the email case from it, keeping handoff false.
     assert "counts as answering the customer" in system_prompt
-    email_clause, _, contract = system_prompt.partition("genuinely cannot answer or resolve")
-    # The reconciling exclusion must sit with the email instruction, BEFORE the shared contract.
-    assert "info@thetavas.com" in email_clause
-    assert "counts as answering the customer" in email_clause
+    # The reconciling exclusion (the email instruction + its explicit "handoff false" carve-out)
+    # must sit BEFORE the real shared contract that is appended last -- measured against the
+    # actual HANDOFF_JSON_CONTRACT text, not policy.py's own earlier self-quote of the trigger
+    # phrase (which str.partition would split on first, making the assertion tautological).
+    contract_start = system_prompt.index(HANDOFF_JSON_CONTRACT)
+    assert system_prompt.index("info@thetavas.com") < contract_start
+    assert system_prompt.index("counts as answering the customer") < contract_start

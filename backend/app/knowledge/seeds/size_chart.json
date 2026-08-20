@@ -1,0 +1,11 @@
+{
+  "unit": "inches",
+  "rows": [
+    {"size": "S", "bust": "36", "waist": "34", "hip": "38", "kurta_length": "44", "pant_waist": "28-30", "pant_length": "38", "available": false},
+    {"size": "M", "bust": "38", "waist": "36", "hip": "40", "kurta_length": "44", "pant_waist": "30-32", "pant_length": "38", "available": true},
+    {"size": "L", "bust": "40", "waist": "38", "hip": "42", "kurta_length": "44", "pant_waist": "32-34", "pant_length": "38", "available": true},
+    {"size": "XL", "bust": "42", "waist": "40", "hip": "44", "kurta_length": "44", "pant_waist": "34-36", "pant_length": "38", "available": true},
+    {"size": "XXL", "bust": "44", "waist": "42", "hip": "46", "kurta_length": "44", "pant_waist": "36-38", "pant_length": "38", "available": true}
+  ],
+  "note": "If you are between sizes, we recommend sizing up for a comfortable fit. S is not currently available for purchase."
+}

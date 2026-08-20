@@ -97,3 +97,40 @@ def test_put_patterns_rejects_over_long_example(client: TestClient) -> None:
     # inflates the Phase-4 assembled prompt (DoS surface).
     bad = {"items": [{"pattern": "p", "examples": ["x" * 300], "reply": "r"}]}
     assert client.put("/admin/knowledge/patterns", json=bad).status_code == 422
+
+
+def test_put_size_chart_validates(client: TestClient) -> None:
+    login(client)
+    ok = {
+        "unit": "inches",
+        "rows": [
+            {"size": "M", "bust": "38", "waist": "36", "hip": "40", "kurta_length": "44",
+             "pant_waist": "30-32", "pant_length": "38", "available": True},
+        ],
+        "note": "Size up if between sizes.",
+    }
+    assert client.put("/admin/knowledge/size_chart", json=ok).status_code == 200
+    stored = json.loads(client.get("/admin/knowledge/size_chart").json()["content"])
+    assert stored["rows"][0]["size"] == "M"
+    assert stored["rows"][0]["available"] is True
+
+
+def test_put_size_chart_rejects_empty_rows(client: TestClient) -> None:
+    login(client)
+    bad = {"unit": "inches", "rows": [], "note": ""}
+    assert client.put("/admin/knowledge/size_chart", json=bad).status_code == 422
+
+
+def test_put_size_chart_row_defaults_available_true(client: TestClient) -> None:
+    login(client)
+    # A row that omits "available" entirely defaults to sellable -- an admin adding a new size
+    # row without touching the checkbox should not accidentally hide it from customers.
+    payload = {
+        "unit": "inches",
+        "rows": [{"size": "L", "bust": "40", "waist": "38", "hip": "42",
+                   "kurta_length": "44", "pant_waist": "32-34", "pant_length": "38"}],
+        "note": "",
+    }
+    assert client.put("/admin/knowledge/size_chart", json=payload).status_code == 200
+    stored = json.loads(client.get("/admin/knowledge/size_chart").json()["content"])
+    assert stored["rows"][0]["available"] is True

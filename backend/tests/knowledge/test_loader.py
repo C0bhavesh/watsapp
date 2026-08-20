@@ -29,6 +29,6 @@ async def test_assemble_all_covers_all_kinds() -> None:
 
 
 def test_all_seed_files_parse() -> None:
-    for name in ("faq.json", "business.json", "patterns.json"):
+    for name in ("faq.json", "business.json", "patterns.json", "size_chart.json"):
         json.loads((SEEDS_DIR / name).read_text(encoding="utf-8"))
     assert (SEEDS_DIR / "brand_voice.md").read_text(encoding="utf-8").strip()

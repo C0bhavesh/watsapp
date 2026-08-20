@@ -2,13 +2,14 @@ from pathlib import Path
 
 from app.store.base import ConfigRepo
 
-KINDS: tuple[str, ...] = ("brand_voice", "faq", "business", "patterns")
+KINDS: tuple[str, ...] = ("brand_voice", "faq", "business", "patterns", "size_chart")
 
 _SEED_FILES: dict[str, str] = {
     "brand_voice": "brand_voice.md",
     "faq": "faq.json",
     "business": "business.json",
     "patterns": "patterns.json",
+    "size_chart": "size_chart.json",
 }
 
 SEEDS_DIR: Path = Path(__file__).resolve().parent / "seeds"

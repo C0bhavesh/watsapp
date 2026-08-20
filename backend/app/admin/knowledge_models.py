@@ -55,6 +55,27 @@ class BusinessBody(BaseModel):
         return value
 
 
+class SizeChartRow(BaseModel):
+    size: str = Field(min_length=1, max_length=20)
+    bust: str = Field(default="", max_length=50)
+    waist: str = Field(default="", max_length=50)
+    hip: str = Field(default="", max_length=50)
+    kurta_length: str = Field(default="", max_length=50)
+    pant_waist: str = Field(default="", max_length=50)
+    pant_length: str = Field(default="", max_length=50)
+    # Whether this size is currently sold. Lives on the row (not a separate list) so it can
+    # never drift out of sync with the chart -- ticking/unticking one row's checkbox in the
+    # admin panel is the only place this is ever set. Defaults True: an admin adding a new row
+    # without touching the checkbox should not accidentally hide a size from customers.
+    available: bool = True
+
+
+class SizeChartBody(BaseModel):
+    unit: str = Field(default="inches", max_length=20)
+    rows: list[SizeChartRow] = Field(min_length=1, max_length=20)
+    note: str = Field(default="", max_length=2000)
+
+
 def _dump(obj: object) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=2)
 
@@ -74,4 +95,6 @@ def validate_and_serialize(kind: str, payload: dict[str, object]) -> str:
         return _dump([i.model_dump() for i in pbody.items])
     if kind == "business":
         return _dump(BusinessBody.model_validate(payload).model_dump())
+    if kind == "size_chart":
+        return _dump(SizeChartBody.model_validate(payload).model_dump())
     raise KeyError(kind)  # guarded by the router's kind check before this call

@@ -162,3 +162,25 @@ async def test_system_prompt_directs_uncovered_questions_to_contact_email() -> N
     assert "info@thetavas.com" in system_prompt
     # The vague "connect you with the team" promise for the uncovered-answer case is gone.
     assert "connect them with the team" not in system_prompt
+
+
+async def test_system_prompt_reconciles_email_case_with_the_appended_handoff_contract() -> None:
+    """The shared HANDOFF_JSON_CONTRACT is appended AFTER policy.py's own instructions and tells
+    the model to set handoff true when it "genuinely cannot answer or resolve their request". An
+    uncovered-FAQ email reply matches that phrase verbatim, so -- with the contract positioned last
+    (closest to generation) -- it would silently re-arm the 24h pause the email fallback removed.
+    The rendered prompt must therefore mark the email case as NOT that handoff trigger, so the two
+    instructions do not contradict each other. (Honest limitation: this asserts the prompt text is
+    unambiguous, not that the live LLM obeys it -- like the other prompt-substring tests here.)"""
+    provider = _CapturingProvider('{"reply": "Sure.", "handoff": false}')
+    await run(_context(provider, "do you gift wrap", {"faq": "[]", "business": "{}"}))
+    assert provider.captured_messages is not None
+    system_prompt = provider.captured_messages[0].content
+    # The exact contract phrase the email reply would otherwise match is present...
+    assert "genuinely cannot answer or resolve their request" in system_prompt
+    # ...and policy.py explicitly excludes the email case from it, keeping handoff false.
+    assert "counts as answering the customer" in system_prompt
+    email_clause, _, contract = system_prompt.partition("genuinely cannot answer or resolve")
+    # The reconciling exclusion must sit with the email instruction, BEFORE the shared contract.
+    assert "info@thetavas.com" in email_clause
+    assert "counts as answering the customer" in email_clause

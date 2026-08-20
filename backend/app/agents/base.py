@@ -53,7 +53,11 @@ DEFAULT_REVEAL_FIELDS: tuple[str, ...] = ("order_number", "email", "status", "it
 # thing that actually pauses the AI and brings a human into the chat (core/conversation.py) --
 # an agent whose prompt tells the model to "offer to connect the customer with the team" but
 # never asks for this field makes a promise the code structurally cannot keep. customer_support
-# states its own stricter one-attempt policy and keeps its own wording.
+# states its own stricter one-attempt policy and keeps its own wording. policy also carries a
+# local override for one case: because this contract is appended AFTER its instructions, an
+# uncovered-FAQ reply (which points the customer to a contact email) would otherwise match the
+# "genuinely cannot answer or resolve their request" trigger below and re-arm the 24h pause -- so
+# policy explicitly marks that email reply as answering the customer, keeping handoff false.
 HANDOFF_JSON_CONTRACT = """Only offer to connect the customer with the team in two cases: the \
 customer explicitly asks to speak with a human, person, agent, or team member, OR you genuinely \
 cannot answer or resolve their request with what you know. In those two cases -- and only those \

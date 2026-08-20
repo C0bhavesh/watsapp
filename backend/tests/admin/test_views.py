@@ -637,6 +637,120 @@ def test_conversation_thread_order_summary_includes_line_items(client: TestClien
     }
 
 
+def test_conversation_thread_includes_exchange_details_when_a_request_exists(
+    client: TestClient,
+) -> None:
+    login(client)
+    phone = "+919876500099"
+    order = order_from_webhook_payload({
+        "admin_graphql_api_id": "gid://shopify/Order/exchange1",
+        "name": "tavas9901",
+        "phone": phone,
+        "financial_status": "paid",
+        "fulfillment_status": "fulfilled",
+        "cancelled_at": None,
+        "tags": "",
+        "payment_gateway_names": [],
+        "total_price": "999.00",
+        "currency": "INR",
+        "updated_at": "2026-08-20T10:00:00+05:30",
+        "line_items": [],
+    })
+    assert order is not None
+    asyncio.run(get_container().ingest.upsert_order_mirror(order))
+    created = asyncio.run(
+        get_container().exchanges.create("gid://shopify/Order/exchange1", "tavas9901", phone, "M")
+    )
+
+    thread_id = asyncio.run(get_container().conversations.get_or_create(phone))
+    resp = client.get(f"/admin/conversations/{thread_id}")
+
+    assert resp.status_code == 200
+    orders = resp.json()["orders"]
+    assert len(orders) == 1
+    assert orders[0]["exchange"] == {
+        "id": created.id, "requested_size": "M", "status": "requested",
+        "return_tracking_url": None,
+    }
+
+
+def test_conversation_thread_order_has_no_exchange_key_when_none_exists(
+    client: TestClient,
+) -> None:
+    login(client)
+    phone = "+919876500098"
+    order = order_from_webhook_payload({
+        "admin_graphql_api_id": "gid://shopify/Order/no-exchange1",
+        "name": "tavas9902",
+        "phone": phone,
+        "financial_status": "paid",
+        "fulfillment_status": None,
+        "cancelled_at": None,
+        "tags": "",
+        "payment_gateway_names": [],
+        "total_price": "499.00",
+        "currency": "INR",
+        "updated_at": "2026-08-20T10:00:00+05:30",
+        "line_items": [],
+    })
+    assert order is not None
+    asyncio.run(get_container().ingest.upsert_order_mirror(order))
+
+    thread_id = asyncio.run(get_container().conversations.get_or_create(phone))
+    resp = client.get(f"/admin/conversations/{thread_id}")
+
+    assert resp.status_code == 200
+    orders = resp.json()["orders"]
+    assert len(orders) == 1
+    assert "exchange" not in orders[0]
+
+
+def test_update_exchange_requires_auth(client: TestClient) -> None:
+    resp = client.post("/admin/exchanges/1", json={"status": "return_picked_up"})
+    assert resp.status_code == 401
+
+
+def test_update_exchange_unknown_id_returns_404(client: TestClient) -> None:
+    login(client)
+    resp = client.post("/admin/exchanges/999999", json={"status": "return_picked_up"})
+    assert resp.status_code == 404
+
+
+def test_update_exchange_sets_status(client: TestClient) -> None:
+    login(client)
+    created = asyncio.run(
+        get_container().exchanges.create("gid://o/1", "tavas1", "+919999999999", "M")
+    )
+    resp = client.post(f"/admin/exchanges/{created.id}", json={"status": "qc_passed"})
+    assert resp.status_code == 200
+    updated = asyncio.run(get_container().exchanges.get(created.id))
+    assert updated is not None
+    assert updated.status == "qc_passed"
+
+
+def test_update_exchange_sets_return_tracking_url(client: TestClient) -> None:
+    login(client)
+    created = asyncio.run(
+        get_container().exchanges.create("gid://o/2", "tavas2", "+919999999999", "L")
+    )
+    resp = client.post(
+        f"/admin/exchanges/{created.id}", json={"return_tracking_url": "https://track/xyz"}
+    )
+    assert resp.status_code == 200
+    updated = asyncio.run(get_container().exchanges.get(created.id))
+    assert updated is not None
+    assert updated.return_tracking_url == "https://track/xyz"
+
+
+def test_update_exchange_rejects_invalid_status(client: TestClient) -> None:
+    login(client)
+    created = asyncio.run(
+        get_container().exchanges.create("gid://o/3", "tavas3", "+919999999999", "S")
+    )
+    resp = client.post(f"/admin/exchanges/{created.id}", json={"status": "not_a_real_status"})
+    assert resp.status_code == 422
+
+
 def test_conversation_thread_order_summary_empty_line_items(client: TestClient) -> None:
     login(client)
     normalized = "+919876500002"

@@ -27,6 +27,7 @@ from app.channels.whatsapp_config import (
 )
 from app.channels.whatsapp_sender import SendResult, WhatsAppSendError, send_text
 from app.core.conversation import HANDOFF_PAUSE_WINDOW
+from app.core.exchange_models import ExchangeRequest, ExchangeStatus
 from app.core.phone import normalize_phone
 from app.deps import build_provider, get_container
 from app.jobs.outbox_drain import OUTCOME_SENT, OUTCOME_SUPPRESSED, send_inline_outbound
@@ -562,6 +563,16 @@ class ManualReplyRequest(BaseModel):
     text: str = Field(max_length=4096)
 
 
+class ExchangeUpdateRequest(BaseModel):
+    """Admin-driven advance of an exchange request's status and/or return-tracking link.
+
+    Both fields optional -- a single call can set either, both, or (rejected below) neither.
+    """
+
+    status: ExchangeStatus | None = None
+    return_tracking_url: str | None = Field(default=None, max_length=2048)
+
+
 class TemplateSendRequest(BaseModel):
     """Admin-editable resend of one of the store's approved WhatsApp templates for an order.
 
@@ -793,7 +804,9 @@ async def list_conversations(
     return result
 
 
-def _order_summary(order: Order) -> dict[str, object]:
+def _order_summary(
+    order: Order, exchange: ExchangeRequest | None = None,
+) -> dict[str, object]:
     tracking_company = tracking_number = tracking_url = None
     if order.fulfillments:
         first = order.fulfillments[0]
@@ -812,7 +825,7 @@ def _order_summary(order: Order) -> dict[str, object]:
         city = order.customer.city
         state = order.customer.state
         postal_code = order.customer.postal_code
-    return {
+    summary: dict[str, object] = {
         "order_name": order.name,
         "financial_status": order.financial_status,
         "fulfillment_status": order.fulfillment_status,
@@ -841,6 +854,14 @@ def _order_summary(order: Order) -> dict[str, object]:
             for li in order.line_items
         ],
     }
+    if exchange is not None:
+        summary["exchange"] = {
+            "id": exchange.id,
+            "requested_size": exchange.requested_size,
+            "status": exchange.status,
+            "return_tracking_url": exchange.return_tracking_url,
+        }
+    return summary
 
 
 @admin_router.get("/conversations/{thread_id}", dependencies=[Depends(require_admin)])
@@ -894,7 +915,12 @@ async def get_conversation_thread(thread_id: int) -> dict[str, object]:
 
     orders = await c.ingest.find_mirrored_orders_by_phone(user_id)
     orders_sorted = sorted(orders, key=lambda o: str(o.updated_at or ""), reverse=True)
-    order_summaries = [_order_summary(o) for o in orders_sorted]
+    exchanges_by_order_gid = {
+        e.order_gid: e for e in await c.exchanges.list_for_phone(user_id)
+    }
+    order_summaries = [
+        _order_summary(o, exchanges_by_order_gid.get(o.gid)) for o in orders_sorted
+    ]
 
     paused_until = await c.conversations.get_paused_until(thread_id)
     # Opening a thread (this endpoint fires both on click-open and on every 3s poll tick while it
@@ -910,6 +936,24 @@ async def get_conversation_thread(thread_id: int) -> dict[str, object]:
         "orders": order_summaries,
         "paused_until": paused_until.isoformat() if paused_until else None,
     }
+
+
+@admin_router.post("/exchanges/{exchange_id}", dependencies=[Depends(require_admin)])
+async def update_exchange(exchange_id: int, body: ExchangeUpdateRequest) -> dict[str, object]:
+    """Advance an exchange request's status and/or set its return-tracking URL.
+
+    No courier/QC integration exists (design doc) -- this is the only way either field ever
+    changes after the exchange agent creates the request.
+    """
+    c = get_container()
+    existing = await c.exchanges.get(exchange_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="exchange request not found")
+    if body.status is not None:
+        await c.exchanges.set_status(exchange_id, body.status)
+    if body.return_tracking_url is not None:
+        await c.exchanges.set_return_tracking_url(exchange_id, body.return_tracking_url)
+    return {"ok": True}
 
 
 @admin_router.post(

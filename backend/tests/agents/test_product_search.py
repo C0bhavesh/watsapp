@@ -159,6 +159,27 @@ async def test_product_data_rendered_in_system_prompt() -> None:
     assert "currently out of stock" in system_message.content
 
 
+async def test_size_chart_rendered_in_system_prompt() -> None:
+    """Verify core computation: size-chart knowledge is grounded in the system prompt."""
+    shopify = _FakeShopify(products=[])
+    provider = _FixedProvider('{"reply": "Size M measurements: ..."}')
+    context = AgentContext(
+        wa_id="919999999999", phone_e164="+919999999999", user_text="what size is M",
+        history=[], orders=[], is_vip=False,
+        knowledge={"size_chart": '{"unit": "inches", "rows": [{"size": "M", "bust": "38", '
+                                  '"available": true}], "note": "Size up if between sizes."}'},
+        provider=provider, model="m", api_key="k", extra_params=None,
+    )
+    await run(context, shopify)
+
+    assert len(provider.captured_messages) >= 1
+    system_message = provider.captured_messages[0]
+    assert system_message.role == "system"
+    assert '"size": "M"' in system_message.content
+    assert '"bust": "38"' in system_message.content
+    assert "Size up if between sizes." in system_message.content
+
+
 async def test_model_handoff_flag_is_honored() -> None:
     """The prompt tells the model to offer to connect the customer with the team when nothing
     matches -- that offer only means something if it also sets handoff."""

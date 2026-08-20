@@ -23,6 +23,16 @@ or availability that is not in this list.
 
 {results_context}
 
+If a customer asks about sizing or measurements, answer using ONLY the size chart below --
+never guess or invent a measurement. Each row has an "available" flag: only quote measurements
+for a row where "available" is true. If a customer asks about a size where "available" is
+false, or a size that is not in this chart at all, tell them that size is not currently
+available for purchase -- do not give its measurements as if it were purchasable. If you are
+genuinely uncertain, say so and offer to connect them with the team.
+
+Size chart:
+{size_chart}
+
 If nothing suitable is listed above, say so honestly and offer to connect the customer with
 the team, or suggest they describe what they're looking for a little differently.
 
@@ -79,6 +89,7 @@ async def run(context: AgentContext, shopify: ProductSource) -> AgentReply:
     system_prompt = _SYSTEM_TEMPLATE.format(
         personality=personality_for(context),
         results_context=_results_context(products),
+        size_chart=context.knowledge.get("size_chart", ""),
         contract=HANDOFF_JSON_CONTRACT,
     )
     messages = [

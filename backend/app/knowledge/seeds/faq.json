@@ -6,5 +6,7 @@
   {"q": "Can I exchange a product for a different size?", "a": "Size exchange is allowed within 48 hours of delivery. The product must be unwashed and free from perfume, deodorant, makeup stains, dirt, or any signs of use. Exchange is subject to stock availability, and exchange shipping charges are paid by the customer."},
   {"q": "What if my product is damaged, defective, or incorrect?", "a": "After verification, we provide a replacement subject to stock availability. If a replacement is unavailable, a full refund is issued."},
   {"q": "How do refunds work?", "a": "Refunds are issued only when an approved damaged, defective, or incorrect product cannot be replaced. Refunds are processed to your original payment method within 3-5 business days after approval; bank processing times may vary."},
-  {"q": "Do you sell products in this chat?", "a": "I can help you find products and check availability, but all orders are placed on our website."}
+  {"q": "Do you sell products in this chat?", "a": "I can help you find products and check availability, but all orders are placed on our website."},
+  {"q": "Why is my order delayed or taking longer than expected?", "a": "Delivery can sometimes be affected by courier delays, weather, festivals, strikes, or government restrictions beyond our control. If your order is significantly past the estimated delivery window, message us with your order number and we'll look into it."},
+  {"q": "Do you share my personal information with anyone?", "a": "We never sell your personal information. We only share what's necessary with trusted payment gateways, courier partners, and service providers to process and deliver your order, or where required by law."}
 ]

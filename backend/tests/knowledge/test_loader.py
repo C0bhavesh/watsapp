@@ -51,3 +51,23 @@ def test_cod_faq_reflects_pin_code_restriction() -> None:
     # the outdated "no restriction" wording must be gone
     assert "no pin code restriction" not in answer
     assert "all products" not in answer
+
+
+def test_faq_covers_courier_delay_and_data_sharing() -> None:
+    """New knowledge-gap entries requested 2026-08-21: courier delay disclaimer (from Terms &
+    Conditions) and data-sharing scope (from Privacy Policy) were missing from the FAQ the bot
+    answers policy questions from. Guards both entries exist with the right substance."""
+    faq = json.loads((SEEDS_DIR / "faq.json").read_text(encoding="utf-8"))
+
+    delay_entries = [item for item in faq if "delay" in item["q"].lower()]
+    assert delay_entries, "expected a delivery-delay FAQ entry"
+    delay_answer = delay_entries[0]["a"].lower()
+    assert "courier" in delay_answer
+    assert "weather" in delay_answer
+    assert "strikes" in delay_answer
+
+    sharing_entries = [item for item in faq if "share" in item["q"].lower()]
+    assert sharing_entries, "expected a data-sharing FAQ entry"
+    sharing_answer = sharing_entries[0]["a"].lower()
+    assert "payment gateway" in sharing_answer
+    assert "courier partner" in sharing_answer

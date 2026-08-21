@@ -164,6 +164,25 @@ async def test_system_prompt_directs_uncovered_questions_to_contact_email() -> N
     assert "connect them with the team" not in system_prompt
 
 
+async def test_system_prompt_matches_bare_or_statement_messages_to_covered_faq_topics() -> None:
+    """A bare/statement-style customer message ("Cod available", "cod?", "any cod") must be
+    matched to a covered FAQ topic and answered FROM that FAQ, not dropped into the uncovered
+    "I'm not certain / email us" fallback. This regressed in production: "Cod available" got the
+    fallback even though a COD FAQ entry existed. (Honest limitation, per the other prompt-substring
+    tests here: this asserts the prompt CARRIES the steering instruction, not that the live LLM
+    obeys it -- live answer quality is not unit-testable with a mocked provider.)"""
+    provider = _CapturingProvider('{"reply": "Yes, COD is available.", "handoff": false}')
+    await run(_context(provider, "Cod available", {"faq": "[]", "business": "{}"}))
+    assert provider.captured_messages is not None
+    system_prompt = provider.captured_messages[0].content
+    # The model is told a message may be a bare keyword or a statement, not a full question...
+    assert "bare keyword" in system_prompt
+    # ...and to answer confidently from an FAQ entry whose topic it clearly matches...
+    assert "matches the topic of a question above" in system_prompt
+    # ...while the genuine uncovered-topic fallback stays intact (not weakened).
+    assert "only when the topic is genuinely not covered" in system_prompt
+
+
 async def test_system_prompt_reconciles_email_case_with_the_appended_handoff_contract() -> None:
     """The shared HANDOFF_JSON_CONTRACT is appended AFTER policy.py's own instructions and tells
     the model to set handoff true when it "genuinely cannot answer or resolve their request". An

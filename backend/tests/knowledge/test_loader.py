@@ -32,3 +32,21 @@ def test_all_seed_files_parse() -> None:
     for name in ("faq.json", "business.json", "patterns.json", "size_chart.json"):
         json.loads((SEEDS_DIR / name).read_text(encoding="utf-8"))
     assert (SEEDS_DIR / "brand_voice.md").read_text(encoding="utf-8").strip()
+
+
+def test_cod_faq_reflects_all_products_no_pin_restriction() -> None:
+    """Owner-confirmed policy (2026-08-21): COD is available on all products with NO PIN-code
+    restriction. This supersedes the old seed answer ("only in eligible PIN codes"), which was
+    outdated/wrong. Guards the seed content so the correction isn't silently reverted."""
+    faq = json.loads((SEEDS_DIR / "faq.json").read_text(encoding="utf-8"))
+    cod_entries = [
+        item
+        for item in faq
+        if "cod" in item["q"].lower() or "cash on delivery" in item["q"].lower()
+    ]
+    assert cod_entries, "expected a COD FAQ entry"
+    answer = cod_entries[0]["a"].lower()
+    assert "all products" in answer
+    assert "no pin" in answer
+    # the outdated PIN-code restriction wording must be gone
+    assert "eligible pin" not in answer

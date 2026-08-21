@@ -71,3 +71,14 @@ def test_faq_covers_courier_delay_and_data_sharing() -> None:
     sharing_answer = sharing_entries[0]["a"].lower()
     assert "payment gateway" in sharing_answer
     assert "courier partner" in sharing_answer
+
+
+def test_business_policy_notes_covers_data_sharing_partners() -> None:
+    """Privacy Policy allows sharing personal information with payment gateways, couriers, and
+    service providers as necessary; the seed's policy_notes previously only said data is 'used
+    to process orders, provide support, and send order updates' without mentioning partner
+    sharing. Guards the completed clause (requested 2026-08-21)."""
+    business = json.loads((SEEDS_DIR / "business.json").read_text(encoding="utf-8"))
+    notes = business["policy_notes"].lower()
+    assert "payment gateway" in notes
+    assert "courier partner" in notes

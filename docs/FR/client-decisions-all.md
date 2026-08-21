@@ -316,6 +316,22 @@ Not blocking — the primary fix (use the correct colour's own photo whenever on
 
 **Separately, a data note, not a question:** the confirmation image chosen for an order is saved at the time the order comes in, and reused if that message is ever resent (e.g. the automatic 1-hour reminder for an unconfirmed order). Fixing the code going forward does not correct already-placed orders, including Amita's — those keep whatever photo was originally saved unless someone manually resends that specific confirmation after the fix ships. No action needed from you; flagging so it's not a surprise if an old reminder still shows the old photo.
 
+## Part 11 — Decision made and resolved during build (2026-08-20)
+
+**Exchange requests after a quality-check failure.** While building the new WhatsApp
+exchange-guide feature (customers can ask to exchange an item for a different size), a design
+gap surfaced during final review: if a returned item fails quality control (`qc_failed`), should
+the bot let the customer start a brand-new exchange request on the same order on its own, or
+should that always require a person to step in?
+
+**Resolved directly by the owner in the same review session:** after a QC failure, the bot always
+blocks a further bot-driven exchange request on that order and routes the customer to a human — a
+`qc_failed` record is terminal for the automatic flow, the same as any other completed request on
+that order. Built as a repeat-request guard in the exchange agent (checks for ANY existing
+exchange request on the order regardless of its status, not just an "active" one), backed by a
+database-level unique constraint with no exceptions carved out for `qc_failed`. See
+`docs/memory/component_registry.md`'s "exchange agent" entry for the implementation detail.
+
 ## Part 8 — New question (2026-08-19)
 
 **20. How much friction should logging into the WhatsApp admin chat page carry?** The page at

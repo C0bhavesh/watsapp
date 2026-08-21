@@ -65,6 +65,113 @@
   `INSERT INTO orders` column list/VALUES/SET clause (as `$18`) specifically so no pre-existing
   positional-index-based test assertion elsewhere in `test_order_mirror.py` shifted.
 
+## ExchangeRequest / check_exchange_eligibility (exchange guide agent, 2026-08-20)
+- **File:** app/core/exchange_models.py (`ExchangeRequest`, `ExchangeStatus`); app/core/exchange_eligibility.py (`ExchangeEligibility`, `check_exchange_eligibility`).
+- **Purpose:** app-owned size-exchange request record (no Shopify counterpart) + the deterministic
+  eligibility rule that gates creating one — computed in Python, handed to the LLM agent
+  (`app/agents/exchange.py`) as an already-decided fact, never computed/guessed by the model.
+- **Public API:** `ExchangeStatus = Literal["requested","return_picked_up","qc_passed","qc_failed",
+  "replacement_dispatched","delivered"]`; `ExchangeRequest(id, order_gid, order_name, phone_e164,
+  requested_size, status, requested_at, return_tracking_url, updated_at)` (frozen dataclass);
+  `ExchangeEligibility(eligible: bool, reason: str)` (frozen dataclass); `check_exchange_eligibility(
+  order: Order, now: datetime) -> ExchangeEligibility` — eligible only if the order is not
+  cancelled AND has a fulfillment with `delivered_at` set within the last 48 hours; `reason` is
+  always populated (relayed to the customer verbatim by the agent, never composed by it).
+- **Used in:** `app/agents/exchange.py` (per-order eligibility line + the create-time re-check),
+  `app/core/conversation.py` (order-resolution-source gate — see the Intent/router entry below).
+- **Notes:** mirrors `app/core/delivery_estimate.py`'s discipline (pure function of `(Order, now)`,
+  no I/O). Both `now` and each parsed `delivered_at` are normalized to tz-aware (naive treated as
+  UTC) before subtracting — a tz-aware/naive subtraction risk was the one review fix on this task.
+  **Depends on `Fulfillment.delivered_at` being populated by a genuine LIVE Shopify GraphQL read**
+  — the webhook/mirror-ingestion path never sets it (see `Order.created_at`/mirror entries above) —
+  so callers must resolve orders live for this intent, never via `MirrorOrderSource`. Known parked
+  gap (not fixed): cannot distinguish "genuinely undelivered" from "Shopify fulfillments fetch
+  failed" — both read identically as `delivered_at=None`, so a transient Shopify hiccup would
+  silently deny an otherwise-eligible request.
+
+## exchange agent (app/agents/exchange.py, 2026-08-20)
+- **File:** app/agents/exchange.py.
+- **Purpose:** the `exchange` intent's specialist agent — relays deterministic eligibility, collects
+  the requested SIZE only (no color/product exchange), creates the `exchange_requests` row itself
+  once an eligible order + size are confirmed in conversation (owner-directed: no button-tap
+  confirmation step, unlike the Confirm/Cancel order-action pattern — design doc's "Mutation-safety
+  note"), and answers "where is my exchange" from `context.exchange_requests`.
+- **Public API:** `async def run(context: AgentContext, exchanges: ExchangeStore) -> AgentReply`.
+- **Used in:** `app/agents/router.py`'s intent dispatch (`if intent == "exchange": return await
+  exchange.run(context, c.exchanges)`).
+- **Notes:** deliberately does NOT use the shared `HANDOFF_JSON_CONTRACT` from `app/agents/base.py`
+  — writes its own self-contained JSON contract (`{"reply", "handoff", "create_exchange"}`) instead,
+  same precedent `customer_support.py` already set, avoiding the shared-fragment-overrides-local-
+  instruction bug class this session already hit once for `policy.py` (see `_pipeline_status.md`'s
+  router/policy bug-fix row). The only DB write (`exchanges.create(...)`) is deterministic Python
+  RE-VALIDATING the model's `create_exchange` JSON claim against real data — never a direct
+  model-triggered mutation (Rule 2): `_validated_create_exchange` checks `order_gid`/`size` are both
+  strings, `size` is 1-20 chars, `order_gid` matches one of `context.orders` (ownership), the order
+  is independently RE-CHECKED eligible via `check_exchange_eligibility` (never trusts the model's
+  own "eligible" claim), and — the repeat-write guard added in the Task 4 review fix round — no
+  existing `ExchangeRequest` already exists for that `order_gid` REGARDLESS of status (a `qc_failed`
+  predecessor is terminal for the bot-driven flow too — owner decision made during the final
+  whole-branch review — any further exchange on that order goes to a human; backed by a DB-level
+  unique index, `schema.sql`'s `ux_exchange_requests_active_order`, no WHERE clause). The write only
+  happens on a turn where the customer is NOT shown the generic fallback reply (guards a phantom
+  write behind an error message the customer never saw as success) and is wrapped in `try/except
+  Exception: logger.exception(...)` (only `ProviderError` was caught around the store write in the
+  first-shipped version — final-review Critical finding — a write failure is now always logged,
+  never silently swallowed). Every successful create is also logged at INFO unconditionally, because
+  this agent resolves orders via LIVE Shopify (not the mirror — see the Intent/router entry below),
+  so a create can land for an order the mirror never ingested, invisible to the admin panel forever;
+  log search is the only discoverability path for that case.
+
+## ExchangeStore (Protocol) + InMemoryExchangeStore + PostgresExchangeStore (2026-08-20)
+- **File:** app/store/base.py (`ExchangeStore` Protocol), app/store/memory.py
+  (`InMemoryExchangeStore`), app/store/postgres.py (`PostgresExchangeStore`, `_exchange_from_row`).
+- **Purpose:** CRUD-ish store for `ExchangeRequest` rows (`exchange_requests` table, additive — no
+  Shopify counterpart).
+- **Public API:** `.create(order_gid, order_name, phone_e164, requested_size) -> ExchangeRequest`
+  (status always starts `"requested"`); `.list_for_phone(phone_e164) -> list[ExchangeRequest]`;
+  `.get(id) -> ExchangeRequest | None`; `.set_status(id, status: ExchangeStatus) -> None`;
+  `.set_return_tracking_url(id, url: str) -> None`.
+- **Used in:** `app/agents/exchange.py` (create + list_for_phone), `app/admin/router.py`
+  (`list_conversations`'s `_order_summary` join via `list_for_phone`; `update_exchange` via
+  `get`/`set_status`/`set_return_tracking_url` — see api_registry.md), `app/deps.py::Container.
+  exchanges` (Postgres when `database_url` is set, else in-memory — same selection pattern as every
+  other store).
+- **Notes:** the store trusts its caller for eligibility/ownership (same posture as every other
+  store here) — all validation lives in `app/agents/exchange.py`'s `_validated_create_exchange`.
+  Schema: `exchange_requests(id, order_gid, order_name, phone_e164, requested_size, status,
+  requested_at, return_tracking_url, updated_at)` + a UNIQUE index
+  `ux_exchange_requests_active_order (order_gid)` (no WHERE clause — see the `exchange` agent entry
+  above for the qc_failed-is-terminal rationale) + non-unique indexes on `order_gid`/`phone_e164`.
+  **Not yet run in production** — `schema.sql` is a manually owner-run migration file, never
+  auto-applied by any code path (see `_pipeline_status.md`).
+
+## Intent / AgentContext / router widening — `exchange` (2026-08-20)
+- **File:** app/agents/router.py (`Intent`, `_INTENTS`, `_ROUTER_PROMPT`, `classify_intent`);
+  app/agents/base.py (`AgentContext.exchange_requests`); app/core/conversation.py (`_run_agent`'s
+  order-resolution wiring).
+- **Purpose:** new `Intent` literal `"exchange"`, split out of `policy` (mirroring the earlier
+  same-day `order_tracking`/`policy` split) — routes "I want to exchange my order for a different
+  size" and "where is my exchange" to the new `exchange` agent instead of `policy`'s abstract-policy
+  answer or `order_tracking`'s status answer.
+- **Public API:** `Intent = Literal["order_tracking","product_search","policy","recommendations",
+  "customer_support","exchange"]`; `AgentContext.exchange_requests: list[ExchangeRequest] =
+  field(default_factory=list)` (empty for every agent except `exchange` — only populated by
+  `conversation.py` when `intent == "exchange"`).
+- **Used in:** `app/core/conversation.py::_run_agent`'s dispatch table; the order-resolution gate
+  widened from `intent == "order_tracking"` to `intent in ("order_tracking", "exchange")`.
+- **Notes:** `_ROUTER_PROMPT`'s `policy` category text now explicitly excludes "a customer who
+  actually wants to exchange something from an order they placed" (routes to `exchange` instead),
+  and its `exchange` category text explicitly excludes damaged/defective/wrong-item reports (routes
+  to `customer_support` — checking those needs photo/video proof this bot cannot yet collect, out of
+  scope). **Order-resolution source differs by intent for the SAME gate:** `order_tracking` uses
+  `MirrorOrderSource(c.ingest, c.shopify)` (mirror-first, near-real-time via webhooks), but
+  `exchange` deliberately uses `c.shopify` directly (live-only) — a real correctness bug caught
+  during pre-task investigation, not by a failing test: `check_exchange_eligibility` depends on
+  `Fulfillment.delivered_at`, which the mirror/webhook ingestion path never populates, so a
+  mirror-served order would almost always wrongly read as "not delivered yet" even for a genuinely
+  eligible customer. `context.exchange_requests` is a cheap DB-only `list_for_phone` read (no
+  mirror/live distinction applies to it).
+
 ## Template catalog + default-value resolver (admin manual-resend, Task 1 of 3, 2026-08-19)
 - **File:** app/admin/template_catalog.py
 - **Purpose:** registry of the store's 4 Meta-approved WhatsApp templates + a helper that derives

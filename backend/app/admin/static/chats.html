@@ -24,6 +24,10 @@
     #thread-search { border: none; border-bottom: 1px solid #e9edef; padding: .6rem 1rem;
       font-size: .82rem; outline: none; }
     #thread-list { flex: 1; overflow-y: auto; }
+    #load-older-btn { flex-shrink: 0; width: 100%; border: none; border-top: 1px solid #e9edef;
+      background: #f0f2f5; color: #3b4a54; padding: .6rem 1rem; font-size: .8rem; cursor: pointer; }
+    #load-older-btn:hover:not(:disabled) { background: #e9edef; }
+    #load-older-btn:disabled { cursor: default; color: #8696a0; }
     .thread-row { padding: .7rem 1rem; border-bottom: 1px solid #f0f2f5; cursor: pointer; }
     .thread-row:hover { background: #f5f6f6; }
     .thread-row.active { background: #f0f2f5; }
@@ -146,6 +150,7 @@
       <input id="thread-search" type="text" placeholder="Search name, phone, or order #" />
       <div id="thread-filters"></div>
       <div id="thread-list"></div>
+      <button id="load-older-btn" style="display:none">Load older chats</button>
       <div class="status" id="list-status"></div>
     </div>
     <div id="chat-pane">

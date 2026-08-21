@@ -107,7 +107,7 @@ def _seed_outbound_at(phone_e164: str, order_gid: str, payload_json: str) -> Non
 
 
 def _thread_id_for(client: TestClient, phone_e164: str) -> int:
-    rows = client.get("/admin/conversations").json()
+    rows = client.get("/admin/conversations").json()["threads"]
     match = next(r for r in rows if r["phone"] == phone_e164)
     return int(match["thread_id"])
 
@@ -127,7 +127,7 @@ def test_conversations_list_shows_recent_threads(client: TestClient) -> None:
     resp = client.get("/admin/conversations")
 
     assert resp.status_code == 200
-    rows = resp.json()
+    rows = resp.json()["threads"]
     row = next(r for r in rows if r["phone"] == "+919664290413")
     assert isinstance(row["thread_id"], int)
     assert row["preview"]
@@ -153,7 +153,7 @@ def test_conversations_list_shows_unread_count_for_new_customer_message(
 
     asyncio.run(_new_customer_message())
 
-    rows = client.get("/admin/conversations").json()
+    rows = client.get("/admin/conversations").json()["threads"]
     row = next(r for r in rows if r["thread_id"] == thread_id)
     assert row["unread_count"] == 1
 
@@ -169,7 +169,7 @@ def test_opening_thread_clears_unread_count(client: TestClient) -> None:
         await get_container().conversations.append_message(thread_id, "user", "still there?")
 
     asyncio.run(_new_customer_message())
-    before = client.get("/admin/conversations").json()
+    before = client.get("/admin/conversations").json()["threads"]
     row_before = next(r for r in before if r["thread_id"] == thread_id)
     assert row_before["unread_count"] >= 1
 
@@ -180,7 +180,7 @@ def test_opening_thread_clears_unread_count(client: TestClient) -> None:
     time.sleep(0.05)
     client.get(f"/admin/conversations/{thread_id}")
 
-    after = client.get("/admin/conversations").json()
+    after = client.get("/admin/conversations").json()["threads"]
     row_after = next(r for r in after if r["thread_id"] == thread_id)
     assert row_after["unread_count"] == 0
 
@@ -192,7 +192,7 @@ def test_conversations_list_reports_ai_paused_while_handed_off(client: TestClien
     future = datetime.now(UTC) + timedelta(hours=1)
     asyncio.run(get_container().conversations.pause_until(thread_id, future))
 
-    rows = client.get("/admin/conversations").json()
+    rows = client.get("/admin/conversations").json()["threads"]
     row = next(r for r in rows if r["thread_id"] == thread_id)
     assert row["ai_paused"] is True
 
@@ -201,7 +201,7 @@ def test_conversations_list_reports_ai_not_paused_by_default(client: TestClient)
     login(client)
     _send_ai_message("+919664290413", "hi", "hello there")
 
-    rows = client.get("/admin/conversations").json()
+    rows = client.get("/admin/conversations").json()["threads"]
     row = next(r for r in rows if r["phone"] == "+919664290413")
     assert row["ai_paused"] is False
 
@@ -212,7 +212,7 @@ def test_conversations_list_includes_outbound_only_customer(client: TestClient) 
     login(client)
     _seed_outbound_at("+918888888888", "gid://shopify/Order/outonly", "{}")
 
-    rows = client.get("/admin/conversations").json()
+    rows = client.get("/admin/conversations").json()["threads"]
 
     outbound_thread = next(r for r in rows if r["phone"] == "+918888888888")
     assert isinstance(outbound_thread["thread_id"], int)
@@ -234,7 +234,7 @@ def test_conversations_list_does_not_corrupt_recency_on_reload(client: TestClien
     # loads after the rows already exist.
     client.get("/admin/conversations")
 
-    first = client.get("/admin/conversations").json()
+    first = client.get("/admin/conversations").json()["threads"]
     # NOTE (2026-08-19): since recent_conversations() excludes message-less rows (the thread-list
     # sort-order fix), this store-level comparison only meaningfully covers the messaged thread
     # (+919664290413) -- the outbound-only thread (+918888888888) has no `messages` rows, so it is
@@ -245,7 +245,7 @@ def test_conversations_list_does_not_corrupt_recency_on_reload(client: TestClien
         s.user_id: s.last_active_at
         for s in asyncio.run(c.conversations.recent_conversations(1000))
     }
-    second = client.get("/admin/conversations").json()
+    second = client.get("/admin/conversations").json()["threads"]
     after = {
         s.user_id: s.last_active_at
         for s in asyncio.run(c.conversations.recent_conversations(1000))
@@ -278,10 +278,158 @@ def test_conversations_list_uses_max_last_active_not_first_wins(client: TestClie
     meta["order_created:gid://shopify/Order/pfresh"].created_at = fresh
     meta["order_created:gid://shopify/Order/qmid"].created_at = middle
 
-    rows = client.get("/admin/conversations").json()
+    rows = client.get("/admin/conversations").json()["threads"]
     order = [r["phone"] for r in rows if r["phone"] in (p, q)]
 
     assert order == [p, q]
+
+
+def _seed_conv_at(phone_e164: str, when: datetime) -> int:
+    async def _do() -> int:
+        c = get_container()
+        conv_id = await c.conversations.get_or_create(phone_e164)
+        await c.conversations.append_message(conv_id, "user", "hi")
+        c.conversations._last_active_at[conv_id] = when  # type: ignore[attr-defined]
+        return conv_id
+
+    return asyncio.run(_do())
+
+
+def test_conversations_list_returns_envelope_with_pagination_fields(client: TestClient) -> None:
+    login(client)
+    _send_ai_message("+919664290413", "hi", "hello there")
+
+    body = client.get("/admin/conversations").json()
+
+    assert isinstance(body, dict)
+    assert isinstance(body["threads"], list)
+    assert "next_cursor" in body
+    assert "has_more" in body
+
+
+def test_conversations_list_paginates_older_with_cursor(client: TestClient) -> None:
+    # The reported bug: only the 50 most-recent threads were reachable. Keyset paging must let a
+    # second request fetch the strictly-older threads via the first page's next_cursor.
+    login(client)
+    _seed_conv_at("+919000000001", datetime(2026, 8, 10, tzinfo=UTC))
+    _seed_conv_at("+919000000002", datetime(2026, 8, 11, tzinfo=UTC))
+    _seed_conv_at("+919000000003", datetime(2026, 8, 12, tzinfo=UTC))
+
+    page1 = client.get("/admin/conversations", params={"limit": 2}).json()
+    phones1 = {t["phone"] for t in page1["threads"]}
+
+    assert phones1 == {"+919000000003", "+919000000002"}
+    assert page1["has_more"] is True
+    assert page1["next_cursor"]
+
+    page2 = client.get(
+        "/admin/conversations",
+        params={"limit": 2, "before_last_active_at": page1["next_cursor"]},
+    ).json()
+    phones2 = {t["phone"] for t in page2["threads"]}
+
+    assert "+919000000001" in phones2
+    assert "+919000000003" not in phones2
+    assert page2["has_more"] is False
+
+
+def test_conversations_list_pagination_surfaces_crowded_out_older_thread(
+    client: TestClient,
+) -> None:
+    # Regression for the code-review "Major" finding: with a single union-boundary cursor, a phone
+    # whose stamp straddles the cursor across sources can re-occupy a page slot and crowd out a
+    # genuinely-unseen OLDER phone, producing a page that adds ZERO net-new threads while has_more
+    # is still true. A client that stopped on the first zero-net-new page would PERMANENTLY hide the
+    # crowded-out thread. Paging while has_more (the fixed client's auto-continue) must surface it.
+    #
+    # A and B: fresh outbound (page 1) + a lower conversation stamp that re-crowds page 2.
+    # C: a conversation-only thread, older than A/B's outbound but NEWER than their conversation
+    # stamps, so A/B's re-fetched conversation rows crowd it off page 2 under limit=2.
+    login(client)
+    c = get_container()
+    _seed_conv_at("+919000000011", datetime(2026, 8, 20, 6, 5, tzinfo=UTC))  # A conv
+    _seed_conv_at("+919000000012", datetime(2026, 8, 20, 6, 4, tzinfo=UTC))  # B conv
+    _seed_conv_at("+919000000013", datetime(2026, 8, 20, 5, 0, tzinfo=UTC))  # C conv (the victim)
+    _seed_outbound_at("+919000000011", "gid://shopify/Order/A", "{}")
+    _seed_outbound_at("+919000000012", "gid://shopify/Order/B", "{}")
+    meta = c.ingest._outbound_meta  # type: ignore[attr-defined]
+    a_out = datetime(2026, 8, 20, 10, 0, tzinfo=UTC)
+    b_out = datetime(2026, 8, 20, 9, 59, tzinfo=UTC)
+    meta["order_created:gid://shopify/Order/A"].created_at = a_out
+    meta["order_created:gid://shopify/Order/B"].created_at = b_out
+
+    # Simulate the client's "Load older" loop: keep paging while the server reports has_more.
+    seen: set[str] = set()
+    cursor: str | None = None
+    saw_zero_new_page_with_more = False
+    for _ in range(20):
+        params: dict[str, object] = {"limit": 2}
+        if cursor is not None:
+            params["before_last_active_at"] = cursor
+        body = client.get("/admin/conversations", params=params).json()
+        before = len(seen)
+        seen.update(t["phone"] for t in body["threads"])
+        if not body["has_more"]:
+            break
+        if len(seen) == before:
+            saw_zero_new_page_with_more = True  # the crowding precondition actually occurred
+        cursor = body["next_cursor"]
+        if cursor is None:
+            break
+
+    # The crowded-out older thread is reachable, and only because we kept paging on has_more (a
+    # stop-on-zero-new client would have quit at the page that surfaced nothing new).
+    assert "+919000000013" in seen
+    assert saw_zero_new_page_with_more
+
+
+def test_conversations_list_adversarial_cursor_does_not_500(client: TestClient) -> None:
+    # Security regression: a NAIVE (no-offset) cursor used to raise TypeError (naive-vs-aware
+    # datetime compare) in the in-memory list-source queries -> 500 on the live path whenever
+    # DATABASE_URL is unset. A malformed/extreme cursor must degrade to page 1, never crash.
+    login(client)
+    _send_ai_message("+919664290413", "hi", "hello there")
+
+    for cursor in ("2026-01-01T00:00:00", "not-a-timestamp", "9999-12-31T23:59:59-23:59"):
+        resp = client.get("/admin/conversations", params={"before_last_active_at": cursor})
+        assert resp.status_code == 200, cursor
+        assert isinstance(resp.json()["threads"], list)
+
+
+def test_conversations_list_search_finds_old_thread_by_order_name(client: TestClient) -> None:
+    # Search must run server-side over the FULL order mirror, not just the loaded page -- so a
+    # customer whose only footprint is a mirrored order (no chat / no button tap) is still findable.
+    login(client)
+    order = order_from_webhook_payload({
+        "admin_graphql_api_id": "gid://shopify/Order/searchme",
+        "name": "tavas4156",
+        "phone": "+919384880222",
+        "updated_at": "2026-08-15T10:00:00+05:30",
+        "customer": {
+            "admin_graphql_api_id": "gid://shopify/Customer/searchme",
+            "first_name": "Amita", "last_name": "Chadha",
+        },
+    })
+    assert order is not None
+    asyncio.run(get_container().ingest.upsert_order_mirror(order))
+
+    by_order = client.get("/admin/conversations", params={"q": "4156"}).json()
+    assert "+919384880222" in {t["phone"] for t in by_order["threads"]}
+
+    by_name = client.get("/admin/conversations", params={"q": "amita"}).json()
+    assert "+919384880222" in {t["phone"] for t in by_name["threads"]}
+
+
+def test_conversations_list_search_by_phone_substring(client: TestClient) -> None:
+    login(client)
+    _send_ai_message("+919664290413", "hi", "hello there")
+    _send_ai_message("+917000000000", "hi", "hello there")
+
+    body = client.get("/admin/conversations", params={"q": "6642"}).json()
+    phones = {t["phone"] for t in body["threads"]}
+
+    assert "+919664290413" in phones
+    assert "+917000000000" not in phones
 
 
 def test_conversation_thread_merges_all_three_sources(client: TestClient) -> None:
@@ -915,7 +1063,7 @@ def test_conversations_list_includes_customer_name_and_order_names(
     asyncio.run(get_container().ingest.upsert_order_mirror(newer))
     _send_ai_message(normalized, "hi", "hello")  # so this phone is listed at all
 
-    rows = client.get("/admin/conversations").json()
+    rows = client.get("/admin/conversations").json()["threads"]
 
     row = next(r for r in rows if r["phone"] == normalized)
     assert row["customer_name"] == "Priya Shah"
@@ -928,7 +1076,7 @@ def test_conversations_list_no_orders_has_null_name_empty_order_names(
     login(client)
     _send_ai_message("+919876500011", "hi", "hello")
 
-    rows = client.get("/admin/conversations").json()
+    rows = client.get("/admin/conversations").json()["threads"]
 
     row = next(r for r in rows if r["phone"] == "+919876500011")
     assert row["customer_name"] is None
@@ -949,7 +1097,7 @@ def test_conversations_list_order_with_no_customer_name_parts(client: TestClient
     asyncio.run(get_container().ingest.upsert_order_mirror(order))
     _send_ai_message(normalized, "hi", "hello")
 
-    rows = client.get("/admin/conversations").json()
+    rows = client.get("/admin/conversations").json()["threads"]
 
     row = next(r for r in rows if r["phone"] == normalized)
     assert row["customer_name"] is None

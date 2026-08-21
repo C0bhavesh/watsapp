@@ -19,16 +19,20 @@ from app.store.base import (
     OutboundView,
     StoredMessage,
 )
-from app.store.postgres import MAX_MIRROR_FULFILLMENTS, _e164
+from app.store.postgres import MAX_MIRROR_FULFILLMENTS, _e164, _search_name_patterns
 
 
 def _parse_iso(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value)
+        dt = datetime.fromisoformat(value)
     except ValueError:
         return None
+    # Every stored stamp is tz-aware UTC; a NAIVE parse (e.g. an adversarial cursor like
+    # "2026-01-01T00:00:00" with no offset) would raise TypeError on the `< cursor` comparisons in
+    # the list-source queries. Normalize naive -> UTC so the comparison is always aware-vs-aware.
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
 
 
 def _fulfillment_update_wins(existing: Fulfillment, incoming: Fulfillment) -> bool:
@@ -382,35 +386,98 @@ class InMemoryIngestStore:
             for row in matches[-limit:]
         ]
 
-    async def distinct_outbound_phones(self, limit: int = 100) -> list[tuple[str, str | None]]:
+    async def distinct_outbound_phones(
+        self, limit: int = 100, *, before: str | None = None, phone_like: str | None = None
+    ) -> list[tuple[str, str | None]]:
         # Recency-ordered (MAX(created_at) DESC) to mirror the Postgres impl: the LIMIT must keep
         # the most-recently-active phones, not an insertion/lexicographic-first slice. Insertion
         # order alone is not enough -- a test (or a real re-enqueue) can produce phones whose newest
         # outbound is not their first, so group by phone taking the latest created_at, then sort.
+        # `before` (keyset cursor) drops phones whose latest stamp is not strictly older;
+        # `phone_like` is a case-insensitive substring filter for server-side thread search.
+        cursor = _parse_iso(before)
+        needle = phone_like.lower() if phone_like else None
         latest: dict[str, datetime] = {}
         for key, draft in self.outbound.items():
+            if needle is not None and needle not in draft.phone_e164.lower():
+                continue
             created = self._outbound_meta[key].created_at
             if draft.phone_e164 not in latest or created > latest[draft.phone_e164]:
                 latest[draft.phone_e164] = created
-        ordered = sorted(latest.items(), key=lambda kv: kv[1], reverse=True)
+        ordered = sorted(
+            (kv for kv in latest.items() if cursor is None or kv[1] < cursor),
+            key=lambda kv: kv[1], reverse=True,
+        )
         return [(phone, ts.isoformat()) for phone, ts in ordered[:limit]]
 
     async def distinct_order_action_wa_ids(
-        self, limit: int = 100
+        self, limit: int = 100, *, before: str | None = None, phone_like: str | None = None
     ) -> list[tuple[str, str | None]]:
         # Same recency ordering as the Postgres impl (MAX(created_at) DESC). order_actions rows
         # carry an ISO created_at string; compare as datetimes (a zero-microsecond stamp serializes
         # shorter, so a naive string compare could misorder). None wa_id / bad stamp is skipped.
+        # `before`/`phone_like` mirror distinct_outbound_phones (keyset cursor + search substring).
+        cursor = _parse_iso(before)
+        needle = phone_like.lower() if phone_like else None
         latest: dict[str, datetime] = {}
         for row in self.order_actions:
             wa_id = row.get("actor_wa_id")
             created = _parse_iso(row.get("created_at"))
             if not isinstance(wa_id, str) or created is None:
                 continue
+            if needle is not None and needle not in wa_id.lower():
+                continue
             if wa_id not in latest or created > latest[wa_id]:
                 latest[wa_id] = created
-        ordered = sorted(latest.items(), key=lambda kv: kv[1], reverse=True)
+        ordered = sorted(
+            (kv for kv in latest.items() if cursor is None or kv[1] < cursor),
+            key=lambda kv: kv[1], reverse=True,
+        )
         return [(wa_id, ts.isoformat()) for wa_id, ts in ordered[:limit]]
+
+    async def search_order_phones(
+        self, q: str, limit: int = 100, *, before: str | None = None
+    ) -> list[tuple[str, str | None]]:
+        # Server-side thread search over the order mirror (see
+        # base.IngestStore.search_order_phones): match order name (raw or `tavas<digits>`
+        # normalized) OR customer name, case-insensitive.
+        cursor = _parse_iso(before)
+        patterns = _search_name_patterns(q)
+        latest: dict[str, datetime | None] = {}
+
+        def _consider(phone: str | None, when: datetime | None) -> None:
+            if not phone:
+                return
+            if cursor is not None and (when is None or when >= cursor):
+                return
+            if phone not in latest:
+                latest[phone] = when
+                return
+            existing = latest[phone]
+            if when is not None and (existing is None or when > existing):
+                latest[phone] = when
+
+        for order in self.orders.values():
+            haystacks = [order.name.lower()]
+            if order.customer is not None:
+                first = (order.customer.first_name or "").lower()
+                last = (order.customer.last_name or "").lower()
+                haystacks += [first, last, f"{first} {last}".strip()]
+            if not any(p in h for p in patterns for h in haystacks):
+                continue
+            when = _parse_iso(order.updated_at)
+            _consider(order.phone, when)
+            _consider(order.shipping_phone, when)
+
+        ordered = sorted(
+            latest.items(),
+            key=lambda kv: (kv[1] is not None, kv[1] or datetime.min.replace(tzinfo=UTC)),
+            reverse=True,
+        )
+        return [
+            (phone, when.isoformat() if when is not None else None)
+            for phone, when in ordered[:limit]
+        ]
 
     async def find_stale_template_sent(
         self, older_than_minutes: int, max_age_minutes: int
@@ -904,14 +971,26 @@ class InMemoryConversationStore:
             return []
         return [_message_view(r) for r in self._messages.get(conversation_id, [])[-limit:]]
 
-    async def recent_conversations(self, limit: int = 50) -> list[ConversationSummary]:
+    async def recent_conversations(
+        self, limit: int = 50, *, before: str | None = None, phone_like: str | None = None
+    ) -> list[ConversationSummary]:
         # A conversation row with zero messages must never surface here -- a brand-new row created
         # by get_or_create's display-only lookup (e.g. a customer who only ever received an
         # outbound template, never sent one) picks up a creation-time stamp, not real activity.
+        cursor = _parse_iso(before)
+        needle = phone_like.lower() if phone_like else None
         with_messages = [
             (user_id, conv_id)
             for user_id, conv_id in self._conversations.items()
             if self._messages.get(conv_id)
+            and (needle is None or needle in user_id.lower())
+            and (
+                cursor is None
+                or (
+                    (active := self._last_active_at.get(conv_id)) is not None
+                    and active < cursor
+                )
+            )
         ]
         ordered = sorted(
             with_messages,

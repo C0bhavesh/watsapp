@@ -2,8 +2,10 @@
 
 from datetime import UTC, datetime, timedelta
 
+from app.channels.shopify_orders import order_from_webhook_payload
 from app.store.base import MappingUpsert, OutboundDraft
-from app.store.memory import InMemoryConversationStore, InMemoryIngestStore
+from app.store.memory import InMemoryConversationStore, InMemoryIngestStore, _parse_iso
+from app.store.postgres import _parse_cursor
 
 # --- ConversationStore.find_messages_by_user_id ---
 
@@ -400,6 +402,190 @@ async def test_distinct_order_action_wa_ids_ordered_by_recency_not_alphabetical(
     assert [wa for wa, _ in result] == ["915555555555", "919664290413", "911111111111"]
     top2 = await store.distinct_order_action_wa_ids(limit=2)
     assert [wa for wa, _ in top2] == ["915555555555", "919664290413"]
+
+
+# --- Adversarial cursor parsing (security: must never raise / never skew the boundary) ---
+
+
+def test_parse_iso_normalizes_naive_to_utc() -> None:
+    # A naive cursor must come back tz-aware (UTC) so the `< cursor` comparisons against tz-aware
+    # stored stamps never raise TypeError (the reported 500 on the in-memory list path).
+    dt = _parse_iso("2026-01-01T00:00:00")
+    assert dt is not None and dt.tzinfo is not None and dt.utcoffset() == timedelta(0)
+
+
+def test_parse_iso_bad_value_returns_none() -> None:
+    assert _parse_iso("not-a-timestamp") is None
+    assert _parse_iso(None) is None
+    assert _parse_iso("") is None
+
+
+def test_parse_cursor_normalizes_naive_to_utc() -> None:
+    dt = _parse_cursor("2026-01-01T00:00:00")
+    assert dt is not None and dt.tzinfo is not None and dt.utcoffset() == timedelta(0)
+
+
+def test_parse_cursor_extreme_offset_returns_none_not_overflow() -> None:
+    # Parses fine, but converting to UTC crosses into year 10000 -> OverflowError; must be caught
+    # and degrade to no-bound (None), not 500 at asyncpg encode time on the Postgres path.
+    assert _parse_cursor("9999-12-31T23:59:59-23:59") is None
+
+
+def test_parse_cursor_bad_value_returns_none() -> None:
+    assert _parse_cursor("not-a-timestamp") is None
+    assert _parse_cursor(None) is None
+    assert _parse_cursor("") is None
+
+
+# --- Keyset pagination (`before`) + server-side search (`phone_like`) on the list sources ---
+
+
+async def test_recent_conversations_before_cursor_excludes_newer_and_equal() -> None:
+    # Keyset paging: `before` (an ISO stamp) returns only conversations STRICTLY older than it, so
+    # a second page fetched with the previous page's oldest stamp never re-includes that boundary.
+    store = InMemoryConversationStore()
+    older = await store.get_or_create("919000000001")
+    newer = await store.get_or_create("919000000002")
+    await store.append_message(older, "user", "hi")
+    await store.append_message(newer, "user", "hi")
+    store._last_active_at[older] = datetime(2026, 8, 10, tzinfo=UTC)  # type: ignore[attr-defined]
+    store._last_active_at[newer] = datetime(2026, 8, 20, tzinfo=UTC)  # type: ignore[attr-defined]
+
+    page = await store.recent_conversations(limit=10, before="2026-08-20T00:00:00+00:00")
+
+    assert [s.user_id for s in page] == ["919000000001"]
+
+
+async def test_recent_conversations_phone_like_filters_by_substring() -> None:
+    store = InMemoryConversationStore()
+    a = await store.get_or_create("+919664290413")
+    b = await store.get_or_create("+917000000000")
+    await store.append_message(a, "user", "hi")
+    await store.append_message(b, "user", "hi")
+
+    page = await store.recent_conversations(limit=10, phone_like="6642")
+
+    assert [s.user_id for s in page] == ["+919664290413"]
+
+
+async def test_distinct_outbound_phones_before_cursor_excludes_newer() -> None:
+    store = InMemoryIngestStore()
+    await _seed_outbound(store, "gid://shopify/Order/old", "+911111111111")
+    await _seed_outbound(store, "gid://shopify/Order/new", "+915555555555")
+    store._outbound_meta["order_created:gid://shopify/Order/old"].created_at = datetime(  # type: ignore[attr-defined]
+        2026, 8, 10, tzinfo=UTC
+    )
+    store._outbound_meta["order_created:gid://shopify/Order/new"].created_at = datetime(  # type: ignore[attr-defined]
+        2026, 8, 20, tzinfo=UTC
+    )
+
+    page = await store.distinct_outbound_phones(limit=10, before="2026-08-20T00:00:00+00:00")
+
+    assert [phone for phone, _ in page] == ["+911111111111"]
+
+
+async def test_distinct_outbound_phones_phone_like_filters() -> None:
+    store = InMemoryIngestStore()
+    await _seed_outbound(store, "gid://shopify/Order/1", "+919664290413")
+    await _seed_outbound(store, "gid://shopify/Order/2", "+917000000000")
+
+    page = await store.distinct_outbound_phones(limit=10, phone_like="6642")
+
+    assert [phone for phone, _ in page] == ["+919664290413"]
+
+
+async def test_distinct_order_action_wa_ids_before_and_phone_like() -> None:
+    store = InMemoryIngestStore()
+    await store.record_order_action("gid://o/1", "confirm", "919664290413", "m1", "ok", None)
+    await store.record_order_action("gid://o/2", "confirm", "917000000000", "m2", "ok", None)
+    store.order_actions[0]["created_at"] = datetime(2026, 8, 10, tzinfo=UTC).isoformat()
+    store.order_actions[1]["created_at"] = datetime(2026, 8, 20, tzinfo=UTC).isoformat()
+
+    by_before = await store.distinct_order_action_wa_ids(
+        limit=10, before="2026-08-20T00:00:00+00:00"
+    )
+    assert [wa for wa, _ in by_before] == ["919664290413"]
+
+    by_phone = await store.distinct_order_action_wa_ids(limit=10, phone_like="7000")
+    assert [wa for wa, _ in by_phone] == ["917000000000"]
+
+
+# --- IngestStore.search_order_phones (server-side thread search over the order mirror) ---
+
+
+async def _mirror_order(
+    store: InMemoryIngestStore, gid: str, name: str, phone: str, first: str, last: str,
+    updated_at: str,
+) -> None:
+    order = order_from_webhook_payload({
+        "admin_graphql_api_id": gid,
+        "name": name,
+        "phone": phone,
+        "updated_at": updated_at,
+        "customer": {
+            "admin_graphql_api_id": gid.replace("Order", "Customer"),
+            "first_name": first, "last_name": last,
+        },
+    })
+    assert order is not None
+    await store.upsert_order_mirror(order)
+
+
+async def test_search_order_phones_matches_order_name() -> None:
+    store = InMemoryIngestStore()
+    await _mirror_order(
+        store, "gid://shopify/Order/1", "tavas4156", "+919384880222", "Amita", "Chadha",
+        "2026-08-15T10:00:00+05:30",
+    )
+    await _mirror_order(
+        store, "gid://shopify/Order/2", "tavas9999", "+917000000000", "Other", "Person",
+        "2026-08-16T10:00:00+05:30",
+    )
+
+    hits = await store.search_order_phones("tavas4156", limit=10)
+
+    assert [phone for phone, _ in hits] == ["+919384880222"]
+
+
+async def test_search_order_phones_matches_bare_order_number() -> None:
+    # "4156" (or "#4156") must find order "tavas4156" -- mirrors chats.js normalizeOrderQuery.
+    store = InMemoryIngestStore()
+    await _mirror_order(
+        store, "gid://shopify/Order/1", "tavas4156", "+919384880222", "Amita", "Chadha",
+        "2026-08-15T10:00:00+05:30",
+    )
+
+    hits = await store.search_order_phones("4156", limit=10)
+
+    assert [phone for phone, _ in hits] == ["+919384880222"]
+
+
+async def test_search_order_phones_matches_customer_name_case_insensitive() -> None:
+    store = InMemoryIngestStore()
+    await _mirror_order(
+        store, "gid://shopify/Order/1", "tavas4156", "+919384880222", "Amita", "Chadha",
+        "2026-08-15T10:00:00+05:30",
+    )
+
+    hits = await store.search_order_phones("amita", limit=10)
+
+    assert [phone for phone, _ in hits] == ["+919384880222"]
+
+
+async def test_search_order_phones_before_cursor_excludes_newer() -> None:
+    store = InMemoryIngestStore()
+    await _mirror_order(
+        store, "gid://shopify/Order/old", "tavas1000", "+911111111111", "Kira", "One",
+        "2026-08-10T10:00:00+00:00",
+    )
+    await _mirror_order(
+        store, "gid://shopify/Order/new", "tavas2000", "+915555555555", "Kira", "Two",
+        "2026-08-20T10:00:00+00:00",
+    )
+
+    hits = await store.search_order_phones("kira", limit=10, before="2026-08-20T00:00:00+00:00")
+
+    assert [phone for phone, _ in hits] == ["+911111111111"]
 
 
 # --- ConversationStore.get_user_id ---

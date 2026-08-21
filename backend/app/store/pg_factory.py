@@ -6,6 +6,12 @@ from urllib.parse import urlsplit
 
 import asyncpg
 
+# Explicit per-statement timeout on the shared pool (project rule: every external call is bounded).
+# This pool is shared with the Meta/Shopify webhook edge, which must ack well under 5s, so a single
+# hung/pathological query (e.g. a runaway admin-list page) can never pin a connection indefinitely
+# and starve the live reply/webhook path. Generous enough for legitimate mirror/backfill reads.
+_COMMAND_TIMEOUT_SECONDS = 10.0
+
 
 class LazyPool:
     """Pool created on first acquire — never at import time (serverless cold-start rule)."""
@@ -27,7 +33,8 @@ class LazyPool:
                         # (6543) breaks asyncpg prepared statements; harmless on direct
                         # connections.
                         self._pool = await asyncpg.create_pool(
-                            self._dsn, min_size=0, max_size=5, statement_cache_size=0
+                            self._dsn, min_size=0, max_size=5, statement_cache_size=0,
+                            command_timeout=_COMMAND_TIMEOUT_SECONDS,
                         )
         return self._pool
 
@@ -45,7 +52,8 @@ class LazyPool:
             )[0][4][0]
         except OSError:
             return await asyncpg.create_pool(
-                self._dsn, min_size=0, max_size=5, statement_cache_size=0
+                self._dsn, min_size=0, max_size=5, statement_cache_size=0,
+                command_timeout=_COMMAND_TIMEOUT_SECONDS,
             )
         return await asyncpg.create_pool(
             self._dsn,
@@ -54,6 +62,7 @@ class LazyPool:
             min_size=0,
             max_size=5,
             statement_cache_size=0,
+            command_timeout=_COMMAND_TIMEOUT_SECONDS,
         )
 
     @asynccontextmanager

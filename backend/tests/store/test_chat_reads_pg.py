@@ -6,6 +6,7 @@ import uuid
 
 import pytest
 
+from app.channels.shopify_orders import order_from_webhook_payload
 from app.store.base import MappingUpsert, OutboundDraft
 from app.store.pg_factory import LazyPool
 from app.store.postgres import PostgresConversationStore, PostgresIngestStore
@@ -437,3 +438,77 @@ async def test_find_outbound_by_phone_pg(pool: LazyPool) -> None:
 
     assert len(rows) == 1
     assert rows[0].payload_json == '{"template": "cod_confirmation"}'
+
+
+# --- Keyset pagination (`before`) + server-side search (`phone_like` / search_order_phones) ---
+
+
+async def test_distinct_outbound_phones_before_and_phone_like_pg(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    marker = uuid.uuid4().int % 10**6
+    old = f"+9188{marker:06d}00"
+    new = f"+9188{marker:06d}99"
+    for phone in (old, new):
+        gid = f"gid://shopify/Order/{uuid.uuid4()}"
+        mapping = MappingUpsert(
+            order_gid=gid, order_name="tavaspg", order_number_int=1,
+            phone_e164=phone, customer_name="A", email=None, language="en",
+            financial_status_at_create="PENDING", is_cod=True,
+        )
+        draft = OutboundDraft(
+            dedupe_key=f"order_created:{gid}", kind="order_confirmation",
+            phone_e164=phone, payload_json="{}",
+        )
+        await store.ingest_order_created(f"wh-{uuid.uuid4()}", "orders/create", mapping, draft)
+
+    # phone_like narrows to just this pair's shared substring.
+    hits = await store.distinct_outbound_phones(limit=100, phone_like=f"88{marker:06d}")
+    assert {p for p, _ in hits} == {old, new}
+
+    # before = the newer row's stamp -> only the strictly-older row returns.
+    all_pairs = {p: ts for p, ts in hits}
+    newest = max(all_pairs.values())  # type: ignore[type-var]
+    older_page = await store.distinct_outbound_phones(
+        limit=100, before=newest, phone_like=f"88{marker:06d}"
+    )
+    returned = {p for p, _ in older_page}
+    assert newest not in [all_pairs[p] for p in returned]
+
+
+async def test_recent_conversations_phone_like_pg(pool: LazyPool) -> None:
+    store = PostgresConversationStore(pool)
+    marker = uuid.uuid4().hex[:8]
+    user_id = f"+9199{marker}"
+    conv_id = await store.get_or_create(user_id)
+    await store.append_message(conv_id, "user", "hi")
+
+    hits = await store.recent_conversations(limit=100, phone_like=marker)
+
+    assert user_id in [s.user_id for s in hits]
+
+
+async def test_search_order_phones_matches_name_pg(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    gid = f"gid://shopify/Order/{uuid.uuid4()}"
+    order_name = f"tavas{uuid.uuid4().int % 10**7}"
+    phone = f"+91{uuid.uuid4().int % 10**10:010d}"
+    order = order_from_webhook_payload({
+        "admin_graphql_api_id": gid,
+        "name": order_name,
+        "phone": phone,
+        "updated_at": "2026-08-15T10:00:00+05:30",
+        "customer": {
+            "admin_graphql_api_id": gid.replace("Order", "Customer"),
+            "first_name": "Amita", "last_name": "Chadha",
+        },
+    })
+    assert order is not None
+    if order.customer is not None:
+        await store.upsert_customer(order.customer)
+    await store.upsert_order_mirror(order)
+
+    by_name = await store.search_order_phones(order_name, limit=10)
+    assert phone in [p for p, _ in by_name]
+
+    by_customer = await store.search_order_phones("amita", limit=100)
+    assert phone in [p for p, _ in by_customer]

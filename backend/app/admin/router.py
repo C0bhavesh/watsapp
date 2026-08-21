@@ -717,19 +717,40 @@ def _button_tap_text(action: str, result: str) -> str:
 
 
 @admin_router.get("/conversations", dependencies=[Depends(require_admin)])
+# Higher ceiling than the sibling mutation routes (30/min): this is the polled thread list --
+# pollTick hits it every 3s (~20/min per open tab) and "Load older" can fan a few pages per click --
+# so 120/min gives normal multi-tab polling + interactive paging comfortable headroom while still
+# capping a runaway loop or an abusive client on this per-request-N+1 endpoint.
+@limiter.limit("120/minute")
 async def list_conversations(
+    request: Request,
     # Max lowered 500 -> 100 (each displayed thread costs one find_messages preview query, so a
     # high limit is a per-request N+1 amplifier on the shared pool; admin-only, so a cap suffices).
     limit: int = Query(default=50, ge=1, le=100),
-) -> list[dict[str, object]]:
+    # Keyset paging cursor: the previous page's `next_cursor` (an ISO-8601 last-active stamp). The
+    # source queries return only threads STRICTLY older than it, so the whole history is reachable
+    # page by page (the reported bug was that only the newest `limit` threads ever loaded). An
+    # OFFSET scan is deliberately avoided -- it re-reads every prior row on the shared pool.
+    before_last_active_at: str | None = Query(default=None, max_length=64),
+    # Server-side thread search: matches phone substring across all three activity sources AND the
+    # order mirror (order name / customer name). Client-side filtering could only ever search the
+    # loaded page, so an older chat was unfindable -- this pushes the match into the DB queries.
+    # max_length mirrors the sibling free-text inputs' defensive caps (admin-gated, so not
+    # exploitable -- just consistent); an ISO stamp cursor is ~32 chars, so 64 is ample.
+    q: str | None = Query(default=None, max_length=128),
+) -> dict[str, object]:
     c = get_container()
+    term = (q or "").strip() or None
+    # phone_like narrows the three activity sources during search; the order mirror is searched
+    # separately via search_order_phones (which also covers order name / customer name).
+    phone_like = term
 
-    # Union distinct phones across all THREE sources so a customer who only ever received an order
-    # confirmation (no conversation row) still appears. Normalize every candidate to E.164 before
-    # deduping so one customer is never listed twice under two formats. get_or_create below is a
-    # display-only lookup: its ON CONFLICT branch is a self-assignment (no bump on an existing
-    # row), and recent_conversations() excludes any message-less row entirely -- so a brand-new
-    # row's creation-time DEFAULT now() stamp can never leak into this union as fake recency.
+    # Union distinct phones across all THREE activity sources (plus the order mirror when searching)
+    # so a customer who only ever received an order confirmation (no conversation row) still
+    # appears. Normalize every candidate to E.164 before deduping so one customer is never listed
+    # twice under two formats. get_or_create below is a display-only lookup: its ON CONFLICT branch
+    # is a self-assignment (no bump on an existing row), and recent_conversations() excludes any
+    # message-less row -- so a brand-new row's DEFAULT now() stamp can never leak in as recency.
     last_active_by_phone: dict[str, str | None] = {}
     ordered_phones: list[str] = []
     seen: set[str] = set()
@@ -741,7 +762,7 @@ async def list_conversations(
         if norm not in seen:
             seen.add(norm)
             ordered_phones.append(norm)
-        # Take the MAXIMUM stamp across all three sources for a phone, not first-non-None-wins:
+        # Take the MAXIMUM stamp across all sources for a phone, not first-non-None-wins:
         # a stale conversations.last_active_at must never mask a genuinely more-recent
         # outbound_messages/order_actions timestamp for the same phone. ISO-8601 strings compare
         # lexicographically in timestamp order (same convention the sorts below rely on).
@@ -750,26 +771,52 @@ async def list_conversations(
             if existing is None or last_active > existing:
                 last_active_by_phone[norm] = last_active
 
-    summaries: list[ConversationSummary] = await c.conversations.recent_conversations(limit)
+    summaries: list[ConversationSummary] = await c.conversations.recent_conversations(
+        limit, before=before_last_active_at, phone_like=phone_like
+    )
     for s in summaries:
         _add(s.user_id, s.last_active_at)
     # Each source returns (identifier, latest_iso) ordered by recency, so an outbound-only or
     # tap-only customer carries its REAL last-active stamp into the union sort below (not None) --
     # and each source's own LIMIT already keeps its most-recent, not a lexicographic-first, slice.
-    for phone, last_active in await c.ingest.distinct_outbound_phones(limit):
+    outbound = await c.ingest.distinct_outbound_phones(
+        limit, before=before_last_active_at, phone_like=phone_like
+    )
+    for phone, last_active in outbound:
         _add(phone, last_active)
-    for wa, last_active in await c.ingest.distinct_order_action_wa_ids(limit):
+    taps = await c.ingest.distinct_order_action_wa_ids(
+        limit, before=before_last_active_at, phone_like=phone_like
+    )
+    for wa, last_active in taps:
         _add(wa, last_active)
+    mirror_hits: list[tuple[str, str | None]] = []
+    if term is not None:
+        mirror_hits = await c.ingest.search_order_phones(
+            term, limit, before=before_last_active_at
+        )
+        for phone, last_active in mirror_hits:
+            _add(phone, last_active)
 
-    # Truncate to `limit` BEFORE the per-thread queries so the union (up to 3*limit candidates)
+    # Truncate to `limit` BEFORE the per-thread queries so the union (up to 4*limit candidates)
     # cannot amplify the preview/get_or_create work beyond `limit` rows. Order by the captured
     # (MAX-across-sources) last_active so the most-recently-active threads are the ones we
     # materialize; every source supplies a real recency stamp, so no source sorts artificially last.
     ordered_phones.sort(key=lambda p: str(last_active_by_phone.get(p) or ""), reverse=True)
-    ordered_phones = ordered_phones[:limit]
+    # There is more history to page through if the union already overflowed one page, OR if any
+    # source filled its own LIMIT (more rows may sit just below it). The cursor for the next page
+    # is the boundary phone's MAX-across-sources stamp, so the next request fetches strictly older.
+    any_source_full = (
+        len(summaries) >= limit
+        or len(outbound) >= limit
+        or len(taps) >= limit
+        or len(mirror_hits) >= limit
+    )
+    has_more = len(ordered_phones) > limit or any_source_full
+    page_phones = ordered_phones[:limit]
+    next_cursor = last_active_by_phone.get(page_phones[-1]) if (page_phones and has_more) else None
 
     result: list[dict[str, object]] = []
-    for norm in ordered_phones:
+    for norm in page_phones:
         # Materialize a stable conversation.id for the thread (idempotent -- repeated list views
         # fetch the existing id, they do not create duplicates). This is the one place a create-on-
         # miss is intended: the next sub-project (manual send) needs every thread to have an id.
@@ -802,7 +849,11 @@ async def list_conversations(
         )
 
     result.sort(key=lambda r: str(r["last_active_at"] or ""), reverse=True)
-    return result
+    # Envelope (not a bare list) so the admin UI can page: `next_cursor` feeds the next request's
+    # before_last_active_at, `has_more` gates the "Load older chats" control. The cursor is the
+    # boundary phone's MAX-across-sources stamp, so a source-straddling phone may reappear on the
+    # next page with an older stamp -- the frontend dedupes by phone, so that is harmless.
+    return {"threads": result, "next_cursor": next_cursor, "has_more": has_more}
 
 
 def _order_summary(

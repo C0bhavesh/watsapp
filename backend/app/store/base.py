@@ -270,12 +270,25 @@ class IngestStore(Protocol):
     # (identifier, latest_iso) ordered by MAX(created_at) DESC -- so the LIMIT keeps the most
     # RECENTLY-active customers (not a lexicographic slice) and the router can sort the union on the
     # real last-active stamp instead of treating these two sources as always-oldest.
+    # `before` (an ISO-8601 stamp) is the keyset paging cursor: return only rows STRICTLY older than
+    # it, so the admin thread list can fetch older pages without an OFFSET scan. `phone_like` is a
+    # case-insensitive substring filter for server-side thread search by phone. Both default to None
+    # (unbounded / unfiltered) so existing callers are unaffected.
     async def distinct_outbound_phones(
-        self, limit: int = 100
+        self, limit: int = 100, *, before: str | None = None, phone_like: str | None = None
     ) -> list[tuple[str, str | None]]: ...
 
     async def distinct_order_action_wa_ids(
-        self, limit: int = 100
+        self, limit: int = 100, *, before: str | None = None, phone_like: str | None = None
+    ) -> list[tuple[str, str | None]]: ...
+
+    # Server-side thread search over the order mirror: distinct (phone, latest_iso) for every order
+    # whose order name (raw or the `tavas<digits>` normalized form) OR customer name matches `q`
+    # (case-insensitive substring). Both the buyer's `o.phone` and `o.shipping_phone` are returned
+    # (the same disclosure predicate find_mirrored_orders_by_phone uses). `before` pages the results
+    # by MAX(order.updated_at) DESC, mirroring the recency ordering of the other list sources.
+    async def search_order_phones(
+        self, q: str, limit: int = 100, *, before: str | None = None
     ) -> list[tuple[str, str | None]]: ...
 
     # Atomically CLAIMS the returned orders: each is flipped out of 'cancel_requested' to a
@@ -352,7 +365,12 @@ class ConversationStore(Protocol):
         self, user_id: str, limit: int = 100
     ) -> list[StoredMessage]: ...
 
-    async def recent_conversations(self, limit: int = 50) -> list[ConversationSummary]: ...
+    # `before`/`phone_like` mirror the IngestStore list sources: `before` is the ISO keyset cursor
+    # (rows strictly older than it), `phone_like` a case-insensitive user_id substring filter for
+    # server-side search. Both default to None so existing callers are unaffected.
+    async def recent_conversations(
+        self, limit: int = 50, *, before: str | None = None, phone_like: str | None = None
+    ) -> list[ConversationSummary]: ...
 
     async def recent_messages(self, conversation_id: int, limit: int) -> list[StoredMessage]: ...
 

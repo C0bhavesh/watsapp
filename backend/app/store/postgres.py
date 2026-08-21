@@ -1,7 +1,7 @@
 import logging
 import re
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, datetime
 
 import asyncpg
 
@@ -39,6 +39,43 @@ def _rows_affected(tag: str) -> int:
     """Rows from an asyncpg command tag, e.g. 'INSERT 0 10' -> 10 (parse suffix, not endswith)."""
     last = tag.rsplit(" ", 1)[-1]
     return int(last) if last.isdigit() else 0
+
+
+def _parse_cursor(before: str | None) -> datetime | None:
+    """Parse an ISO-8601 keyset cursor to a tz-aware UTC datetime; an absent/unparseable/
+    out-of-range value means no bound (degrade to page 1, never crash the admin list). A NAIVE
+    cursor is pinned to UTC (not silently reinterpreted as server-local by asyncpg's astimezone,
+    which would skew the page boundary by up to +/-14h); the astimezone(UTC) below also forces
+    asyncpg's own overflow-prone conversion to happen HERE, so an extreme-offset cursor (e.g. year
+    9999 at -23:59, crossing into year 10000 on UTC conversion) is caught as OverflowError instead
+    of 500ing at query time."""
+    if not before:
+        return None
+    try:
+        dt = datetime.fromisoformat(before)
+        return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def _like_contains(term: str) -> str:
+    """A case-insensitive ILIKE '%...%' pattern with the LIKE metacharacters (\\ % _) escaped, so a
+    user-typed '%' / '_' is matched literally, not as a wildcard (used with ESCAPE '\\')."""
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def _search_name_patterns(q: str) -> list[str]:
+    """Lower-cased substrings a thread-search term should match against an order name / customer
+    name. A bare (or '#'-prefixed) digit run like '4156' also matches the store's 'tavas4156'
+    order-name format -- mirrors chats.js normalizeOrderQuery so server- and client-side agree.
+    Always includes the raw lower-cased term so name/partial matches still work."""
+    term = q.strip().lower()
+    patterns = [term]
+    stripped = term.lstrip("#")
+    if re.fullmatch(r"\d+", stripped):
+        patterns.append(f"tavas{stripped}")
+    return patterns
 
 
 # orders.order_number is an int4; nine digits is far beyond any real Tavas order number
@@ -714,17 +751,31 @@ class PostgresIngestStore:
             for r in rows
         ]
 
-    async def distinct_outbound_phones(self, limit: int = 100) -> list[tuple[str, str | None]]:
+    async def distinct_outbound_phones(
+        self, limit: int = 100, *, before: str | None = None, phone_like: str | None = None
+    ) -> list[tuple[str, str | None]]:
         # Order by RECENCY (MAX(created_at) DESC), not the phone string: the LIMIT must keep the
         # most-recently-active customers, not a lexicographic-first slice -- once a real day's
         # order volume yields more distinct outbound-only phones than `limit`, a phone-string
         # ORDER BY would truncate to the wrong (alphabetical) subset before the router ever sorts.
         # Return each phone with its latest stamp so the router sorts the union on real recency.
+        # `phone_like` (WHERE) narrows the set for server-side search; `before` (HAVING, on the
+        # per-phone MAX) is the keyset cursor so an older page fetches phones strictly older.
+        args: list[object] = [limit]
+        where = ""
+        if phone_like:
+            args.append(_like_contains(phone_like))
+            where = f" WHERE phone_e164 ILIKE ${len(args)} ESCAPE '\\'"
+        having = ""
+        cursor = _parse_cursor(before)
+        if cursor is not None:
+            args.append(cursor)
+            having = f" HAVING MAX(created_at) < ${len(args)}"
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT phone_e164, MAX(created_at) AS latest FROM outbound_messages"
-                " GROUP BY phone_e164 ORDER BY latest DESC LIMIT $1",
-                limit,
+                + where + " GROUP BY phone_e164" + having + " ORDER BY latest DESC LIMIT $1",
+                *args,
             )
         return [
             (str(r["phone_e164"]), r["latest"].isoformat() if r["latest"] else None)
@@ -732,20 +783,78 @@ class PostgresIngestStore:
         ]
 
     async def distinct_order_action_wa_ids(
-        self, limit: int = 100
+        self, limit: int = 100, *, before: str | None = None, phone_like: str | None = None
     ) -> list[tuple[str, str | None]]:
         # Same recency ordering rationale as distinct_outbound_phones (MAX(created_at) DESC): keep
         # the most-recently-active button-tappers within the LIMIT, and carry each one's latest
         # stamp back so the router's union sort has real data. The IS NOT NULL guard stays.
+        # `phone_like`/`before` mirror distinct_outbound_phones (search substring + keyset cursor).
+        args: list[object] = [limit]
+        where = " WHERE actor_wa_id IS NOT NULL"
+        if phone_like:
+            args.append(_like_contains(phone_like))
+            where += f" AND actor_wa_id ILIKE ${len(args)} ESCAPE '\\'"
+        having = ""
+        cursor = _parse_cursor(before)
+        if cursor is not None:
+            args.append(cursor)
+            having = f" HAVING MAX(created_at) < ${len(args)}"
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT actor_wa_id, MAX(created_at) AS latest FROM order_actions"
-                " WHERE actor_wa_id IS NOT NULL"
-                " GROUP BY actor_wa_id ORDER BY latest DESC LIMIT $1",
-                limit,
+                + where + " GROUP BY actor_wa_id" + having + " ORDER BY latest DESC LIMIT $1",
+                *args,
             )
         return [
             (str(r["actor_wa_id"]), r["latest"].isoformat() if r["latest"] else None)
+            for r in rows
+        ]
+
+    async def search_order_phones(
+        self, q: str, limit: int = 100, *, before: str | None = None
+    ) -> list[tuple[str, str | None]]:
+        # Server-side thread search over the order mirror (see
+        # base.IngestStore.search_order_phones). An order's name is matched against every
+        # _search_name_patterns() form (raw + tavas<digits>); the customer's first/last/full name is
+        # matched against the raw term. Both the buyer's
+        # o.phone AND o.shipping_phone are surfaced (same disclosure predicate as
+        # find_mirrored_orders_by_phone). `before` pages by the per-phone MAX(updated_at).
+        args: list[object] = [limit]
+        raw = _like_contains(q.strip())
+        name_clauses: list[str] = []
+        for pattern in _search_name_patterns(q):
+            args.append(_like_contains(pattern))
+            name_clauses.append(f"o.name ILIKE ${len(args)} ESCAPE '\\'")
+        args.append(raw)
+        raw_ph = f"${len(args)}"
+        match = (
+            "(" + " OR ".join(name_clauses)
+            + f" OR c.first_name ILIKE {raw_ph} ESCAPE '\\'"
+            + f" OR c.last_name ILIKE {raw_ph} ESCAPE '\\'"
+            + f" OR (COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')) "
+            f"ILIKE {raw_ph} ESCAPE '\\')"
+        )
+        cursor_clause = ""
+        cursor = _parse_cursor(before)
+        if cursor is not None:
+            args.append(cursor)
+            cursor_clause = f" AND o.updated_at < ${len(args)}"
+        sql = (
+            "WITH matched AS ("
+            " SELECT o.phone, o.shipping_phone, o.updated_at"
+            " FROM orders o LEFT JOIN customers c ON c.gid = o.customer_gid"
+            f" WHERE {match}{cursor_clause}"
+            "), phones AS ("
+            " SELECT phone, updated_at FROM matched WHERE phone IS NOT NULL"
+            " UNION ALL"
+            " SELECT shipping_phone, updated_at FROM matched WHERE shipping_phone IS NOT NULL"
+            ") SELECT phone, MAX(updated_at) AS latest FROM phones"
+            " GROUP BY phone ORDER BY latest DESC NULLS LAST LIMIT $1"
+        )
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *args)
+        return [
+            (str(r["phone"]), r["latest"].isoformat() if r["latest"] else None)
             for r in rows
         ]
 
@@ -1372,13 +1481,26 @@ class PostgresConversationStore:
             for r in ordered
         ]
 
-    async def recent_conversations(self, limit: int = 50) -> list[ConversationSummary]:
+    async def recent_conversations(
+        self, limit: int = 50, *, before: str | None = None, phone_like: str | None = None
+    ) -> list[ConversationSummary]:
+        # `phone_like` narrows the set for server-side search; `before` (keyset cursor) fetches
+        # only conversations strictly older than it. The message-less-row EXISTS filter stays.
+        args: list[object] = [limit]
+        conditions = ["EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)"]
+        cursor = _parse_cursor(before)
+        if cursor is not None:
+            args.append(cursor)
+            conditions.append(f"c.last_active_at < ${len(args)}")
+        if phone_like:
+            args.append(_like_contains(phone_like))
+            conditions.append(f"c.user_id ILIKE ${len(args)} ESCAPE '\\'")
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT c.user_id, c.last_active_at FROM conversations c"
-                " WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)"
-                " ORDER BY c.last_active_at DESC LIMIT $1",
-                limit,
+                "SELECT c.user_id, c.last_active_at FROM conversations c WHERE "
+                + " AND ".join(conditions)
+                + " ORDER BY c.last_active_at DESC LIMIT $1",
+                *args,
             )
         return [
             ConversationSummary(

@@ -631,31 +631,48 @@ function renderFilterChips() {
 }
 
 function applyThreadFilters(threads) {
+  // Search is now server-side (the `q` query param), so a match over the loaded page can no longer
+  // hide older chats -- only the client-only chips (Unread / Handed to human) filter here.
   const chip = FILTERS.find((f) => f.id === activeFilterId) || FILTERS[0];
-  const query = el("thread-search").value;
-  return threads.filter((t) => chip.predicate(t) && threadMatchesQuery(t, query));
+  return threads.filter((t) => chip.predicate(t));
 }
 
+// The full set of threads currently loaded into the pane: the first page plus every "Load older"
+// page appended so far. Deduped by thread_id and kept sorted newest-first by mergeThreads().
 let allThreads = [];
+// Keyset paging state from the most recent list fetch: the cursor for the NEXT older page and
+// whether one exists. currentQuery is the active server-side search term ("" = browsing).
+let nextCursor = null;
+let hasMore = false;
+let currentQuery = "";
+let loadingOlder = false;
 
-function normalizeOrderQuery(query) {
-  // Mirrors app/shopify/models.py::normalize_order_name's isdigit() branch: bare digits like
-  // "3589" (or "#3589", matching the search box placeholder) should match the store's
-  // "tavas3589" order-name format.
-  const stripped = query.replace(/^#/, "");
-  return /^\d+$/.test(stripped) ? "tavas" + stripped : query;
+function conversationsUrl(params) {
+  const usp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== null && v !== undefined && v !== "") usp.set(k, v);
+  }
+  const qs = usp.toString();
+  return "/admin/conversations" + (qs ? "?" + qs : "");
 }
 
-function threadMatchesQuery(thread, query) {
-  if (!query) return true;
-  const q = query.trim().toLowerCase();
-  if (!q) return true;
-  if ((thread.phone || "").toLowerCase().includes(q)) return true;
-  if ((thread.customer_name || "").toLowerCase().includes(q)) return true;
-  const orderNames = (thread.order_names || []).map((n) => n.toLowerCase());
-  if (orderNames.some((n) => n.includes(q))) return true;
-  const normalized = normalizeOrderQuery(q);
-  return orderNames.some((n) => n.includes(normalized));
+function mergeThreads(existing, incoming) {
+  // incoming wins on a thread_id collision (it carries the fresher unread/last_active state), so a
+  // poll refreshing the first page updates those rows without dropping already-loaded older pages.
+  const byId = new Map();
+  for (const t of existing) byId.set(t.thread_id, t);
+  for (const t of incoming) byId.set(t.thread_id, t);
+  return [...byId.values()].sort((a, b) =>
+    String(b.last_active_at || "").localeCompare(String(a.last_active_at || ""))
+  );
+}
+
+function updateLoadOlderButton() {
+  const btn = el("load-older-btn");
+  if (!btn) return;
+  btn.style.display = hasMore ? "block" : "none";
+  btn.disabled = loadingOlder;
+  btn.textContent = loadingOlder ? "Loading…" : "Load older chats";
 }
 
 function renderThreadRows(threads) {
@@ -690,22 +707,89 @@ function renderThreadRows(threads) {
 }
 
 async function loadThreadList() {
+  // A fresh load of the FIRST page (initial load, refresh button, or a search-term change). Resets
+  // the paging state -- any previously appended older pages are discarded and re-fetched on demand.
   try {
-    allThreads = await api("/admin/conversations");
+    const body = await api(conversationsUrl({ q: currentQuery }));
+    allThreads = body.threads;
+    nextCursor = body.next_cursor;
+    hasMore = body.has_more;
     renderThreadRows(applyThreadFilters(allThreads));
-    listSnapshotKey = threadListKey(allThreads);
+    updateLoadOlderButton();
+    listSnapshotKey = threadListKey(body.threads);
     el("list-status").textContent = "";
   } catch (e) {
     el("list-status").textContent = e.message;
   }
 }
 
-el("thread-search").addEventListener("input", () => {
+async function loadOlderThreads() {
+  if (!hasMore || loadingOlder || nextCursor === null) return;
+  loadingOlder = true;
+  updateLoadOlderButton();
+  try {
+    // Auto-continue across zero-net-new pages. The list is a union of sources deduped per phone by
+    // their MAX stamp, but the server truncates each page to `limit` on that union BEFORE the client
+    // is consulted -- so a phone whose stamp straddles the cursor across sources can re-occupy a page
+    // slot and crowd out a genuinely-unseen older phone, making a whole page add zero net-new threads
+    // while `has_more` is still true and real older threads remain (would have permanently hidden
+    // "Load older" if we stopped on the first empty-feeling page). Keep paging while the server
+    // reports more: the keyset cursor STRICTLY decreases every page (every source row is `< before`,
+    // so next_cursor < before), which guarantees this loop terminates. The bound is a hard backstop
+    // kept SMALL (5) so one click can never fan out into a long burst of source+per-thread queries
+    // against the shared max_size=5 pool the live webhook/reply path uses -- if a genuinely-crowded
+    // run needs more, the operator clicks again (has_more keeps the button visible).
+    let addedNew = false;
+    for (let guard = 0; guard < 5 && !addedNew; guard++) {
+      const body = await api(
+        conversationsUrl({ q: currentQuery, before_last_active_at: nextCursor })
+      );
+      const before = allThreads.length;
+      allThreads = mergeThreads(allThreads, body.threads);
+      addedNew = allThreads.length > before;
+      nextCursor = body.next_cursor;
+      hasMore = body.has_more;
+      if (!hasMore || nextCursor === null) break;
+    }
+    renderThreadRows(applyThreadFilters(allThreads));
+  } catch (e) {
+    el("list-status").textContent = e.message;
+  } finally {
+    loadingOlder = false;
+    updateLoadOlderButton();
+  }
+}
+
+async function refreshFirstPage() {
+  // Refresh the newest page WITHOUT resetting: merge the fresh first-page rows into the loaded set
+  // (mergeThreads keeps every "Load older" page already appended) and leave the paging cursor
+  // (nextCursor/hasMore, which belong to the DEEPEST loaded page) untouched. Used by the Refresh
+  // button so a manual refresh never silently discards the operator's scroll depth.
+  const body = await api(conversationsUrl({ q: currentQuery }));
+  allThreads = mergeThreads(allThreads, body.threads);
+  listSnapshotKey = threadListKey(body.threads);
   renderThreadRows(applyThreadFilters(allThreads));
+  el("list-status").textContent = "";
+}
+
+let searchDebounce = null;
+el("thread-search").addEventListener("input", () => {
+  // Debounce: search is a server round trip now, so don't fire one per keystroke.
+  if (searchDebounce !== null) clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(() => {
+    currentQuery = el("thread-search").value.trim();
+    loadThreadList();
+  }, 250);
 });
 
+el("load-older-btn").addEventListener("click", loadOlderThreads);
+
 el("refresh-btn").addEventListener("click", async () => {
-  await loadThreadList();
+  try {
+    await refreshFirstPage();
+  } catch (e) {
+    el("list-status").textContent = e.message;
+  }
   if (currentThreadId !== null) {
     await loadThread(currentThreadId, currentPhone);
   }
@@ -778,10 +862,13 @@ async function pollTick() {
   if (pollInFlight) return;
   pollInFlight = true;
   try {
-    const threads = await api("/admin/conversations");
-    const nextListKey = threadListKey(threads);
+    // Refresh only the FIRST page (no cursor) with the active search term. Diff on the first page's
+    // own key so an unrelated older page already appended via "Load older" is never clobbered; merge
+    // the fresh first-page rows into the loaded set (mergeThreads keeps the older pages intact).
+    const body = await api(conversationsUrl({ q: currentQuery }));
+    const nextListKey = threadListKey(body.threads);
     if (nextListKey !== listSnapshotKey) {
-      allThreads = threads;
+      allThreads = mergeThreads(allThreads, body.threads);
       listSnapshotKey = nextListKey;
       renderThreadRows(applyThreadFilters(allThreads));
     }

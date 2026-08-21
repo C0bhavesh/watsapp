@@ -81,12 +81,14 @@ def test_chats_page_has_search_input(client: TestClient) -> None:
     assert 'id="thread-search"' in resp.text
 
 
-def test_chats_js_filters_threads_by_name_phone_and_order_number(client: TestClient) -> None:
-    resp = client.get("/admin/ui/chats.js")
-    assert resp.status_code == 200
-    assert "customer_name" in resp.text
-    assert "order_names" in resp.text
-    assert "normalize_order_name" in resp.text or "tavas" in resp.text
+def test_chats_js_search_is_server_side(client: TestClient) -> None:
+    # Search moved server-side (the `q` query param) so an older chat is findable, not just the
+    # loaded page. The old client-only filter (threadMatchesQuery) must be gone -- the actual
+    # name/phone/order matching is proven by tests/admin/test_views.py's search tests.
+    js = client.get("/admin/ui/chats.js").text
+    assert "threadMatchesQuery" not in js
+    assert "conversationsUrl" in js
+    assert "q: currentQuery" in js
 
 
 def test_chats_js_polls_every_three_seconds(client: TestClient) -> None:
@@ -151,11 +153,16 @@ def test_chats_js_sends_json_body_on_non_get_requests(client: TestClient) -> Non
     assert "body" in js
 
 
-def test_chats_js_normalize_order_query_strips_leading_hash(client: TestClient) -> None:
-    # The search box invites "#3589"; a leading # must be stripped before the digit test so it
-    # still normalizes to tavas3589. Fix 5.
+def test_chats_js_supports_load_older_pagination(client: TestClient) -> None:
+    # The keyset "Load older chats" control lets the admin reach beyond the first page (the reported
+    # bug: only the 50 most-recent chats were reachable). The order-number "#3589" -> "tavas3589"
+    # normalization now lives server-side (tests/store/test_chat_reads.py's search tests).
     js = client.get("/admin/ui/chats.js").text
-    assert 'replace(/^#/, "")' in js
+    assert "before_last_active_at" in js
+    assert "loadOlderThreads" in js
+    assert "next_cursor" in js and "has_more" in js
+    html = client.get("/admin/ui/chats.html").text
+    assert 'id="load-older-btn"' in html
 
 
 def test_chats_js_thread_list_shows_name_only(client: TestClient) -> None:

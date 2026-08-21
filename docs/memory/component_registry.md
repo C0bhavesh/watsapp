@@ -143,7 +143,7 @@
 - **Notes:** the store trusts its caller for eligibility/ownership (same posture as every other
   store here) — all validation lives in `app/agents/exchange.py`'s `_validated_create_exchange`.
   Schema: `exchange_requests(id, order_gid, order_name, phone_e164, requested_size, status,
-  requested_at, return_tracking_url, updated_at)` + a UNIQUE index
+  requested_at, return_tracking_url, replacement_tracking_url, updated_at)` + a UNIQUE index
   `ux_exchange_requests_active_order (order_gid)` (no WHERE clause — see the `exchange` agent entry
   above for the qc_failed-is-terminal rationale) + non-unique indexes on `order_gid`/`phone_e164`.
   **Not yet run in production** — `schema.sql` is a manually owner-run migration file, never

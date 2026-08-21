@@ -564,13 +564,14 @@ class ManualReplyRequest(BaseModel):
 
 
 class ExchangeUpdateRequest(BaseModel):
-    """Admin-driven advance of an exchange request's status and/or return-tracking link.
+    """Admin-driven advance of an exchange request's status and/or tracking links.
 
-    Both fields optional -- a single call can set either, both, or (rejected below) neither.
+    All fields optional -- a single call can set any combination, or (rejected below) none.
     """
 
     status: ExchangeStatus | None = None
     return_tracking_url: str | None = Field(default=None, max_length=2048)
+    replacement_tracking_url: str | None = Field(default=None, max_length=2048)
 
 
 class TemplateSendRequest(BaseModel):
@@ -861,6 +862,7 @@ def _order_summary(
             "status": exchange.status,
             "requested_at": exchange.requested_at,
             "return_tracking_url": exchange.return_tracking_url,
+            "replacement_tracking_url": exchange.replacement_tracking_url,
         }
     return summary
 
@@ -971,6 +973,8 @@ async def update_exchange(
         await c.exchanges.set_status(exchange_id, body.status)
     if body.return_tracking_url is not None:
         await c.exchanges.set_return_tracking_url(exchange_id, body.return_tracking_url)
+    if body.replacement_tracking_url is not None:
+        await c.exchanges.set_replacement_tracking_url(exchange_id, body.replacement_tracking_url)
     _audit("exchange_update", "success", resource=f"exchange:{exchange_id}")
     return {"ok": True}
 

@@ -671,6 +671,7 @@ def test_conversation_thread_includes_exchange_details_when_a_request_exists(
     assert orders[0]["exchange"] == {
         "id": created.id, "requested_size": "M", "status": "requested",
         "requested_at": created.requested_at, "return_tracking_url": None,
+        "replacement_tracking_url": None,
     }
 
 
@@ -778,6 +779,21 @@ def test_update_exchange_sets_return_tracking_url(client: TestClient) -> None:
     updated = asyncio.run(get_container().exchanges.get(created.id))
     assert updated is not None
     assert updated.return_tracking_url == "https://track/xyz"
+
+
+def test_update_exchange_sets_replacement_tracking_url(client: TestClient) -> None:
+    login(client)
+    created = asyncio.run(
+        get_container().exchanges.create("gid://o/4", "tavas4", "+919999999999", "XL")
+    )
+    resp = client.post(
+        f"/admin/exchanges/{created.id}",
+        json={"replacement_tracking_url": "https://track/repl-xyz"},
+    )
+    assert resp.status_code == 200
+    updated = asyncio.run(get_container().exchanges.get(created.id))
+    assert updated is not None
+    assert updated.replacement_tracking_url == "https://track/repl-xyz"
 
 
 def test_update_exchange_rejects_invalid_status(client: TestClient) -> None:

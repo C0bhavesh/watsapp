@@ -67,7 +67,9 @@ function formatBubbleDate(isoTimestamp) {
   if (!isoTimestamp) return "";
   const d = new Date(isoTimestamp);
   if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleDateString();
+  const day = String(d.getDate()).padStart(2, "0");
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  return day + "/" + month + "/" + d.getFullYear();
 }
 
 const REPLY_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -466,6 +468,13 @@ function renderExchangeDetail(order) {
   trackingInput.value = order.exchange.return_tracking_url || "";
   container.appendChild(trackingInput);
 
+  const replacementTrackingInput = document.createElement("input");
+  replacementTrackingInput.type = "text";
+  replacementTrackingInput.className = "exchange-tracking-input";
+  replacementTrackingInput.placeholder = "Replacement order tracking URL";
+  replacementTrackingInput.value = order.exchange.replacement_tracking_url || "";
+  container.appendChild(replacementTrackingInput);
+
   const saveBtn = document.createElement("button");
   saveBtn.type = "button";
   saveBtn.className = "exchange-save-btn";
@@ -479,6 +488,7 @@ function renderExchangeDetail(order) {
       await api("/admin/exchanges/" + encodeURIComponent(order.exchange.id), "POST", {
         status: statusSelect.value,
         return_tracking_url: trackingInput.value || null,
+        replacement_tracking_url: replacementTrackingInput.value || null,
       });
     } catch (e) {
       // Mirrors reply-status/template-status: empty on success, error text on failure.

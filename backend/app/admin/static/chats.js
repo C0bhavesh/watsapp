@@ -461,17 +461,31 @@ function renderExchangeDetail(order) {
   }
   container.appendChild(statusSelect);
 
+  const trackingLabel = document.createElement("div");
+  trackingLabel.className = "order-field";
+  trackingLabel.innerHTML = "<span class='label'>Return tracking URL:</span>";
+  container.appendChild(trackingLabel);
+
   const trackingInput = document.createElement("input");
   trackingInput.type = "text";
   trackingInput.className = "exchange-tracking-input";
   trackingInput.placeholder = "Return tracking URL";
+  trackingInput.title = "Return tracking URL";
+  trackingInput.setAttribute("aria-label", "Return tracking URL");
   trackingInput.value = order.exchange.return_tracking_url || "";
   container.appendChild(trackingInput);
+
+  const replacementTrackingLabel = document.createElement("div");
+  replacementTrackingLabel.className = "order-field";
+  replacementTrackingLabel.innerHTML = "<span class='label'>Replacement order tracking URL:</span>";
+  container.appendChild(replacementTrackingLabel);
 
   const replacementTrackingInput = document.createElement("input");
   replacementTrackingInput.type = "text";
   replacementTrackingInput.className = "exchange-tracking-input";
   replacementTrackingInput.placeholder = "Replacement order tracking URL";
+  replacementTrackingInput.title = "Replacement order tracking URL";
+  replacementTrackingInput.setAttribute("aria-label", "Replacement order tracking URL");
   replacementTrackingInput.value = order.exchange.replacement_tracking_url || "";
   container.appendChild(replacementTrackingInput);
 

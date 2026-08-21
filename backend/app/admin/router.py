@@ -958,10 +958,10 @@ async def get_conversation_thread(thread_id: int) -> dict[str, object]:
 async def update_exchange(
     request: Request, exchange_id: int, body: ExchangeUpdateRequest
 ) -> dict[str, object]:
-    """Advance an exchange request's status and/or set its return-tracking URL.
+    """Advance an exchange request's status and/or its tracking links.
 
-    No courier/QC integration exists (design doc) -- this is the only way either field ever
-    changes after the exchange agent creates the request. Same require_admin + rate-limit
+    No courier/QC integration exists (design doc) -- this is the only way any of these fields
+    ever changes after the exchange agent creates the request. Same require_admin + rate-limit
     pattern as the sibling admin-mutation endpoints (send_manual_reply, send_admin_template).
     """
     c = get_container()

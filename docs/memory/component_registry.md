@@ -137,7 +137,8 @@
   `set_return_tracking_url`).
 - **Used in:** `app/agents/exchange.py` (create + list_for_phone), `app/admin/router.py`
   (`list_conversations`'s `_order_summary` join via `list_for_phone`; `update_exchange` via
-  `get`/`set_status`/`set_return_tracking_url` — see api_registry.md), `app/deps.py::Container.
+  `get`/`set_status`/`set_return_tracking_url`/`set_replacement_tracking_url` — see api_registry.md),
+  `app/deps.py::Container.
   exchanges` (Postgres when `database_url` is set, else in-memory — same selection pattern as every
   other store).
 - **Notes:** the store trusts its caller for eligibility/ownership (same posture as every other
@@ -361,13 +362,17 @@
 - **Purpose:** WhatsApp-style centered date-divider pills inserted before the first message of each
   new calendar day in the admin chat page's message view.
 - **Public API:** page-local in `chats.js`: `formatBubbleDate(isoTimestamp: string | null | undefined) -> string`
-  (converts ISO timestamp to browser-locale date string, defensive `""` on invalid input, mirrors
-  `formatBubbleTime`'s shape); `renderDateDivider(dateLabel: string) -> HTMLElement` (creates
+  (renders a fixed zero-padded `dd/mm/yyyy` (locale-independent, 2026-08-21 fix) — still uses the
+  browser's local *timezone* via `new Date(...)`, only the display format was made locale-independent,
+  matching `formatBubbleTime`'s timezone behavior; defensive `""` on invalid input);
+  `renderDateDivider(dateLabel: string) -> HTMLElement` (creates
   centered pill div). Both used only in `loadThread`'s render loop.
 - **Used in:** admin operators only, no backend/API/DB changes — `entry.timestamp` already present
   on every entry returned by `GET /admin/conversations/{thread_id}`.
-- **Notes:** inline divider only (no scroll-tracked header); always plain browser-locale date
-  (no "Today"/"Yesterday" relative labels). Render loop tracks `lastRenderedDate` per call
+- **Notes:** inline divider only (no scroll-tracked header); renders a fixed zero-padded
+  `dd/mm/yyyy` (locale-independent, 2026-08-21 fix) — still uses the browser's local *timezone* via
+  `new Date(...)`, only the display format was made locale-independent, matching `formatBubbleTime`'s
+  timezone behavior (no "Today"/"Yesterday" relative labels). Render loop tracks `lastRenderedDate` per call
   (fresh on every thread switch / poll-triggered refresh). Single `.date-divider` CSS rule added
   to `chats.html`'s existing `<style>` block (centered via `align-self: center` in the flex-column
   layout, muted WhatsApp-palette colors matching existing elements). Frontend verification

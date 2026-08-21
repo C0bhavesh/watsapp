@@ -372,8 +372,22 @@ async def _agent_reply(
                 orders.append(extra)
         if intent == "exchange":
             # A cheap DB-only read of our own store -- no mirror/live distinction applies here,
-            # unlike order resolution above.
-            exchange_requests = await c.exchanges.list_for_phone(phone or event.wa_id)
+            # unlike order resolution above. Guarded exactly like the admin thread-detail lookup
+            # (admin/router.py get_conversation_thread): a transient exchange-store failure (DB
+            # blip, schema drift, connection issue) must never crash the live customer's turn.
+            # The store sits behind the ExchangeStore Protocol, so the concrete failure (asyncpg
+            # PostgresError, OSError, ...) is caught as Exception here. On failure we degrade to
+            # an empty list -- identical to "no existing exchange requests found", which is how
+            # exchange_requests is consumed downstream (context.exchange_requests) -- and let the
+            # conversation flow continue rather than raising.
+            try:
+                exchange_requests = await c.exchanges.list_for_phone(phone or event.wa_id)
+            except Exception as exc:
+                logger.warning(
+                    "failed to load exchange requests for message %s: type=%s",
+                    event.message_id,
+                    type(exc).__name__,
+                )
     loader = KnowledgeLoader(c.config_repo, SEEDS_DIR)
     knowledge = await loader.assemble_all()
     context = AgentContext(

@@ -423,3 +423,66 @@ async def test_agent_reply_exchange_intent_resolves_orders_and_exchange_requests
     # mirror's own read methods were never touched at all.
     assert "get_order" in shopify.calls
     assert ingest.mirror_calls == []
+
+
+async def test_agent_reply_exchange_intent_survives_exchange_store_failure(
+    monkeypatch, master_key: str
+) -> None:
+    """A transient exchange-store failure on the LIVE customer path must NOT crash the turn:
+    the exchange lookup degrades to "no existing exchange requests" (empty list) and the agent
+    still runs, matching the admin thread-detail guard's catch-log-degrade shape."""
+    order = _order("gid://1", "tavas3733", "+919999999999")
+    mapping = MappingView(
+        order_gid="gid://1", order_name="tavas3733", phone_e164="+919999999999",
+        status="pending", is_cod=False, created_at=None,
+    )
+    ingest = _FakeMirrorIngestFull(mappings=[mapping], mirrored_order=order)
+    shopify = _FakeLiveShopify(order)
+
+    monkeypatch.setenv("APP_MASTER_KEY", master_key)
+    reset_container()
+    c = get_container()
+    monkeypatch.setattr(c, "ingest", ingest)
+    monkeypatch.setattr(c, "shopify", shopify)
+    await c.config.set_plain("llm:active_provider", "vertex")
+
+    from app.core.exchange_models import ExchangeRequest
+
+    class _BoomExchanges:
+        async def list_for_phone(self, phone_e164: str) -> list[ExchangeRequest]:
+            raise RuntimeError("exchange_requests table does not exist")
+
+    monkeypatch.setattr(c, "exchanges", _BoomExchanges())
+
+    captured: dict[str, object] = {}
+
+    async def fake_classify_intent(*args: object, **kwargs: object) -> str:
+        return "exchange"
+
+    async def fake_assemble_all(self: object) -> dict[str, str]:
+        return {}
+
+    async def fake_run_agent(context: object, intent: str, container: object) -> AgentReply:
+        captured["exchange_requests"] = context.exchange_requests  # type: ignore[attr-defined]
+        return AgentReply(text="ok", handoff=False)
+
+    monkeypatch.setattr("app.core.conversation.classify_intent", fake_classify_intent)
+    monkeypatch.setattr(
+        "app.core.conversation.KnowledgeLoader.assemble_all", fake_assemble_all
+    )
+    monkeypatch.setattr("app.core.conversation._run_agent", fake_run_agent)
+
+    from app.deps import active_llm
+
+    llm = await active_llm(c.settings, c.config)
+    assert llm is not None
+    event = InboundText(
+        message_id="wamid.3", wa_id="919999999999", text="I want to exchange this",
+        timestamp="1699999999",
+    )
+
+    # Must NOT raise: the store blew up but the turn completes with an empty-list fallback.
+    reply, _handoff = await _agent_reply(c, event, [], "+919999999999", False, llm, AdminControls())
+
+    assert reply == "ok"
+    assert captured["exchange_requests"] == []

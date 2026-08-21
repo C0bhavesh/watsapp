@@ -796,6 +796,23 @@ def test_update_exchange_sets_replacement_tracking_url(client: TestClient) -> No
     assert updated.replacement_tracking_url == "https://track/repl-xyz"
 
 
+def test_update_exchange_store_lookup_failure_returns_503_not_500(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A store-level failure on the pre-update lookup (DB blip, schema drift) must surface as a
+    # clean 503, matching this router's "store unavailable" convention -- never a raw 500.
+    login(client)
+
+    async def _boom(_id: int) -> object:
+        raise RuntimeError("exchange_requests table does not exist")
+
+    monkeypatch.setattr(get_container().exchanges, "get", _boom)
+
+    resp = client.post("/admin/exchanges/1", json={"status": "return_picked_up"})
+
+    assert resp.status_code == 503
+
+
 def test_update_exchange_rejects_invalid_status(client: TestClient) -> None:
     login(client)
     created = asyncio.run(

@@ -965,7 +965,21 @@ async def update_exchange(
     pattern as the sibling admin-mutation endpoints (send_manual_reply, send_admin_template).
     """
     c = get_container()
-    existing = await c.exchanges.get(exchange_id)
+    # A missing row is a genuine 404; a store-level failure (DB blip, schema drift, connection
+    # issue) must surface as a clean 503, matching this router's "store/service unavailable"
+    # convention (e.g. the login/whatsapp not-configured 503s) -- never a raw 500. This is a
+    # mutation endpoint, so unlike the display-only thread-detail lookup we cannot degrade and
+    # proceed: without the existing record there is nothing to advance, so we return the error.
+    # The store sits behind the ExchangeStore Protocol, so the concrete failure is caught as
+    # Exception here.
+    try:
+        existing = await c.exchanges.get(exchange_id)
+    except Exception as exc:
+        logger.warning(
+            "failed to load exchange %s for update: type=%s", exchange_id, type(exc).__name__
+        )
+        _audit("exchange_update", "failure", resource=f"exchange:{exchange_id}")
+        raise HTTPException(status_code=503, detail="exchange store unavailable") from exc
     if existing is None:
         _audit("exchange_update", "failure", resource=f"exchange:{exchange_id}")
         raise HTTPException(status_code=404, detail="exchange request not found")

@@ -206,6 +206,49 @@ def test_conversations_list_reports_ai_not_paused_by_default(client: TestClient)
     assert row["ai_paused"] is False
 
 
+def test_conversations_list_reports_exchange_processing_flags(client: TestClient) -> None:
+    login(client)
+    phone_unprocessed = "+919000000101"
+    phone_processed_status = "+919000000102"
+    phone_processed_tracking = "+919000000103"
+    phone_no_exchange = "+919000000104"
+
+    for phone in (
+        phone_unprocessed, phone_processed_status, phone_processed_tracking, phone_no_exchange,
+    ):
+        _send_ai_message(phone, "hi", "hello there")
+
+    c = get_container()
+    asyncio.run(c.exchanges.create("gid://o/unproc", "tavasU", phone_unprocessed, "M"))
+
+    processed_status = asyncio.run(
+        c.exchanges.create("gid://o/procstat", "tavasP1", phone_processed_status, "M")
+    )
+    asyncio.run(c.exchanges.set_status(processed_status.id, "return_picked_up"))
+
+    processed_tracking = asyncio.run(
+        c.exchanges.create("gid://o/proctrack", "tavasP2", phone_processed_tracking, "L")
+    )
+    asyncio.run(
+        c.exchanges.set_return_tracking_url(processed_tracking.id, "https://track.example/1")
+    )
+
+    rows = client.get("/admin/conversations").json()["threads"]
+    by_phone = {r["phone"]: r for r in rows}
+
+    assert by_phone[phone_unprocessed]["exchange_unprocessed"] is True
+    assert by_phone[phone_unprocessed]["exchange_processed"] is False
+
+    assert by_phone[phone_processed_status]["exchange_unprocessed"] is False
+    assert by_phone[phone_processed_status]["exchange_processed"] is True
+
+    assert by_phone[phone_processed_tracking]["exchange_unprocessed"] is False
+    assert by_phone[phone_processed_tracking]["exchange_processed"] is True
+
+    assert by_phone[phone_no_exchange]["exchange_unprocessed"] is False
+    assert by_phone[phone_no_exchange]["exchange_processed"] is False
+
+
 def test_conversations_list_includes_outbound_only_customer(client: TestClient) -> None:
     # A customer who ONLY ever received an order confirmation (no conversation row, no button tap)
     # must still surface as a thread -- the list unions all three sources, not just conversations.

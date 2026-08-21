@@ -842,10 +842,21 @@ async def list_conversations(
         paused_until = await c.conversations.get_paused_until(thread_id)
         ai_paused = paused_until is not None and paused_until > datetime.now(UTC)
 
+        exchange_requests_for_phone = await c.exchanges.list_for_phone(norm)
+        exchange_unprocessed = any(
+            r.status == "requested" and not r.return_tracking_url
+            for r in exchange_requests_for_phone
+        )
+        exchange_processed = any(
+            r.status != "requested" or r.return_tracking_url
+            for r in exchange_requests_for_phone
+        )
+
         result.append(
             {"thread_id": thread_id, "phone": norm, "last_active_at": last_active,
              "preview": preview, "customer_name": customer_name, "order_names": order_names,
-             "unread_count": unread_count, "ai_paused": ai_paused}
+             "unread_count": unread_count, "ai_paused": ai_paused,
+             "exchange_unprocessed": exchange_unprocessed, "exchange_processed": exchange_processed}
         )
 
     result.sort(key=lambda r: str(r["last_active_at"] or ""), reverse=True)

@@ -611,6 +611,8 @@ const FILTERS = [
   { id: "all", label: "All", predicate: () => true },
   { id: "unread", label: "Unread", predicate: (t) => (t.unread_count || 0) > 0 },
   { id: "handoff", label: "Handed to human", predicate: (t) => !!t.ai_paused },
+  { id: "exchange_unprocessed", label: "Unprocessed Exchange", predicate: (t) => !!t.exchange_unprocessed },
+  { id: "exchange_processed", label: "Processed Exchange", predicate: (t) => !!t.exchange_processed },
 ];
 let activeFilterId = "all";
 

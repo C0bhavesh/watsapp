@@ -705,6 +705,44 @@ def test_conversation_thread_order_has_no_exchange_key_when_none_exists(
     assert "exchange" not in orders[0]
 
 
+def test_conversation_thread_survives_exchange_lookup_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    login(client)
+    phone = "+919876500097"
+    order = order_from_webhook_payload({
+        "admin_graphql_api_id": "gid://shopify/Order/exch-fail1",
+        "name": "tavas9903",
+        "phone": phone,
+        "financial_status": "paid",
+        "fulfillment_status": None,
+        "cancelled_at": None,
+        "tags": "",
+        "payment_gateway_names": [],
+        "total_price": "599.00",
+        "currency": "INR",
+        "updated_at": "2026-08-20T10:00:00+05:30",
+        "line_items": [],
+    })
+    assert order is not None
+    asyncio.run(get_container().ingest.upsert_order_mirror(order))
+
+    async def _boom(_phone: str) -> list[object]:
+        raise RuntimeError("exchange_requests table does not exist")
+
+    monkeypatch.setattr(get_container().exchanges, "list_for_phone", _boom)
+
+    thread_id = asyncio.run(get_container().conversations.get_or_create(phone))
+    resp = client.get(f"/admin/conversations/{thread_id}")
+
+    # The exchange lookup blew up, but entries/orders must still return -- the order is present
+    # and simply carries no exchange details (empty fallback), never a 500.
+    assert resp.status_code == 200
+    orders = resp.json()["orders"]
+    assert len(orders) == 1
+    assert "exchange" not in orders[0]
+
+
 def test_update_exchange_requires_auth(client: TestClient) -> None:
     resp = client.post("/admin/exchanges/1", json={"status": "return_picked_up"})
     assert resp.status_code == 401

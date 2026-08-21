@@ -916,9 +916,21 @@ async def get_conversation_thread(thread_id: int) -> dict[str, object]:
 
     orders = await c.ingest.find_mirrored_orders_by_phone(user_id)
     orders_sorted = sorted(orders, key=lambda o: str(o.updated_at or ""), reverse=True)
-    exchanges_by_order_gid = {
-        e.order_gid: e for e in await c.exchanges.list_for_phone(user_id)
-    }
+    # Guarded for the same reason as the mark_read call below: a failure in the exchange lookup
+    # (e.g. the exchange_requests table missing in an environment) must never sink the whole
+    # entries/orders payload. The store sits behind the ExchangeStore Protocol -- the router does
+    # not import the DB driver -- so the concrete failure (asyncpg PostgresError, OSError, ...) is
+    # caught as Exception here, exactly like the sibling guard. On failure orders simply carry no
+    # exchange details.
+    exchanges_by_order_gid: dict[str, ExchangeRequest] = {}
+    try:
+        exchanges_by_order_gid = {
+            e.order_gid: e for e in await c.exchanges.list_for_phone(user_id)
+        }
+    except Exception as exc:
+        logger.warning(
+            "failed to load exchanges for thread %s: type=%s", thread_id, type(exc).__name__
+        )
     order_summaries = [
         _order_summary(o, exchanges_by_order_gid.get(o.gid)) for o in orders_sorted
     ]

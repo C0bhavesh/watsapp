@@ -1,6 +1,6 @@
 [
   {"q": "How long does delivery take?", "a": "Orders are dispatched within 1-3 business days. Estimated delivery is 4-7 business days depending on your PIN code and courier availability."},
-  {"q": "Do you offer Cash on Delivery?", "a": "Yes, Cash on Delivery (COD) is available on all products with no PIN code restriction."},
+  {"q": "Do you offer Cash on Delivery?", "a": "Cash on Delivery (COD) is available in most areas, but only for eligible PIN codes. You will see whether COD is available for your address at checkout."},
   {"q": "Can I cancel my order?", "a": "Orders can be cancelled only before dispatch. Once an order has been dispatched, it cannot be cancelled."},
   {"q": "Can I return a product?", "a": "We do not accept returns once a product has been delivered. The only exceptions are damaged, defective, or incorrect products -- notify us within 24 hours of delivery with a continuous unedited unboxing video and clear photographs showing the issue. Requests submitted after 24 hours or without this proof may be declined."},
   {"q": "Can I exchange a product for a different size?", "a": "Size exchange is allowed within 48 hours of delivery. The product must be unwashed and free from perfume, deodorant, makeup stains, dirt, or any signs of use. Exchange is subject to stock availability, and exchange shipping charges are paid by the customer."},

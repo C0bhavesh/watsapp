@@ -34,10 +34,11 @@ def test_all_seed_files_parse() -> None:
     assert (SEEDS_DIR / "brand_voice.md").read_text(encoding="utf-8").strip()
 
 
-def test_cod_faq_reflects_all_products_no_pin_restriction() -> None:
-    """Owner-confirmed policy (2026-08-21): COD is available on all products with NO PIN-code
-    restriction. This supersedes the old seed answer ("only in eligible PIN codes"), which was
-    outdated/wrong. Guards the seed content so the correction isn't silently reverted."""
+def test_cod_faq_reflects_pin_code_restriction() -> None:
+    """Owner-confirmed policy (2026-08-21): COD is PIN-code restricted, matching the Shipping
+    Policy ("COD is available only in eligible PIN codes"). This corrects an earlier seed answer
+    that wrongly claimed COD had no PIN-code restriction. Guards the seed content so the
+    correction isn't silently reverted."""
     faq = json.loads((SEEDS_DIR / "faq.json").read_text(encoding="utf-8"))
     cod_entries = [
         item
@@ -46,7 +47,7 @@ def test_cod_faq_reflects_all_products_no_pin_restriction() -> None:
     ]
     assert cod_entries, "expected a COD FAQ entry"
     answer = cod_entries[0]["a"].lower()
-    assert "all products" in answer
-    assert "no pin" in answer
-    # the outdated PIN-code restriction wording must be gone
-    assert "eligible pin" not in answer
+    assert "eligible pin" in answer
+    # the outdated "no restriction" wording must be gone
+    assert "no pin code restriction" not in answer
+    assert "all products" not in answer

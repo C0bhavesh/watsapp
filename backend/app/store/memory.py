@@ -968,7 +968,8 @@ class InMemoryExchangeStore:
         row = ExchangeRequest(
             id=self._next_id, order_gid=order_gid, order_name=order_name,
             phone_e164=phone_e164, requested_size=requested_size, status="requested",
-            requested_at=now, return_tracking_url=None, updated_at=now,
+            requested_at=now, return_tracking_url=None, replacement_tracking_url=None,
+            updated_at=now,
         )
         self._rows[row.id] = row
         self._next_id += 1
@@ -992,4 +993,12 @@ class InMemoryExchangeStore:
             return
         self._rows[id] = replace(
             row, return_tracking_url=url, updated_at=datetime.now(UTC).isoformat()
+        )
+
+    async def set_replacement_tracking_url(self, id: int, url: str) -> None:
+        row = self._rows.get(id)
+        if row is None:
+            return
+        self._rows[id] = replace(
+            row, replacement_tracking_url=url, updated_at=datetime.now(UTC).isoformat()
         )

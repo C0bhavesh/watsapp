@@ -28,7 +28,7 @@ class _FakeExchangeStore:
             id=self._next_id, order_gid=order_gid, order_name=order_name,
             phone_e164=phone_e164, requested_size=requested_size, status="requested",
             requested_at="2026-08-20T00:00:00+00:00", return_tracking_url=None,
-            updated_at="2026-08-20T00:00:00+00:00",
+            replacement_tracking_url=None, updated_at="2026-08-20T00:00:00+00:00",
         )
         self._next_id += 1
         return row
@@ -196,7 +196,8 @@ async def test_existing_exchange_requests_are_rendered_for_status_questions() ->
     existing = ExchangeRequest(
         id=7, order_gid="gid://o/1", order_name="tavas1", phone_e164="+919999999999",
         requested_size="M", status="return_picked_up", requested_at="2026-08-19T00:00:00+00:00",
-        return_tracking_url="https://track/return1", updated_at="2026-08-19T12:00:00+00:00",
+        return_tracking_url="https://track/return1", replacement_tracking_url=None,
+        updated_at="2026-08-19T12:00:00+00:00",
     )
     await run(
         _context(provider, "where is my exchange", [authorized], exchange_requests=[existing]),
@@ -220,7 +221,7 @@ async def test_create_exchange_is_blocked_when_the_order_already_has_a_request()
     existing = ExchangeRequest(
         id=1, order_gid="gid://o/42", order_name="tavas42", phone_e164="+919999999999",
         requested_size="M", status="requested", requested_at=_ELIGIBLE_DELIVERED_AT,
-        return_tracking_url=None, updated_at=_ELIGIBLE_DELIVERED_AT,
+        return_tracking_url=None, replacement_tracking_url=None, updated_at=_ELIGIBLE_DELIVERED_AT,
     )
     reply = (
         '{"reply": "Done!", "handoff": false, '
@@ -284,7 +285,7 @@ async def test_create_exchange_is_blocked_when_the_existing_request_is_qc_failed
     existing = ExchangeRequest(
         id=1, order_gid="gid://o/42", order_name="tavas42", phone_e164="+919999999999",
         requested_size="M", status="qc_failed", requested_at=_ELIGIBLE_DELIVERED_AT,
-        return_tracking_url=None, updated_at=_ELIGIBLE_DELIVERED_AT,
+        return_tracking_url=None, replacement_tracking_url=None, updated_at=_ELIGIBLE_DELIVERED_AT,
     )
     reply = (
         '{"reply": "Done!", "handoff": false, '

@@ -23,4 +23,5 @@ class ExchangeRequest:
     status: ExchangeStatus
     requested_at: str  # raw ISO-8601, same convention as Order.created_at
     return_tracking_url: str | None
+    replacement_tracking_url: str | None
     updated_at: str  # raw ISO-8601

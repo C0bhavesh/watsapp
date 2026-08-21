@@ -1559,6 +1559,7 @@ def _exchange_from_row(row: asyncpg.Record) -> ExchangeRequest:
         phone_e164=row["phone_e164"], requested_size=row["requested_size"],
         status=row["status"], requested_at=row["requested_at"].isoformat(),
         return_tracking_url=row["return_tracking_url"],
+        replacement_tracking_url=row["replacement_tracking_url"],
         updated_at=row["updated_at"].isoformat(),
     )
 
@@ -1576,7 +1577,7 @@ class PostgresExchangeStore:
                 "(order_gid, order_name, phone_e164, requested_size) "
                 "VALUES ($1, $2, $3, $4) "
                 "RETURNING id, order_gid, order_name, phone_e164, requested_size, status, "
-                "requested_at, return_tracking_url, updated_at",
+                "requested_at, return_tracking_url, replacement_tracking_url, updated_at",
                 order_gid, order_name, phone_e164, requested_size,
             )
         return _exchange_from_row(row)
@@ -1585,7 +1586,7 @@ class PostgresExchangeStore:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT id, order_gid, order_name, phone_e164, requested_size, status, "
-                "requested_at, return_tracking_url, updated_at "
+                "requested_at, return_tracking_url, replacement_tracking_url, updated_at "
                 "FROM exchange_requests WHERE phone_e164 = $1 ORDER BY requested_at DESC",
                 phone_e164,
             )
@@ -1595,7 +1596,7 @@ class PostgresExchangeStore:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT id, order_gid, order_name, phone_e164, requested_size, status, "
-                "requested_at, return_tracking_url, updated_at "
+                "requested_at, return_tracking_url, replacement_tracking_url, updated_at "
                 "FROM exchange_requests WHERE id = $1",
                 id,
             )
@@ -1612,6 +1613,14 @@ class PostgresExchangeStore:
         async with self._pool.acquire() as conn:
             await conn.execute(
                 "UPDATE exchange_requests SET return_tracking_url = $1, updated_at = now() "
+                "WHERE id = $2",
+                url, id,
+            )
+
+    async def set_replacement_tracking_url(self, id: int, url: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE exchange_requests SET replacement_tracking_url = $1, updated_at = now() "
                 "WHERE id = $2",
                 url, id,
             )

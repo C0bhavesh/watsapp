@@ -282,6 +282,9 @@ CREATE TABLE IF NOT EXISTS exchange_requests (
     return_tracking_url text,
     updated_at          timestamptz NOT NULL DEFAULT now()
 );
+-- Tracking link for the replacement item shipped back to the customer, mirroring
+-- return_tracking_url (2026-08-21, admin panel replacement-tracking-url field).
+ALTER TABLE exchange_requests ADD COLUMN IF NOT EXISTS replacement_tracking_url text;
 CREATE INDEX IF NOT EXISTS idx_exchange_requests_order ON exchange_requests (order_gid);
 CREATE INDEX IF NOT EXISTS idx_exchange_requests_phone ON exchange_requests (phone_e164);
 

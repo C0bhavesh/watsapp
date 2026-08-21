@@ -376,7 +376,8 @@ async def test_agent_reply_exchange_intent_resolves_orders_and_exchange_requests
     existing = ExchangeRequest(
         id=1, order_gid="gid://1", order_name="tavas3733", phone_e164="+919999999999",
         requested_size="M", status="requested", requested_at="2026-08-20T00:00:00+00:00",
-        return_tracking_url=None, updated_at="2026-08-20T00:00:00+00:00",
+        return_tracking_url=None, replacement_tracking_url=None,
+        updated_at="2026-08-20T00:00:00+00:00",
     )
 
     class _FakeExchanges:

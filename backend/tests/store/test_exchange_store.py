@@ -18,6 +18,7 @@ async def test_memory_create_returns_a_requested_row() -> None:
     assert row.requested_size == "M"
     assert row.status == "requested"
     assert row.return_tracking_url is None
+    assert row.replacement_tracking_url is None
 
 
 async def test_memory_list_for_phone_returns_only_that_phones_requests() -> None:
@@ -50,6 +51,15 @@ async def test_memory_set_return_tracking_url_updates_the_row() -> None:
     updated = await store.get(created.id)
     assert updated is not None
     assert updated.return_tracking_url == "https://track/abc"
+
+
+async def test_memory_set_replacement_tracking_url_updates_the_row() -> None:
+    store = InMemoryExchangeStore()
+    created = await store.create("gid://o/1", "tavas1", "+919999999999", "M")
+    await store.set_replacement_tracking_url(created.id, "https://track/repl-abc")
+    updated = await store.get(created.id)
+    assert updated is not None
+    assert updated.replacement_tracking_url == "https://track/repl-abc"
 
 
 @pytest.fixture
@@ -88,3 +98,13 @@ async def test_pg_set_status_and_return_tracking_url_round_trip(pool: LazyPool) 
     assert fetched is not None
     assert fetched.status == "qc_passed"
     assert fetched.return_tracking_url == "https://track/pg3"
+
+
+@pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")
+async def test_pg_set_replacement_tracking_url_round_trip(pool: LazyPool) -> None:
+    store = PostgresExchangeStore(pool)
+    created = await store.create("gid://o/pg4", "tavas9004", "+919000000004", "S")
+    await store.set_replacement_tracking_url(created.id, "https://track/repl-pg4")
+    fetched = await store.get(created.id)
+    assert fetched is not None
+    assert fetched.replacement_tracking_url == "https://track/repl-pg4"

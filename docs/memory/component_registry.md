@@ -72,7 +72,9 @@
   (`app/agents/exchange.py`) as an already-decided fact, never computed/guessed by the model.
 - **Public API:** `ExchangeStatus = Literal["requested","return_picked_up","qc_passed","qc_failed",
   "replacement_dispatched","delivered"]`; `ExchangeRequest(id, order_gid, order_name, phone_e164,
-  requested_size, status, requested_at, return_tracking_url, updated_at)` (frozen dataclass);
+  requested_size, status, requested_at, return_tracking_url, replacement_tracking_url,
+  updated_at)` (frozen dataclass; `replacement_tracking_url: str | None` added 2026-08-21, mirrors
+  `return_tracking_url` for the replacement-item link);
   `ExchangeEligibility(eligible: bool, reason: str)` (frozen dataclass); `check_exchange_eligibility(
   order: Order, now: datetime) -> ExchangeEligibility` — eligible only if the order is not
   cancelled AND has a fulfillment with `delivered_at` set within the last 48 hours; `reason` is
@@ -130,7 +132,9 @@
 - **Public API:** `.create(order_gid, order_name, phone_e164, requested_size) -> ExchangeRequest`
   (status always starts `"requested"`); `.list_for_phone(phone_e164) -> list[ExchangeRequest]`;
   `.get(id) -> ExchangeRequest | None`; `.set_status(id, status: ExchangeStatus) -> None`;
-  `.set_return_tracking_url(id, url: str) -> None`.
+  `.set_return_tracking_url(id, url: str) -> None`;
+  `.set_replacement_tracking_url(id, url: str) -> None` (added 2026-08-21, mirrors
+  `set_return_tracking_url`).
 - **Used in:** `app/agents/exchange.py` (create + list_for_phone), `app/admin/router.py`
   (`list_conversations`'s `_order_summary` join via `list_for_phone`; `update_exchange` via
   `get`/`set_status`/`set_return_tracking_url` — see api_registry.md), `app/deps.py::Container.

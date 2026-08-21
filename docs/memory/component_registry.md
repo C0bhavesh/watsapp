@@ -395,6 +395,7 @@
   rest of `chats.js`). **Known limitation (parked, not fixed):** the unread badge is uncapped (no
   "99+" truncation) and an empty filtered-result list shows no explanatory message — both flagged
   in final review as Minor, deferred.
+- **Exchange filter chips (2026-08-21).** Design: `docs/superpowers/specs/2026-08-21-exchange-filter-chips-design.md`; plan: `docs/superpowers/plans/2026-08-21-exchange-filter-chips.md`. Two chips added to the `FILTERS` array (`chats.js`, purely additive — no `renderFilterChips`/`applyThreadFilters` change): `Unprocessed Exchange` (predicate `!!t.exchange_unprocessed`) and `Processed Exchange` (predicate `!!t.exchange_processed`). Fed by two new boolean fields on every thread object in `GET /admin/conversations` (`list_conversations`, `backend/app/admin/router.py`): `exchange_unprocessed` = ANY of the phone's exchange requests has `status == "requested"` AND falsy `return_tracking_url`; `exchange_processed` = ANY request where either no longer holds (independent booleans, not mutually exclusive). Computed per-thread from `c.exchanges.list_for_phone(norm)` inside the existing loop. Backend covered by `test_conversations_list_reports_exchange_processing_flags` (`tests/admin/test_views.py`); frontend untested, same accepted gap as the sibling chips.
 
 ## Admin chat page — date dividers (2026-08-19)
 - **File:** backend/app/admin/static/chats.js, backend/app/admin/static/chats.html.

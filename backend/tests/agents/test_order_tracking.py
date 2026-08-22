@@ -12,7 +12,7 @@ def _order(
     fulfillment_status: str | None = None,
     cancelled_at: str | None = None,
     line_items: tuple[LineItem, ...] = (),
-    payment_gateway_names: tuple[str, ...] = (),
+    payment_gateway_names: tuple[str, ...] = ("Cash on Delivery",),
     tags: tuple[str, ...] = (),
     fulfillments: tuple[Fulfillment, ...] = (),
     customer: Customer | None = None,
@@ -128,6 +128,25 @@ async def test_unfulfilled_order_is_cancel_eligible() -> None:
     assert "cancel eligible: True" in system_msg.content
 
 
+async def test_prepaid_undispatched_order_is_not_cancel_eligible() -> None:
+    """A prepaid order must never read as cancel-eligible, even undispatched -- only COD orders
+    are cancellable (owner decision, 2026-08-21)."""
+    provider = _CapturingProvider(text='{"reply": "Let me check."}')
+    order = AuthorizedOrder(
+        order=_order(
+            "tavas1", "+919999999999", fulfillment_status="UNFULFILLED",
+            payment_gateway_names=(),  # prepaid: no COD gateway, no "cod" tag
+        ),
+        verified_phone="+919999999999",
+    )
+    await run(_context(provider, "can i cancel my order", [order]))
+
+    assert provider.captured_messages is not None
+    system_msg = next((m for m in provider.captured_messages if m.role == "system"), None)
+    assert system_msg is not None
+    assert "cancel eligible: False" in system_msg.content
+
+
 async def test_fulfilled_order_is_not_cancel_eligible() -> None:
     """Verify FULFILLED orders marked as not cancel-eligible (dispatched)."""
     provider = _CapturingProvider(text='{"reply": "Too late to cancel."}')
@@ -181,7 +200,10 @@ async def test_reveal_fields_without_status_withholds_status_and_cancellation() 
     assert "fulfillment FULFILLED" not in prompt
     assert "cancelled: " not in prompt
     assert "cancel eligible" not in prompt
-    assert "paid" not in prompt  # the financial_status value itself
+    # The financial_status value itself must not render. Match the exact rendered form
+    # ("payment status paid") rather than the bare word -- the store cancellation policy text
+    # legitimately contains "prepaid", which would collide with a bare "paid" substring check.
+    assert "payment status paid" not in prompt
 
 
 async def test_reveal_fields_without_order_number_withholds_the_order_name() -> None:
@@ -404,7 +426,10 @@ async def test_cod_pending_order_renders_cash_on_delivery_note() -> None:
 async def test_non_cod_order_has_no_cash_on_delivery_note() -> None:
     provider = _CapturingProvider(text='{"reply": "Your payment went through."}')
     order = AuthorizedOrder(
-        order=_order("tavas9", "+919999999999", fulfillment_status="UNFULFILLED"),
+        order=_order(
+            "tavas9", "+919999999999", fulfillment_status="UNFULFILLED",
+            payment_gateway_names=(),  # prepaid: no COD gateway
+        ),
         verified_phone="+919999999999",
     )
     await run(_context(provider, "is my payment done", [order]))

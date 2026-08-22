@@ -23,9 +23,12 @@ order details.
 
 {order_context}
 {format_hint}
-Store cancellation policy: orders can only be cancelled BEFORE they are dispatched. Once
-dispatched, cancellation is not possible -- if the customer asks to cancel a dispatched order,
-tell them clearly and do not offer a cancel option for it.
+Store cancellation policy: only Cash on Delivery orders can be cancelled, and only BEFORE
+they are dispatched. Prepaid orders can never be cancelled, even if not yet dispatched --
+if the customer asks to cancel a prepaid order, tell them clearly that prepaid orders can't
+be cancelled once placed and do not offer a cancel option for it. Once a COD order is
+dispatched, cancellation is not possible either -- if the customer asks to cancel a dispatched
+order, tell them clearly and do not offer a cancel option for it.
 
 If an order has shipped and tracking details are shown above, share the courier name, tracking
 number, and the tracking link exactly as given so the customer can track it. Never invent a
@@ -86,16 +89,18 @@ def _line_item_line(item: LineItem) -> str:
 def _is_cancel_eligible(order: AuthorizedOrder) -> bool:
     """Check if an order is eligible for cancellation.
 
-    An order is cancel-eligible if it is not already cancelled AND has not yet been dispatched.
-    fulfillment_status is the closest available signal to "has this shipped" without
-    a live courier integration — UNFULFILLED/unset = not yet dispatched (cancel-eligible),
-    anything else is treated as dispatched (not cancel-eligible).
+    An order is cancel-eligible only if it is a Cash on Delivery order, is not already
+    cancelled, AND has not yet been dispatched. Prepaid orders are never cancel-eligible,
+    regardless of dispatch status (owner decision, 2026-08-21) -- COD is the only payment
+    method this store allows a customer to cancel. fulfillment_status is the closest
+    available signal to "has this shipped" without a live courier integration --
+    UNFULFILLED/unset = not yet dispatched (cancel-eligible), anything else is treated
+    as dispatched (not cancel-eligible).
     """
+    if not order.order.is_cod():
+        return False
     if order.order.is_cancelled():
         return False
-    # displayFulfillmentStatus is the closest available signal to "has this shipped" without
-    # a live courier integration (Q10: none is built) -- UNFULFILLED/unset = not yet
-    # dispatched, anything else is treated as dispatched.
     return order.order.fulfillment_status in (None, "UNFULFILLED")
 
 

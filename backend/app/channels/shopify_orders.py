@@ -61,9 +61,29 @@ class IncomingOrder:
     product_variant_gid: str | None = None
 
     def is_cod(self) -> bool:
+        """COD by Shopify's OWN payment gateway OR an app-writable "cod" order tag.
+
+        The tag-inclusive version. Safe for push-eligibility (is_eligible_for_push) and other
+        non-mutation-adjacent decisions. For a cancel-button/template-name decision use
+        is_cod_by_gateway() instead: the "cod" tag is written by this app's add_tags (validated
+        only for length/count) and by any third-party app / Shopify Flow, so a stray tag on a
+        genuinely prepaid order must not unlock a Confirm/Cancel button (security review
+        2026-08-22). Mirrors Order.is_cod() / Order.is_cod_by_gateway() in app.shopify.models.
+        """
         if any("cash on delivery" in g.lower() for g in self.gateways):
             return True
         return any(t.strip().lower() == "cod" for t in self.tags)
+
+    def is_cod_by_gateway(self) -> bool:
+        """COD by Shopify's OWN payment gateway only -- deliberately ignores the "cod" tag.
+
+        Sibling to Order.is_cod_by_gateway() in app.shopify.models. Trusts ONLY the
+        Shopify-owned payment_gateway_names, so an app-writable "cod" tag on a prepaid order can
+        never flip its confirmation template to cod_confirmation or attach an order:cancel button.
+        Use this for the template-name / cancel-button decision; is_cod() (tag-inclusive) stays
+        for push-eligibility and other lower-stakes calls.
+        """
+        return any("cash on delivery" in g.lower() for g in self.gateways)
 
 
 def _parse_created_at(raw: object) -> datetime | None:

@@ -45,6 +45,29 @@ def test_parse_full_payload() -> None:
     assert order.locale == "en-IN"
 
 
+def test_is_cod_by_gateway_trusts_only_the_gateway_not_the_tag() -> None:
+    # Security review (2026-08-22): the tag-inclusive is_cod() must stay true for a stray "cod"
+    # tag (push-eligibility), but the gateway-only is_cod_by_gateway() -- which gates the
+    # template/button choice -- must ignore the app-writable tag.
+    tag_only = parse_order_created(
+        {
+            "admin_graphql_api_id": "gid://shopify/Order/9", "name": "tavas9",
+            "tags": "cod", "payment_gateway_names": ["Razorpay"],
+        }
+    )
+    assert tag_only is not None
+    assert tag_only.is_cod() is True
+    assert tag_only.is_cod_by_gateway() is False
+    gateway_cod = parse_order_created(
+        {
+            "admin_graphql_api_id": "gid://shopify/Order/10", "name": "tavas10",
+            "tags": "", "payment_gateway_names": ["Cash on Delivery (COD)"],
+        }
+    )
+    assert gateway_cod is not None
+    assert gateway_cod.is_cod_by_gateway() is True
+
+
 def test_parse_missing_gid_returns_none() -> None:
     assert parse_order_created({"name": "x"}) is None
 

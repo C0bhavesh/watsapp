@@ -469,7 +469,14 @@ async def shopify_webhook(request: Request) -> Response:
         image_url = await _resolve_product_image(
             c, incoming.product_gid, incoming.product_variant_gid
         )
-        template_name = TEMPLATE_NAME_COD if incoming.is_cod() else TEMPLATE_NAME_PREPAID
+        # Template/button choice trusts ONLY Shopify's payment gateway (is_cod_by_gateway), NOT
+        # the app-writable "cod" tag: a prepaid order carrying a stray "cod" tag must not be sent
+        # cod_confirmation with a live-looking Cancel button (security review 2026-08-22). This is
+        # a DIFFERENT, higher-stakes decision than is_eligible_for_push (which stays on the
+        # tag-inclusive is_cod() -- whether to push at all, not whether to show a cancel button).
+        template_name = (
+            TEMPLATE_NAME_COD if incoming.is_cod_by_gateway() else TEMPLATE_NAME_PREPAID
+        )
         template_params: dict[str, object] = {
             "template": template_name,
             "language": TEMPLATE_LANGUAGE,

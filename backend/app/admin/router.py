@@ -1250,6 +1250,17 @@ async def send_admin_template(
         _audit("admin_template_resend", "failure", resource=f"thread:{thread_id}")
         raise HTTPException(status_code=404, detail="order not found for this customer")
 
+    # Re-apply the SAME state filter the GET list endpoint uses (security review 2026-08-22): the
+    # list only offers a template when _template_applies_to_order is true, but a direct POST could
+    # request any catalog template. Reject one that does not apply to this order (e.g.
+    # cod_confirmation -- the only template with live Confirm/Cancel buttons -- for a prepaid
+    # order) outright, rather than silently emitting a dead order:cancel button.
+    if not _template_applies_to_order(body.template, order):
+        _audit("admin_template_resend", "failure", resource=f"thread:{thread_id}")
+        raise HTTPException(
+            status_code=400, detail="template does not apply to this order"
+        )
+
     defaults = resolve_template_defaults(order)
     resolved: dict[str, str] = {
         f.key: (body.values.get(f.key) or defaults.get(f.default_from, "") or "")

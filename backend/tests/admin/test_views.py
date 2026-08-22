@@ -1646,6 +1646,53 @@ def test_send_template_rejects_unknown_order_name(client: TestClient) -> None:
     assert resp.status_code == 404
 
 
+def test_send_template_cod_confirmation_rejected_for_prepaid_order(
+    client: TestClient,
+) -> None:
+    # Security review (2026-08-22): the POST send path must re-apply the same
+    # _template_applies_to_order filter as the GET list endpoint. A direct POST of
+    # cod_confirmation (the only template with live Confirm/Cancel buttons) for a PREPAID order
+    # must be rejected outright with 400 rather than silently emit an order:cancel button the
+    # customer's order can never honour (safely refused if tapped, but a dead button).
+    login(client)
+    _seed_whatsapp_config()
+    thread_id = _seed_order_for_thread(
+        order_name="tavas5090", phone="+919876500090", payment_gateway_names=["Razorpay"],
+    )
+    resp = client.post(
+        f"/admin/conversations/{thread_id}/templates",
+        json={"order_name": "tavas5090", "template": "cod_confirmation", "values": {}},
+    )
+    assert resp.status_code == 400
+
+
+def test_send_template_cod_confirmation_still_succeeds_for_cod_order(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression guard for the filter above: a GENUINE COD order (COD gateway) must still be able
+    # to receive cod_confirmation via the POST send path.
+    from app.admin.controls import AdminControls, save_controls
+    from app.channels.whatsapp_sender import SendResult
+
+    login(client)
+    _seed_whatsapp_config()
+    asyncio.run(save_controls(get_container().config, AdminControls(send_mode="live")))
+    thread_id = _seed_order_for_thread(
+        order_name="tavas5091", phone="+919876500091",
+        payment_gateway_names=["Cash on Delivery (COD)"],
+    )
+    fake = _FakeTemplateSender(
+        SendResult(ok=True, status_code=200, wamid="wamid.TPLCOD", error=None)
+    )
+    monkeypatch.setattr("app.jobs.outbox_drain.send_template", fake)
+    resp = client.post(
+        f"/admin/conversations/{thread_id}/templates",
+        json={"order_name": "tavas5091", "template": "cod_confirmation", "values": {}},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+
+
 def test_send_template_positional_shipped_sends_and_persists(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1657,7 +1704,11 @@ def test_send_template_positional_shipped_sends_and_persists(
     # send_mode defaults to "off" (AdminControls.send_mode) -- this endpoint respects the kill
     # switch same as every automatic template send, so a genuine send requires "live" here.
     asyncio.run(save_controls(get_container().config, AdminControls(send_mode="live")))
-    thread_id = _seed_order_for_thread(order_name="tavas5002", phone="+919876500053")
+    # order_shipped only applies once the order is fulfilled (the POST re-applies the same
+    # _template_applies_to_order filter as the list endpoint -- security review 2026-08-22).
+    thread_id = _seed_order_for_thread(
+        order_name="tavas5002", phone="+919876500053", fulfilled=True,
+    )
 
     fake = _FakeTemplateSender(
         SendResult(ok=True, status_code=200, wamid="wamid.TPL1", error=None)
@@ -1727,7 +1778,10 @@ def test_send_template_kill_switch_off_leaves_it_queued_not_failed(
 
     login(client)
     _seed_whatsapp_config()
-    thread_id = _seed_order_for_thread(order_name="tavas5004", phone="+919876500055")
+    # order_delivered only applies to a fulfilled order (POST re-applies the filter).
+    thread_id = _seed_order_for_thread(
+        order_name="tavas5004", phone="+919876500055", fulfilled=True,
+    )
     asyncio.run(save_controls(
         get_container().config,
         AdminControls(
@@ -1761,7 +1815,10 @@ def test_send_template_allowlist_miss_reports_success_not_failure(
 
     login(client)
     _seed_whatsapp_config()
-    thread_id = _seed_order_for_thread(order_name="tavas5005", phone="+919876500056")
+    # order_delivered only applies to a fulfilled order (POST re-applies the filter).
+    thread_id = _seed_order_for_thread(
+        order_name="tavas5005", phone="+919876500056", fulfilled=True,
+    )
     asyncio.run(save_controls(
         get_container().config,
         AdminControls(
@@ -1787,9 +1844,10 @@ def test_send_template_allowlist_miss_reports_success_not_failure(
 def test_send_template_blank_field_sends_placeholder_not_empty_string(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Finding 1: Meta rejects an empty template body parameter, so a blank field (e.g. resending
-    order_shipped for a not-yet-fulfilled order -> blank courier) must be substituted with
-    EMPTY_PARAM_PLACEHOLDER ("-") in body_params, never sent as ""."""
+    """Finding 1: Meta rejects an empty template body parameter, so a blank field must be
+    substituted with EMPTY_PARAM_PLACEHOLDER ("-") in body_params, never sent as "". Here a
+    fulfilled order (so order_shipped applies -- the POST re-applies _template_applies_to_order,
+    security review 2026-08-22) with NO customer record leaves the `name` field blank."""
     from app.admin.controls import AdminControls, save_controls
     from app.channels.copy import EMPTY_PARAM_PLACEHOLDER
     from app.channels.whatsapp_sender import SendResult
@@ -1797,8 +1855,11 @@ def test_send_template_blank_field_sends_placeholder_not_empty_string(
     login(client)
     _seed_whatsapp_config()
     asyncio.run(save_controls(get_container().config, AdminControls(send_mode="live")))
-    # Unfulfilled order -> tracking_company/tracking_link default to "". No admin override either.
-    thread_id = _seed_order_for_thread(order_name="tavas5006", phone="+919876500057")
+    # Fulfilled order (order_shipped applies), but the seeded order carries no customer record, so
+    # the `name` field (positional index 0) defaults to "" with no admin override.
+    thread_id = _seed_order_for_thread(
+        order_name="tavas5006", phone="+919876500057", fulfilled=True,
+    )
 
     fake = _FakeTemplateSender(
         SendResult(ok=True, status_code=200, wamid="wamid.TPL5", error=None)
@@ -1813,9 +1874,8 @@ def test_send_template_blank_field_sends_placeholder_not_empty_string(
     assert len(fake.calls) == 1
     body_params = fake.calls[0]["body_params"]
     assert isinstance(body_params, list)
-    # tracking_company (index 2) and tracking_link (index 3) had no value -> placeholder, not "".
-    assert body_params[2] == EMPTY_PARAM_PLACEHOLDER
-    assert body_params[3] == EMPTY_PARAM_PLACEHOLDER
+    # name (index 0) had no value -> placeholder, not "".
+    assert body_params[0] == EMPTY_PARAM_PLACEHOLDER
     assert "" not in body_params
 
 
@@ -1954,7 +2014,10 @@ def test_queued_admin_resend_row_drains_via_backstop_job(
             send_mode="off", allowlist_phones=[], owner_alert_number="", default_language="en",
         ),
     ))
-    thread_id = _seed_order_for_thread(order_name="tavas5070", phone="+919876500063")
+    # order_delivered only applies to a fulfilled order (POST re-applies the filter).
+    thread_id = _seed_order_for_thread(
+        order_name="tavas5070", phone="+919876500063", fulfilled=True,
+    )
 
     fake = _FakeTemplateSender(
         SendResult(ok=True, status_code=200, wamid="wamid.TPL9", error=None)

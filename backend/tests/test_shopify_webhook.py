@@ -128,6 +128,28 @@ async def test_prepaid_order_routes_to_prepaid_template() -> None:
     assert "buttons" not in params
 
 
+async def test_prepaid_order_with_cod_tag_gets_prepaid_template_no_buttons() -> None:
+    # Security review (2026-08-22): the "cod" ORDER TAG is app-writable (add_tags, third-party
+    # apps, Shopify Flow), so a genuinely prepaid order carrying a stray "cod" tag must NOT be
+    # pushed the cod_confirmation template with a live-looking Cancel button (safely refused if
+    # tapped, but confusing). is_eligible_for_push still uses the generous tag-inclusive is_cod()
+    # (unchanged), so under the default cod_only policy the tag alone makes this order push --
+    # but the template/button choice now uses the gateway-only check, so it must land on
+    # prepaid_order with NO Confirm/Cancel buttons.
+    body_dict = payload()
+    body_dict["tags"] = "COD"  # app-writable tag present ...
+    body_dict["payment_gateway_names"] = ["Razorpay"]  # ... but NOT a COD gateway
+    body = json.dumps(body_dict).encode()
+    resp = await post(body, headers(body))
+    assert resp.status_code == 200
+    assert resp.json()["queued"] is True  # still pushed via is_eligible_for_push (tag match)
+    store = get_container().ingest
+    draft = store.outbound["order_created:gid://shopify/Order/1"]  # type: ignore[attr-defined]
+    params = json.loads(draft.payload_json)
+    assert params["template"] == "prepaid_order"
+    assert "buttons" not in params
+
+
 def _payload_with_product(gid: str = "gid://shopify/Order/img1") -> dict:
     p = payload(gid)
     p["line_items"] = [

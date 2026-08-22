@@ -1159,10 +1159,17 @@ def _template_applies_to_order(template_key: str, order: Order) -> bool:
     a mutation-safety gate; core/order_actions.py re-validates every button tap independently).
 
     Skip the Confirm/Cancel confirmation templates for an already-cancelled order, and skip the
-    shipped/delivered notices for an order with no fulfillments yet (nothing to report on). Uses
-    only the Order fields already in hand -- no extra Shopify call.
+    shipped/delivered notices for an order with no fulfillments yet (nothing to report on). Also
+    skip cod_confirmation (the ONLY template carrying live Confirm/Cancel buttons, per
+    template_catalog.has_confirm_cancel_buttons) for a non-COD order: resending it would emit an
+    order:cancel button to a customer whose prepaid order can never be cancelled. That gate uses
+    the gateway-only COD check (is_cod_by_gateway), same trust boundary as the cancel mutation
+    itself -- an app-writable "cod" tag must not unlock a cancel button (security review
+    2026-08-22). Uses only the Order fields already in hand -- no extra Shopify call.
     """
     if template_key in _CONFIRMATION_TEMPLATES and order.is_cancelled():
+        return False
+    if template_key == "cod_confirmation" and not order.is_cod_by_gateway():
         return False
     if template_key in _FULFILLMENT_TEMPLATES and not order.fulfillments:
         return False

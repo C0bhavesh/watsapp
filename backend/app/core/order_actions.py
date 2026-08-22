@@ -197,9 +197,10 @@ async def _handle_cancel_request(
     if order.is_cancelled():
         await _safe_send_text(c, cfg, event.wa_id, copy_for("already_cancelled", lang))
         return
-    if not order.is_cod():
+    if not order.is_cod_by_gateway():
         # Only Cash on Delivery orders are cancellable at all -- a prepaid order refuses here
-        # regardless of dispatch status (owner decision, 2026-08-21).
+        # regardless of dispatch status (owner decision, 2026-08-21). Trust ONLY Shopify's payment
+        # gateway, never the app-writable "cod" tag (is_cod_by_gateway; security review 2026-08-22).
         await _safe_send_text(c, cfg, event.wa_id, copy_for("cancel_not_available_prepaid", lang))
         return
     if _is_dispatched(order):
@@ -224,11 +225,12 @@ async def _handle_cancel_confirm(
     if order.is_cancelled():
         await _safe_send_text(c, cfg, event.wa_id, copy_for("already_cancelled", lang))
         return
-    if not order.is_cod():
+    if not order.is_cod_by_gateway():
         # Independent re-check, same as _handle_cancel_request: a prepaid order must never be
         # cancelled even if a confirm-tap payload somehow reached this handler directly (owner
         # decision, 2026-08-21). This is the actual mutation gate -- the check here is the one
-        # that matters most.
+        # that matters most, so it too trusts ONLY Shopify's payment gateway, never the
+        # app-writable "cod" tag (is_cod_by_gateway; security review 2026-08-22).
         await _safe_send_text(c, cfg, event.wa_id, copy_for("cancel_not_available_prepaid", lang))
         return
     if _is_dispatched(order):

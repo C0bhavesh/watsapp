@@ -147,6 +147,27 @@ async def test_prepaid_undispatched_order_is_not_cancel_eligible() -> None:
     assert "cancel eligible: False" in system_msg.content
 
 
+async def test_prepaid_order_with_cod_tag_is_not_cancel_eligible() -> None:
+    """Hardening (security review, 2026-08-22): the cancel-eligibility gate trusts ONLY the
+    payment gateway, never an app-writable 'cod' tag. A genuinely prepaid order that also carries
+    a 'cod' tag must still read as not cancel-eligible -- the tag alone must not unlock cancel."""
+    provider = _CapturingProvider(text='{"reply": "Let me check."}')
+    order = AuthorizedOrder(
+        order=_order(
+            "tavas1", "+919999999999", fulfillment_status="UNFULFILLED",
+            payment_gateway_names=(),  # prepaid gateway...
+            tags=("cod",),  # ...but an app-writable "cod" tag is present
+        ),
+        verified_phone="+919999999999",
+    )
+    await run(_context(provider, "can i cancel my order", [order]))
+
+    assert provider.captured_messages is not None
+    system_msg = next((m for m in provider.captured_messages if m.role == "system"), None)
+    assert system_msg is not None
+    assert "cancel eligible: False" in system_msg.content
+
+
 async def test_fulfilled_order_is_not_cancel_eligible() -> None:
     """Verify FULFILLED orders marked as not cancel-eligible (dispatched)."""
     provider = _CapturingProvider(text='{"reply": "Too late to cancel."}')

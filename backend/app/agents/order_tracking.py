@@ -89,15 +89,16 @@ def _line_item_line(item: LineItem) -> str:
 def _is_cancel_eligible(order: AuthorizedOrder) -> bool:
     """Check if an order is eligible for cancellation.
 
-    An order is cancel-eligible only if it is a Cash on Delivery order, is not already
-    cancelled, AND has not yet been dispatched. Prepaid orders are never cancel-eligible,
-    regardless of dispatch status (owner decision, 2026-08-21) -- COD is the only payment
-    method this store allows a customer to cancel. fulfillment_status is the closest
+    An order is cancel-eligible only if it is a Cash on Delivery order (by Shopify's OWN payment
+    gateway -- ``is_cod_by_gateway()``, NOT the app-writable "cod" tag; security review 2026-08-22),
+    is not already cancelled, AND has not yet been dispatched. Prepaid orders are never
+    cancel-eligible, regardless of dispatch status (owner decision, 2026-08-21) -- COD is the only
+    payment method this store allows a customer to cancel. fulfillment_status is the closest
     available signal to "has this shipped" without a live courier integration --
     UNFULFILLED/unset = not yet dispatched (cancel-eligible), anything else is treated
     as dispatched (not cancel-eligible).
     """
-    if not order.order.is_cod():
+    if not order.order.is_cod_by_gateway():
         return False
     if order.order.is_cancelled():
         return False

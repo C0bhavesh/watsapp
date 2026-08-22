@@ -334,6 +334,32 @@ async def test_cancel_refused_when_prepaid(master_key: str, sends: Sends) -> Non
     assert sends.last_text == copy_for("cancel_not_available_prepaid", "en")
 
 
+async def test_cancel_refused_when_prepaid_despite_cod_tag(
+    master_key: str, sends: Sends
+) -> None:
+    # Hardening (security review, 2026-08-22): the cancel gate trusts ONLY the payment gateway,
+    # never an app-writable "cod" tag. A prepaid order carrying a "cod" tag must still be refused --
+    # the tag alone must not unlock the irreversible cancel.
+    shopify = FakeShopify(order=_order(payment_gateway_names=(), tags=("cod",)))
+    c = await _container(master_key, shopify)
+    await dispatch_button(c, _button(f"order:cancel:{GID}"))
+    assert shopify.cancel_calls == []
+    assert sends.buttons == []
+    assert sends.last_text == copy_for("cancel_not_available_prepaid", "en")
+
+
+async def test_cancel_confirm_refused_when_prepaid_despite_cod_tag(
+    master_key: str, sends: Sends
+) -> None:
+    # Same hardening on the confirm handler (the actual mutation gate).
+    shopify = FakeShopify(order=_order(payment_gateway_names=(), tags=("cod",)))
+    c = await _container(master_key, shopify)
+    await dispatch_button(c, _interactive(f"order:cancel:confirm:{GID}"))
+    assert shopify.cancel_calls == []
+    assert shopify.add_tags_calls == []
+    assert sends.last_text == copy_for("cancel_not_available_prepaid", "en")
+
+
 async def test_cancel_confirm_refused_when_prepaid(master_key: str, sends: Sends) -> None:
     # Simulates a confirm-tap payload reaching the handler directly, even though the first-tap
     # handler would already refuse -- the confirm handler must independently refuse too (the

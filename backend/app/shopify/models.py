@@ -104,6 +104,19 @@ class Order:
             return True
         return any(t.strip().lower() == "cod" for t in self.tags)
 
+    def is_cod_by_gateway(self) -> bool:
+        """COD by Shopify's OWN payment gateway only -- deliberately ignores the "cod" tag.
+
+        Security-relevant: this gates the IRREVERSIBLE cancel mutation (and the admin resend of the
+        cancel-button template). Unlike ``is_cod()``, it trusts ONLY ``payment_gateway_names``,
+        which is Shopify-owned. The tag arm of ``is_cod()`` is written by this app's own
+        ``add_tags`` calls (validated only for length/count, not content) and by any third-party
+        app / Shopify Flow, so a stray "cod" tag on a genuinely prepaid order could otherwise flip
+        it "cancellable". Only Shopify's gateway data may unlock a cancel; ``is_cod()`` stays as-is
+        for lower-stakes display use (the "(Cash on Delivery)" note).
+        """
+        return any("cash on delivery" in g.lower() for g in self.payment_gateway_names)
+
     def is_cancelled(self) -> bool:
         return self.cancelled_at is not None
 

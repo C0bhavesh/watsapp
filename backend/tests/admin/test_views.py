@@ -1482,6 +1482,7 @@ def _seed_order_for_thread(
     order_name: str = "tavas5001", phone: str = "+919876500050",
     order_gid: str = "gid://shopify/Order/50001",
     cancelled_at: str | None = None, fulfilled: bool = False,
+    payment_gateway_names: list[str] | None = None,
 ) -> int:
     # NOTE: find_mirrored_orders_by_phone (used by both new endpoints) reads from the order
     # MIRROR (ingest.upsert_order_mirror), not from order_mappings -- ingest_order_created alone
@@ -1496,7 +1497,11 @@ def _seed_order_for_thread(
         "fulfillment_status": "fulfilled" if fulfilled else None,
         "cancelled_at": cancelled_at,
         "tags": "",
-        "payment_gateway_names": ["Cash on Delivery (COD)"],
+        "payment_gateway_names": (
+            payment_gateway_names
+            if payment_gateway_names is not None
+            else ["Cash on Delivery (COD)"]
+        ),
         "total_price": "999.00",
         "currency": "INR",
         "updated_at": "2026-08-19T10:00:00+05:30",
@@ -1567,6 +1572,34 @@ def test_list_templates_cancelled_order_excludes_confirmation_templates(
     assert "cod_confirmation" not in keys
     assert "prepaid_order" not in keys
     assert keys == {"order_shipped", "order_delivered"}
+
+
+def test_list_templates_prepaid_order_excludes_cod_confirmation(client: TestClient) -> None:
+    # Security review (2026-08-22): cod_confirmation is the only template carrying the live
+    # Confirm/Cancel buttons, so offering it for a PREPAID order would emit an order:cancel button
+    # to a customer whose order can never be cancelled. Gate it on the gateway-only COD check.
+    login(client)
+    thread_id = _seed_order_for_thread(
+        phone="+919876500062", payment_gateway_names=["Razorpay"],
+    )
+    resp = client.get(f"/admin/conversations/{thread_id}/templates")
+    assert resp.status_code == 200
+    keys = {t["key"] for t in resp.json()["orders"][0]["templates"]}
+    assert "cod_confirmation" not in keys
+    # prepaid_order (no buttons) still applies for a prepaid, unfulfilled order.
+    assert keys == {"prepaid_order"}
+
+
+def test_list_templates_cod_order_still_includes_cod_confirmation(client: TestClient) -> None:
+    # The gateway-only gate must NOT over-trim: a genuine COD order still offers cod_confirmation.
+    login(client)
+    thread_id = _seed_order_for_thread(
+        phone="+919876500063", payment_gateway_names=["Cash on Delivery (COD)"],
+    )
+    resp = client.get(f"/admin/conversations/{thread_id}/templates")
+    assert resp.status_code == 200
+    keys = {t["key"] for t in resp.json()["orders"][0]["templates"]}
+    assert "cod_confirmation" in keys
 
 
 def test_list_templates_unfulfilled_order_excludes_shipped_and_delivered(

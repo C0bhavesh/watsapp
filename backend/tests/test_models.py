@@ -47,6 +47,14 @@ def test_is_cod_via_gateway_and_tag() -> None:
     assert not make_order(payment_gateway_names=("Razorpay",), tags=("online",)).is_cod()
 
 
+def test_is_cod_by_gateway_trusts_only_the_gateway_not_the_tag() -> None:
+    # The cancel-mutation gate uses this gateway-only check: only Shopify's own payment_gateway_
+    # names count, never an app-writable "cod" tag (security review, 2026-08-22).
+    assert make_order(payment_gateway_names=("Cash on Delivery (COD)",)).is_cod_by_gateway()
+    assert not make_order(payment_gateway_names=(), tags=("COD", "Shopflo")).is_cod_by_gateway()
+    assert not make_order(payment_gateway_names=("Razorpay",), tags=("online",)).is_cod_by_gateway()
+
+
 def test_is_cancelled() -> None:
     assert make_order(cancelled_at="2026-07-28T00:00:00Z").is_cancelled()
     assert not make_order().is_cancelled()

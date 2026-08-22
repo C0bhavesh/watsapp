@@ -35,12 +35,13 @@ def _order(
     cancelled_at: str | None = None,
     fulfillment_status: str | None = None,
     locale: str | None = None,
+    payment_gateway_names: tuple[str, ...] = ("Cash on Delivery",),
 ) -> Order:
     return Order(
         gid=gid, name="tavas1", email=None, phone=phone, shipping_phone=None,
         billing_phone=None, financial_status=None, fulfillment_status=fulfillment_status,
-        cancelled_at=cancelled_at, tags=tags, payment_gateway_names=(), total=None,
-        customer_locale=locale,
+        cancelled_at=cancelled_at, tags=tags, payment_gateway_names=payment_gateway_names,
+        total=None, customer_locale=locale,
     )
 
 
@@ -322,6 +323,27 @@ async def test_cancel_refused_when_dispatched(master_key: str, sends: Sends) -> 
     assert shopify.cancel_calls == []
     assert sends.buttons == []
     assert sends.last_text == copy_for("cancel_too_late", "en")
+
+
+async def test_cancel_refused_when_prepaid(master_key: str, sends: Sends) -> None:
+    shopify = FakeShopify(order=_order(payment_gateway_names=()))  # prepaid, undispatched
+    c = await _container(master_key, shopify)
+    await dispatch_button(c, _button(f"order:cancel:{GID}"))
+    assert shopify.cancel_calls == []
+    assert sends.buttons == []  # never offers the "are you sure?" Confirm/Cancel buttons
+    assert sends.last_text == copy_for("cancel_not_available_prepaid", "en")
+
+
+async def test_cancel_confirm_refused_when_prepaid(master_key: str, sends: Sends) -> None:
+    # Simulates a confirm-tap payload reaching the handler directly, even though the first-tap
+    # handler would already refuse -- the confirm handler must independently refuse too (the
+    # same defense-in-depth already used for the dispatched check).
+    shopify = FakeShopify(order=_order(payment_gateway_names=()))  # prepaid, undispatched
+    c = await _container(master_key, shopify)
+    await dispatch_button(c, _interactive(f"order:cancel:confirm:{GID}"))
+    assert shopify.cancel_calls == []
+    assert shopify.add_tags_calls == []
+    assert sends.last_text == copy_for("cancel_not_available_prepaid", "en")
 
 
 async def test_cancel_confirm_cancels_tags_and_status(master_key: str, sends: Sends) -> None:

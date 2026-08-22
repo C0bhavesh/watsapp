@@ -197,6 +197,11 @@ async def _handle_cancel_request(
     if order.is_cancelled():
         await _safe_send_text(c, cfg, event.wa_id, copy_for("already_cancelled", lang))
         return
+    if not order.is_cod():
+        # Only Cash on Delivery orders are cancellable at all -- a prepaid order refuses here
+        # regardless of dispatch status (owner decision, 2026-08-21).
+        await _safe_send_text(c, cfg, event.wa_id, copy_for("cancel_not_available_prepaid", lang))
+        return
     if _is_dispatched(order):
         # Cancel-before-dispatch only: a shipped order cannot be cancelled here (handoff).
         await _safe_send_text(c, cfg, event.wa_id, copy_for("cancel_too_late", lang))
@@ -218,6 +223,13 @@ async def _handle_cancel_confirm(
     order = auth.order
     if order.is_cancelled():
         await _safe_send_text(c, cfg, event.wa_id, copy_for("already_cancelled", lang))
+        return
+    if not order.is_cod():
+        # Independent re-check, same as _handle_cancel_request: a prepaid order must never be
+        # cancelled even if a confirm-tap payload somehow reached this handler directly (owner
+        # decision, 2026-08-21). This is the actual mutation gate -- the check here is the one
+        # that matters most.
+        await _safe_send_text(c, cfg, event.wa_id, copy_for("cancel_not_available_prepaid", lang))
         return
     if _is_dispatched(order):
         await _safe_send_text(c, cfg, event.wa_id, copy_for("cancel_too_late", lang))

@@ -207,8 +207,9 @@
     open — so this GET is not read-only/idempotent-safe to prefetch or blindly retry; a reviewer
     flagged this explicitly as worth documenting so no future caller adds prefetch/speculative-retry
     logic against this endpoint without knowing it silently clears the unread badge.
-  - `chats.html`/`chats.js` gained a filter-chip row (`All`/`Unread`/`Handed to human`, single-
-    select) AND-combined with the existing thread-search box, plus a per-thread unread-count badge
+  - `chats.html`/`chats.js` gained a filter-chip row (single-select, labels since shortened to
+    `All`/`Unread`/`Human`/`Unexchanged`/`Exchanged` on 2026-08-22, each carrying a live match-count
+    badge) AND-combined with the existing thread-search box, plus a per-thread unread-count badge
     — see component_registry.md's "Admin chat page — unread badge + filter chips" entry.
   - **Required schema migration** (not yet run in production — see `_pipeline_status.md`
     CHECKPOINT): `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS last_read_at timestamptz NOT

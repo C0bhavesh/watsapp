@@ -610,9 +610,9 @@ async function loadThread(threadId, phone, silent = false) {
 const FILTERS = [
   { id: "all", label: "All", predicate: () => true },
   { id: "unread", label: "Unread", predicate: (t) => (t.unread_count || 0) > 0 },
-  { id: "handoff", label: "Handed to human", predicate: (t) => !!t.ai_paused },
-  { id: "exchange_unprocessed", label: "Unprocessed Exchange", predicate: (t) => !!t.exchange_unprocessed },
-  { id: "exchange_processed", label: "Processed Exchange", predicate: (t) => !!t.exchange_processed },
+  { id: "handoff", label: "Human", predicate: (t) => !!t.ai_paused },
+  { id: "exchange_unprocessed", label: "Unexchanged", predicate: (t) => !!t.exchange_unprocessed },
+  { id: "exchange_processed", label: "Exchanged", predicate: (t) => !!t.exchange_processed },
 ];
 let activeFilterId = "all";
 
@@ -622,7 +622,11 @@ function renderFilterChips() {
   for (const f of FILTERS) {
     const btn = document.createElement("button");
     btn.className = "filter-chip" + (f.id === activeFilterId ? " active" : "");
-    btn.textContent = f.label;
+    // Count how many CURRENTLY LOADED threads match this chip (recomputed on every render, since
+    // allThreads grows as pages/polls arrive). "All" never shows a count; a 0 count shows the plain
+    // label with no number (matching WhatsApp's own filter chips).
+    const count = f.id === "all" ? 0 : allThreads.filter(f.predicate).length;
+    btn.textContent = count > 0 ? f.label + " " + count : f.label;
     btn.addEventListener("click", () => {
       activeFilterId = f.id;
       renderFilterChips();
@@ -717,6 +721,7 @@ async function loadThreadList() {
     nextCursor = body.next_cursor;
     hasMore = body.has_more;
     renderThreadRows(applyThreadFilters(allThreads));
+    renderFilterChips();
     updateLoadOlderButton();
     listSnapshotKey = threadListKey(body.threads);
     el("list-status").textContent = "";
@@ -754,6 +759,7 @@ async function loadOlderThreads() {
       if (!hasMore || nextCursor === null) break;
     }
     renderThreadRows(applyThreadFilters(allThreads));
+    renderFilterChips();
   } catch (e) {
     el("list-status").textContent = e.message;
   } finally {
@@ -771,6 +777,7 @@ async function refreshFirstPage() {
   allThreads = mergeThreads(allThreads, body.threads);
   listSnapshotKey = threadListKey(body.threads);
   renderThreadRows(applyThreadFilters(allThreads));
+  renderFilterChips();
   el("list-status").textContent = "";
 }
 
@@ -873,6 +880,7 @@ async function pollTick() {
       allThreads = mergeThreads(allThreads, body.threads);
       listSnapshotKey = nextListKey;
       renderThreadRows(applyThreadFilters(allThreads));
+      renderFilterChips();
     }
     if (currentThreadId !== null) {
       const data = await api("/admin/conversations/" + encodeURIComponent(currentThreadId));

@@ -138,6 +138,24 @@ _COPY: Final[dict[str, dict[str, str]]] = {
         "hinglish": "Yeh order pehle se cancel ho chuka hai. Kuch aur karne ki zaroorat nahi hai.",
         "gu": "આ ઓર્ડર પહેલેથી જ કેન્સલ થઈ ગયો છે. હવે બીજું કંઈ કરવાની જરૂર નથી.",
     },
+    "cancel_not_available_prepaid": {
+        "en": (
+            "This order was prepaid, so it can't be cancelled once placed. "
+            "Please contact our support team for help."
+        ),
+        "hi": (
+            "यह ऑर्डर प्रीपेड था, इसलिए इसे ऑर्डर देने के बाद कैंसल नहीं किया जा सकता। "
+            "कृपया सहायता के लिए हमारी टीम से संपर्क करें।"
+        ),
+        "hinglish": (
+            "Yeh order prepaid tha, isliye order place hone ke baad ise cancel nahi kar sakte. "
+            "Please help ke liye hamari team se baat karein."
+        ),
+        "gu": (
+            "આ ઓર્ડર પ્રીપેડ હતો, તેથી ઓર્ડર આપ્યા પછી તેને કેન્સલ કરી શકાતો નથી. "
+            "કૃપા કરીને મદદ માટે અમારી ટીમનો સંપર્ક કરો."
+        ),
+    },
     "cancel_failed": {
         "en": (
             "We could not cancel your order just now. "

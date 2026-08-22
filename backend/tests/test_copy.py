@@ -22,6 +22,7 @@ PHASE5_KEYS = (
     "cancel_kept",
     "cancel_too_late",
     "already_cancelled",
+    "cancel_not_available_prepaid",
     "cancel_failed",
     "not_found",
 )

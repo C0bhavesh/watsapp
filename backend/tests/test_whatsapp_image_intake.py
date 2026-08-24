@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from app.channels.whatsapp_config import WhatsAppConfig
@@ -190,3 +192,86 @@ async def test_handle_inbound_image_description_only_when_no_caption(
 
     assert "white sneakers" in result.text
     assert "could not be processed" not in result.text
+
+
+async def test_handle_inbound_image_wall_clock_timeout_cuts_off_a_stuck_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow/hung fetch_media must not blow past the wall-clock cap even though each
+    individual httpx call also carries its own (independent) per-operation timeout -- proves
+    the asyncio.wait_for wrapper, not just the per-call timeout= kwarg, is what actually bounds
+    this function's total running time (error_learnings.md, 2026-08-14)."""
+    from app.channels import whatsapp_image_intake as intake
+
+    async def stuck_fetch_media(http, cfg, media_id, timeout=20.0):
+        await asyncio.sleep(10)
+        # unreachable within the 6.0s wait_for cap -- proves the wrapper cut it off before here
+        return intake.FetchedMedia(bytes=b"never-reached", mime_type="image/jpeg")
+
+    monkeypatch.setattr(intake, "fetch_media", stuck_fetch_media)
+
+    c = get_container()
+    event = InboundImage(
+        message_id="wamid.IMG7", wa_id="919664290413", media_id="MEDIA7",
+        mime_type="image/jpeg", caption="still there?", timestamp="1700000000",
+    )
+    # budget_seconds=6.0 -> call_timeout = min(15, 6/3) = 2.0 (clears the >=2.0 floor, so the
+    # sequence IS attempted) -> the wait_for wall-clock cap is call_timeout * 3 = 6.0s, well
+    # under stuck_fetch_media's 10s sleep.
+    result = await handle_inbound_image(c, _CFG, event, 6.0)
+
+    assert result.text.strip() == "still there?"
+    assert await c.ingest.find_inbound_images_by_phone("+919664290413") == []
+
+
+async def test_handle_inbound_image_skips_network_when_budget_too_low(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.channels import whatsapp_image_intake as intake
+
+    called = False
+
+    async def unexpected_fetch_media(http, cfg, media_id, timeout=20.0):
+        nonlocal called
+        called = True
+        return None
+
+    monkeypatch.setattr(intake, "fetch_media", unexpected_fetch_media)
+
+    c = get_container()
+    event = InboundImage(
+        message_id="wamid.IMG8", wa_id="919664290413", media_id="MEDIA8",
+        mime_type="image/jpeg", caption="quick question", timestamp="1700000000",
+    )
+    # budget_seconds=3.0 -> call_timeout = min(15, 3/3) = 1.0 < 2.0 floor -> fetch_media must
+    # never even be attempted.
+    result = await handle_inbound_image(c, _CFG, event, 3.0)
+
+    assert called is False
+    assert result.text.strip() == "quick question"
+    assert await c.ingest.find_inbound_images_by_phone("+919664290413") == []
+
+
+async def test_handle_inbound_image_unnormalizable_wa_id_skips_storage_and_vision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.channels import whatsapp_image_intake as intake
+
+    called = False
+
+    async def unexpected_fetch_media(http, cfg, media_id, timeout=20.0):
+        nonlocal called
+        called = True
+        return None
+
+    monkeypatch.setattr(intake, "fetch_media", unexpected_fetch_media)
+
+    c = get_container()
+    event = InboundImage(
+        message_id="wamid.IMG9", wa_id="123", media_id="MEDIA9",
+        mime_type="image/jpeg", caption="hi", timestamp="1700000000",
+    )
+    result = await handle_inbound_image(c, _CFG, event, 30.0)
+
+    assert called is False
+    assert result.text.strip() == "hi"

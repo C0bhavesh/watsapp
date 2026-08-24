@@ -2269,3 +2269,48 @@ async def test_post_image_event_calls_handle_inbound_image_then_run_turn(
     # LLM, not just that some turn ran.
     assert any("[Photo — appears to show:" in (m.content or "") for m in provider.calls[0])
     assert sent["body"] == "That hoodie is Rs. 1499, in stock in M/L."
+
+
+async def test_post_image_event_budget_exhausted_by_intake_skips_run_turn_but_still_acks_200(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Mirrors test_post_batch_stops_running_turns_once_the_request_budget_is_spent's technique
+    (shrink TURN_TIMEOUT_SECONDS, let a fake sleep briefly to burn it): here the image-intake
+    step itself is what spends the whole per-delivery budget, so run_turn must never be called
+    afterward -- the message is still deduped/acked 200, matching the InboundText branch's own
+    before/after budget re-check."""
+    from app.channels.whatsapp_inbound import InboundText
+
+    run_turn_calls: list[str] = []
+
+    async def slow_handle_inbound_image(c, cfg, event, budget_seconds):
+        await asyncio.sleep(0.06)
+        return InboundText(
+            message_id=event.message_id, wa_id=event.wa_id,
+            text="anything", timestamp=event.timestamp,
+        )
+
+    async def spy_run_turn(c, event, budget_seconds=None):
+        run_turn_calls.append(event.message_id)
+
+    monkeypatch.setattr("app.channels.whatsapp.handle_inbound_image", slow_handle_inbound_image)
+    monkeypatch.setattr("app.channels.whatsapp.run_turn", spy_run_turn)
+    monkeypatch.setattr("app.channels.whatsapp.TURN_TIMEOUT_SECONDS", 0.05)
+
+    body = json.dumps(
+        envelope({
+            "from": "919999999999",
+            "id": "wamid.imgbudget1",
+            "timestamp": "1",
+            "type": "image",
+            "image": {"id": "MEDIA1", "mime_type": "image/jpeg", "caption": "hi"},
+        })
+    ).encode()
+
+    with caplog.at_level(logging.WARNING, logger="app.channels.whatsapp"):
+        resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    assert resp.json()["processed"] == 1  # still deduped and acked
+    assert run_turn_calls == []  # budget was spent by intake itself, before run_turn could fire
+    assert "budget spent after image intake" in caplog.text

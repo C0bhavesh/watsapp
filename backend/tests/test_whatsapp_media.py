@@ -74,3 +74,78 @@ async def test_fetch_media_returns_none_on_media_lookup_404() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         result = await fetch_media(http, CFG, "MEDIA123")
     assert result is None
+
+
+async def test_fetch_media_returns_none_on_resolve_network_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await fetch_media(http, CFG, "MEDIA123")
+    assert result is None
+
+
+async def test_fetch_media_returns_none_on_download_network_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://graph.facebook.com/v23.0/MEDIA123":
+            return httpx.Response(200, json={
+                "url": "https://lookaside.fbsbx.com/x",
+                "mime_type": "image/jpeg",
+            })
+        raise httpx.ReadError("connection reset")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await fetch_media(http, CFG, "MEDIA123")
+    assert result is None
+
+
+async def test_fetch_media_returns_none_on_malformed_json() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://graph.facebook.com/v23.0/MEDIA123":
+            return httpx.Response(200, content=b"not json")
+        return httpx.Response(404)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await fetch_media(http, CFG, "MEDIA123")
+    assert result is None
+
+
+async def test_fetch_media_returns_none_on_non_dict_json() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://graph.facebook.com/v23.0/MEDIA123":
+            return httpx.Response(200, json=["a", "list"])
+        return httpx.Response(404)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await fetch_media(http, CFG, "MEDIA123")
+    assert result is None
+
+
+async def test_fetch_media_returns_none_on_missing_url_field() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://graph.facebook.com/v23.0/MEDIA123":
+            return httpx.Response(200, json={"mime_type": "image/jpeg"})
+        return httpx.Response(404)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await fetch_media(http, CFG, "MEDIA123")
+    assert result is None
+
+
+async def test_fetch_media_returns_none_on_url_wrong_type() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://graph.facebook.com/v23.0/MEDIA123":
+            return httpx.Response(200, json={
+                "url": 123,
+                "mime_type": "image/jpeg",
+            })
+        return httpx.Response(404)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await fetch_media(http, CFG, "MEDIA123")
+    assert result is None
+
+
+async def test_fetch_media_returns_none_on_download_non_200() -> None:
+    transport = _transport(
+        {"url": "https://lookaside.fbsbx.com/x", "mime_type": "image/jpeg"},
+        b"data",
+        download_status=500,
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        result = await fetch_media(http, CFG, "MEDIA123")
+    assert result is None

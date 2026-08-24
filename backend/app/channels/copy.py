@@ -32,23 +32,6 @@ _COPY: Final[dict[str, dict[str, str]]] = {
         "hinglish": "Aapke request par order cancel kar diya gaya hai.",
         "gu": "તમારી વિનંતી મુજબ તમારો ઓર્ડર કેન્સલ કરવામાં આવ્યો છે.",
     },
-    "order_not_found": {
-        "en": (
-            "We could not find an order linked to this number. "
-            "Could you share your order number?"
-        ),
-        "hi": "इस नंबर से जुड़ा कोई ऑर्डर नहीं मिला। कृपया अपना ऑर्डर नंबर बताएं।",
-        "hinglish": "Is number se koi order nahi mila. Please apna order number bataiye.",
-        "gu": "આ નંબર સાથે જોડાયેલો કોઈ ઓર્ડર મળ્યો નથી. કૃપા કરીને તમારો ઓર્ડર નંબર જણાવો.",
-    },
-    "refusal_other_order": {
-        "en": "This order is not linked to your number, so we cannot share its details.",
-        "hi": "यह ऑर्डर आपके नंबर से जुड़ा नहीं है, इसलिए हम इसकी जानकारी साझा नहीं कर सकते।",
-        "hinglish": (
-            "Yeh order aapke number se linked nahi hai, isliye hum details share nahi kar sakte."
-        ),
-        "gu": "આ ઓર્ડર તમારા નંબર સાથે જોડાયેલો નથી, તેથી અમે તેની વિગતો શેર કરી શકતા નથી.",
-    },
     "error_fallback": {
         "en": (
             "Something went wrong on our end. Please try again shortly, "

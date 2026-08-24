@@ -6,8 +6,6 @@ KEYS = (
     "order_confirmed",
     "cancel_confirm_prompt",
     "order_cancelled",
-    "order_not_found",
-    "refusal_other_order",
     "error_fallback",
 )
 
@@ -53,6 +51,16 @@ def test_unsupported_language_falls_back_to_english() -> None:
 def test_unknown_key_raises() -> None:
     with pytest.raises(KeyError):
         copy_for("no_such_key", "en")
+
+
+@pytest.mark.parametrize("key", ("order_not_found", "refusal_other_order"))
+def test_deleted_dead_copy_keys_raise(key: str) -> None:
+    """order_not_found / refusal_other_order were dead code -- copy_for() keys with zero call
+    sites anywhere in backend/app/ (confirmed 2026-08-23) -- removed as part of the
+    unmatched-order-number fix, which needed no copy_for() usage since this reply path is
+    LLM-composed for multi-language warmth, not a fixed-string send."""
+    with pytest.raises(KeyError):
+        copy_for(key, "en")
 
 
 def test_no_emojis_in_any_copy() -> None:

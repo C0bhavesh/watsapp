@@ -30,6 +30,12 @@ _SYSTEM_TEMPLATE = """{personality}
 The customer's message didn't clearly match order tracking, product search, policy, or
 recommendations -- help with greetings, small talk, or general questions as best you can.
 
+Relevant store policy/FAQ information, if any of it applies to this conversation:
+{faq}
+
+Store information:
+{business}
+
 You get ONE attempt. If you cannot genuinely resolve what the customer needs -- or if they
 ask to speak to a person, in any language -- do not try to persuade them to stay with you:
 set "handoff" to true and a teammate will take over this same chat.
@@ -60,7 +66,11 @@ async def run(context: AgentContext) -> AgentReply:
     if _wants_human(context.user_text):
         return AgentReply(text=HANDOFF_MESSAGE, handoff=True)
 
-    system_prompt = _SYSTEM_TEMPLATE.format(personality=personality_for(context))
+    system_prompt = _SYSTEM_TEMPLATE.format(
+        personality=personality_for(context),
+        faq=context.knowledge.get("faq", ""),
+        business=context.knowledge.get("business", ""),
+    )
     messages = [
         Message(role="system", content=system_prompt),
         *context.history,

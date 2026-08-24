@@ -33,11 +33,15 @@ follow-up continuing an order conversation ("delivery", "when will it arrive", "
 "any time") belongs here, NOT policy.
 - product_search: asking whether a specific product/item/size/color is available, or to \
 find something specific.
-- policy: asking about GENERAL store policy in the abstract -- return, exchange, or refund \
-rules, COD availability, shipping charges, or whether the store ships to a place. This is for \
-policy questions with no specific order in mind -- never the delivery timing of an order the \
-customer has already placed (that is order_tracking), and never a customer who actually wants \
-to exchange something from an order they placed (that is `exchange`).
+- policy: asking about GENERAL store policy -- return, exchange, or refund rules, COD \
+availability, shipping charges, or whether the store ships to a place -- OR a customer stating \
+they want to return an item with NO mention of damage/defect/wrong item (the store's answer to \
+"I want to return this" IS the return policy itself: this bot does not process returns, only \
+states whether one is possible). Never the delivery timing of an order the customer has already \
+placed (that is order_tracking), never a customer who actually wants to exchange something from \
+an order they placed for a different size (that is `exchange`), and never a report that an item \
+arrived damaged, defective, or wrong (that is customer_support, since checking that needs \
+photo/video proof this bot cannot yet collect).
 - recommendations: asking what to buy, what goes well with something, or for suggestions or \
 outfit ideas.
 - exchange: the customer wants to actually exchange an item from THEIR OWN order for a \

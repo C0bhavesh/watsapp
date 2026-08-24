@@ -183,6 +183,20 @@ async def test_system_prompt_matches_bare_or_statement_messages_to_covered_faq_t
     assert "only when the topic is genuinely not covered" in system_prompt
 
 
+async def test_system_prompt_asks_the_damage_clarifying_question_for_return_answers() -> None:
+    """Bug fix: when the answer is about the return policy, the model must be told to ask
+    whether the item is damaged, defective, or incorrect after stating the policy -- this is
+    what lets a follow-up damage confirmation route to customer_support/escalation. It must
+    also be told not to offer to look up the order or process the return itself, and that this
+    stays a normal reply (handoff false)."""
+    provider = _CapturingProvider('{"reply": "Sure.", "handoff": false}')
+    await run(_context(provider, "Need to return this please", {"faq": "[]", "business": "{}"}))
+    assert provider.captured_messages is not None
+    system_prompt = provider.captured_messages[0].content
+    assert "damaged, defective, or incorrect" in system_prompt
+    assert 'keep "handoff" false' in system_prompt
+
+
 async def test_system_prompt_reconciles_email_case_with_the_appended_handoff_contract() -> None:
     """The shared HANDOFF_JSON_CONTRACT is appended AFTER policy.py's own instructions and tells
     the model to set handoff true when it "genuinely cannot answer or resolve their request". An

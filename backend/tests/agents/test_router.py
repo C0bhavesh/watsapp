@@ -31,6 +31,61 @@ async def test_classify_intent_policy() -> None:
     assert result == "policy"
 
 
+async def test_classify_intent_actionable_return_request_routes_to_policy() -> None:
+    """A customer stating they want to return an item, with no mention of damage/defect/wrong
+    item, must route to policy (the store's answer IS the return policy itself) -- not fall
+    through to customer_support, which has no way to state the policy (bug fix)."""
+    provider = _FixedProvider(text='{"intent": "policy"}')
+    result = await classify_intent(provider, "m", "k", "Need to return this please")
+    assert result == "policy"
+
+
+async def test_classify_intent_hinglish_return_request_routes_to_policy() -> None:
+    provider = _FixedProvider(text='{"intent": "policy"}')
+    result = await classify_intent(provider, "m", "k", "return karna hai")
+    assert result == "policy"
+
+
+async def test_classify_intent_damage_report_still_routes_to_customer_support() -> None:
+    """Regression guard: a damage/defect/wrong-item report must still route to
+    customer_support, not be swept into the widened policy bullet."""
+    provider = _FixedProvider(text='{"intent": "customer_support"}')
+    result = await classify_intent(provider, "m", "k", "my order arrived damaged")
+    assert result == "customer_support"
+
+
+async def test_classify_intent_size_exchange_request_still_routes_to_exchange() -> None:
+    """Regression guard: an actual size-exchange request on the customer's own order must
+    still route to exchange, not be swept into the widened policy bullet."""
+    provider = _FixedProvider(text='{"intent": "exchange"}')
+    result = await classify_intent(provider, "m", "k", "I want to exchange this for a large size")
+    assert result == "exchange"
+
+
+async def test_classify_intent_damage_confirmation_after_policy_question_routes_to_customer_support() -> None:  # noqa: E501
+    """Second half of the fix: once the bot has asked whether the item is damaged/defective/
+    incorrect, a customer confirming damage on their next message must route to
+    customer_support (existing exchange-bullet exclusion + existing 2-message history window --
+    verified here, not assumed)."""
+    from app.providers.base import Message
+
+    history = [
+        Message(role="user", content="Need to return this please"),
+        Message(
+            role="assistant",
+            content=(
+                "We only accept returns if an item arrives damaged, defective, or incorrect. "
+                "Is your item damaged, defective, or incorrect?"
+            ),
+        ),
+    ]
+    provider = _FixedProvider(text='{"intent": "customer_support"}')
+    result = await classify_intent(
+        provider, "m", "k", "yes it's damaged", history=history
+    )
+    assert result == "customer_support"
+
+
 async def test_classify_intent_recommendations() -> None:
     provider = _FixedProvider(text='{"intent": "recommendations"}')
     result = await classify_intent(provider, "m", "k", "what goes well with a red kurti")
@@ -165,6 +220,23 @@ def test_router_prompt_policy_no_longer_claims_actual_exchange_requests() -> Non
     policy_bullet_start = _ROUTER_PROMPT.index("- policy:")
     exchange_intent_mention = _ROUTER_PROMPT.index("that is `exchange`")
     assert policy_bullet_start < exchange_intent_mention
+
+
+def test_router_prompt_widens_policy_to_actionable_return_requests() -> None:
+    """The bug fix: the policy bullet must also cover a customer stating they want to return an
+    item with no mention of damage/defect/wrong item (the store's answer IS the return policy
+    itself), while still excluding damage/defect/wrong-item reports (customer_support owns
+    those) and actual size-exchange requests (exchange owns those)."""
+    from app.agents.router import _ROUTER_PROMPT
+
+    policy_bullet_start = _ROUTER_PROMPT.index("- policy:")
+    next_bullet_start = _ROUTER_PROMPT.index("- recommendations:")
+    policy_bullet = _ROUTER_PROMPT[policy_bullet_start:next_bullet_start]
+    assert "want to return an item" in policy_bullet
+    assert "damage/defect/wrong item" in policy_bullet.lower()
+    assert "damaged, defective, or wrong" in policy_bullet
+    assert "customer_support" in policy_bullet
+    assert "different size" in policy_bullet
 
 
 def test_router_prompt_exchange_covers_status_questions_not_order_tracking() -> None:

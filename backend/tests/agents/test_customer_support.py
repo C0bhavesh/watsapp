@@ -26,7 +26,29 @@ class _FixedProvider:
         return CompletionResult(text=self._text or "", model=model)
 
 
-def _context(provider: _FixedProvider, user_text: str) -> AgentContext:
+class _CapturingProvider:
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self.captured_messages: list[Message] | None = None
+
+    async def complete(
+        self,
+        model: str,
+        messages: list[Message],
+        api_key: str,
+        timeout: float,
+        *,
+        extra_params: dict[str, object] | None = None,
+    ) -> CompletionResult:
+        self.captured_messages = messages
+        return CompletionResult(text=self._text, model=model)
+
+
+def _context(
+    provider: _FixedProvider | _CapturingProvider,
+    user_text: str,
+    knowledge: dict[str, str] | None = None,
+) -> AgentContext:
     return AgentContext(
         wa_id="919999999999",
         phone_e164="+919999999999",
@@ -34,7 +56,7 @@ def _context(provider: _FixedProvider, user_text: str) -> AgentContext:
         history=[],
         orders=[],
         is_vip=False,
-        knowledge={},
+        knowledge=knowledge or {},
         provider=provider,
         model="m",
         api_key="k",
@@ -100,3 +122,20 @@ async def test_safe_fallback_degradation_also_triggers_handoff() -> None:
     result = await run(_context(provider, "hi"))
     assert result.handoff is True
     assert HANDOFF_MESSAGE in result.text
+
+
+async def test_run_renders_knowledge_in_system_prompt() -> None:
+    """Defensive fix: customer_support must carry the same faq/business knowledge slot policy.py
+    already has, so a future router miss on a policy-adjacent message doesn't strip policy
+    content again (mirrors test_policy.py::test_run_renders_knowledge_in_system_prompt)."""
+    faq_content = '[{"q": "What is the return policy?", "a": "Returns accepted within 30 days."}]'
+    business_content = '{"store_name": "Thetavas", "return_window": "30 days"}'
+    knowledge = {"faq": faq_content, "business": business_content}
+    provider = _CapturingProvider('{"reply": "Our return window is 30 days.", "handoff": false}')
+    await run(_context(provider, "can I return items", knowledge))
+
+    assert provider.captured_messages is not None
+    system_message = provider.captured_messages[0]
+    assert system_message.role == "system"
+    assert faq_content in system_message.content
+    assert business_content in system_message.content

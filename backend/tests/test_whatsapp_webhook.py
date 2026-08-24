@@ -2209,3 +2209,60 @@ async def test_post_text_event_threads_history_into_router_classification(
     contents = [m.content for m in router_messages]
     assert "can u tell me my order detail" in contents
     assert "Could you please share your order number?" in contents
+
+
+async def test_post_image_event_calls_handle_inbound_image_then_run_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.channels.whatsapp_inbound import InboundText
+
+    async def fake_handle_inbound_image(c, cfg, event):
+        assert event.media_id == "MEDIA1"
+        return InboundText(
+            message_id=event.message_id, wa_id=event.wa_id,
+            text="what's the price? [Photo — appears to show: a black hoodie]",
+            timestamp=event.timestamp,
+        )
+
+    monkeypatch.setattr("app.channels.whatsapp.handle_inbound_image", fake_handle_inbound_image)
+
+    sent: dict[str, object] = {}
+
+    async def fake_send_text(http, cfg, to, body, timeout=20.0):
+        from app.channels.whatsapp_sender import SendResult
+        sent["body"] = body
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+
+    provider = FakeProvider(
+        responses=[
+            json.dumps({"intent": "product_search"}),
+            json.dumps({"reply": "That hoodie is Rs. 1499, in stock in M/L."}),
+        ]
+    )
+    monkeypatch.setattr("app.core.conversation.active_llm", _fake_active_llm(provider))
+
+    from app.admin.controls import AdminControls, save_controls
+    from app.deps import get_container
+
+    await save_controls(get_container().config, AdminControls(send_mode="live"))
+
+    body = json.dumps(
+        envelope({
+            "from": "919999999999",
+            "id": "wamid.img1",
+            "timestamp": "1",
+            "type": "image",
+            "image": {"id": "MEDIA1", "mime_type": "image/jpeg", "caption": "what's the price?"},
+        })
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    # results[] reports the ORIGINAL parsed event's type (InboundImage), not the synthesized
+    # InboundText run_turn actually received -- matching receive_webhook's existing behavior of
+    # reporting on `event`, never the downstream-transformed value.
+    assert resp.json()["results"][0]["event_type"] == "InboundImage"
+    assert len(provider.calls) == 2  # router classify + product_search's own completion
+    assert sent["body"] == "That hoodie is Rs. 1499, in stock in M/L."

@@ -8,8 +8,10 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from app.channels.whatsapp_config import load_whatsapp_config
+from app.channels.whatsapp_image_intake import handle_inbound_image
 from app.channels.whatsapp_inbound import (
     InboundButton,
+    InboundImage,
     InboundInteractive,
     InboundText,
     extract_events,
@@ -154,6 +156,17 @@ async def receive_webhook(request: Request) -> Response:
                     )
                 else:
                     await run_turn(c, event, budget_seconds=remaining)
+            elif isinstance(event, InboundImage):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning(
+                        "request budget spent; skipping image turn for %s remaining "
+                        "message(s) in this delivery",
+                        len(events) - processed + 1,
+                    )
+                else:
+                    synthesized = await handle_inbound_image(c, cfg, event)
+                    await run_turn(c, synthesized, budget_seconds=remaining)
             elif isinstance(event, (InboundButton, InboundInteractive)):
                 # Deterministic confirm/cancel dispatch (order:confirm/cancel -> tagsAdd/
                 # orderCancel). NO LLM. A tap is processed even for a paused/handed-off

@@ -175,7 +175,18 @@
   `Fulfillment.delivered_at`, which the mirror/webhook ingestion path never populates, so a
   mirror-served order would almost always wrongly read as "not delivered yet" even for a genuinely
   eligible customer. `context.exchange_requests` is a cheap DB-only `list_for_phone` read (no
-  mirror/live distinction applies to it).
+  mirror/live distinction applies to it). **Still true as of 2026-08-24, cross-reference:** the
+  router's `exchange` category text still explicitly excludes damaged/defective/wrong-item reports
+  ("checking those needs photo/video proof this bot cannot yet collect") — routing them to
+  `customer_support` instead. The 2026-08-24 inbound-image-product-lookup feature (see
+  `whatsapp_media.py`/`whatsapp_image_intake.py` entries) gave the bot GENERAL inbound-image
+  handling for the first time, but only for `product_search`-shaped questions (the image is
+  synthesized into text and flows through the ordinary intent router); it deliberately does NOT wire
+  a customer's photo into the exchange/damage-claim flow (owner-confirmed out of scope, per that
+  feature's design doc). A photo attached to a damage/exchange report today is described by vision
+  the same generic way as any other inbound photo, then routed by whatever the SYNTHESIZED TEXT
+  says — it does not specially trigger or unblock the exchange agent's damaged/defective path, which
+  still has no photo-evidence concept at all. This remains a real, still-open gap, not newly closed.
 
 ## Template catalog + default-value resolver (admin manual-resend, Task 1 of 3, 2026-08-19)
 - **File:** app/admin/template_catalog.py
@@ -427,6 +438,168 @@
   to `chats.html`'s existing `<style>` block (centered via `align-self: center` in the flex-column
   layout, muted WhatsApp-palette colors matching existing elements). Frontend verification
   (browser pass, manual) not yet performed.
+
+## fetch_media / FetchedMedia (inbound WhatsApp image download, 2026-08-24)
+- **File:** app/channels/whatsapp_media.py.
+- **Purpose:** resolve an inbound Meta media id (from a webhook `type:"image"` message) to raw bytes
+  + Meta's reported mime type, with an SSRF host-allowlist, mime-type allowlist, and size cap. Two
+  Bearer-authenticated Graph API calls (resolve media_id -> short-lived download URL + mime_type,
+  then fetch the bytes from that URL).
+- **Public API:** `FetchedMedia(bytes: bytes, mime_type: str)` (frozen dataclass); `async def
+  fetch_media(http: httpx.AsyncClient, cfg: WhatsAppConfig, media_id: str, timeout: float = 20.0) ->
+  FetchedMedia | None`.
+- **Used in:** `app/channels/whatsapp_image_intake.py::_fetch_and_describe`.
+- **Notes:** never raises — every failure mode (network error, non-200, malformed JSON, wrong-typed
+  fields, disallowed mime type, untrusted download host, oversized body) degrades to `None`, same
+  "attacker/network input, never raise" posture as `whatsapp_inbound.py`. `_MAX_IMAGE_BYTES = 5 *
+  1024 * 1024` (WhatsApp's own inbound-image ceiling). `_ALLOWED_IMAGE_MIME_TYPES = {"image/jpeg",
+  "image/png", "image/webp"}` (WhatsApp's own supported inbound image types). `_is_trusted_meta_media_url`
+  requires `https` + a hostname ending in one of `_META_MEDIA_HOST_SUFFIXES = (".fbsbx.com",
+  ".fbcdn.net", ".facebook.com")` (dot-anchored suffix match, mirrors
+  `shopify/client.py::_is_shopify_image_url` — rejects a lookalike host like
+  `fbsbx.com.evil.com`) — defense-in-depth even though the URL comes from Meta's own Graph API
+  response, not directly from attacker-controlled webhook input (design doc's Safety section, citing
+  the 2026-08-15 "template header image URL is an SSRF-adjacent sink" precedent). `timeout` is a
+  bare float handed to httpx per call (two sequential calls here) — the CALLER
+  (`handle_inbound_image`) is responsible for a genuine wall-clock cap around the whole sequence
+  (see that entry's notes + error_learnings.md 2026-08-15/2026-08-24).
+
+## handle_inbound_image (inbound image -> synthesized InboundText, 2026-08-24)
+- **File:** app/channels/whatsapp_image_intake.py.
+- **Purpose:** the channel-boundary orchestrator that turns an inbound WhatsApp photo into a plain
+  `InboundText` so the EXISTING, UNCHANGED `core.conversation.run_turn()` pipeline (intent
+  classification, `product_search`'s grounded Shopify lookup, reply generation) handles a
+  photo-based product question exactly like a typed one — `core/`/`agents/` never learn images
+  exist. Design: `docs/superpowers/specs/2026-08-24-inbound-image-product-lookup-design.md`; plan:
+  `docs/superpowers/plans/2026-08-24-inbound-image-product-lookup.md`.
+- **Public API:** `async def handle_inbound_image(c: Container, cfg: WhatsAppConfig, event:
+  InboundImage, budget_seconds: float) -> InboundText` (never raises — every failure degrades to the
+  caption alone, or a fixed placeholder `"[Customer sent a photo, but it could not be processed]"`
+  if there is no caption either).
+- **Used in:** `app/channels/whatsapp.py`'s webhook message loop, at the same per-event dispatch seam
+  as `InboundText`/`InboundButton`/`InboundInteractive`; wraps the call in its own `try/except
+  Exception` (an infra failure outside `handle_inbound_image`'s own documented guarantees must still
+  never 500 the signed webhook — mirrors `dispatch_button`'s posture).
+- **Notes:** internal `_fetch_and_describe(c, cfg, event, phone, call_timeout) -> str | None` does
+  download (`whatsapp_media.fetch_media`) -> best-effort store (`c.ingest.save_inbound_image`,
+  wrapped in its own `try/except Exception: logger.warning(...)` — a storage failure never blocks
+  the vision call) -> vision describe (`active_llm` then `provider.describe_image(...)`, wrapped in
+  `except ProviderError: logger.warning(...)` — **NOT `.exception()`**, see error_learnings.md
+  2026-08-24 "`raise X(...) from exc` sanitizes X's own message but not what `logger.exception()`
+  prints for the chained original" (a final-review Critical finding: `.exception()` would have
+  re-leaked what `LiteLLMProvider._wrap_error`'s redaction scrubbed, by printing the un-redacted
+  `__cause__`). **Wall-clock budget (2 fix rounds — see error_learnings.md 2026-08-14/2026-08-15/
+  2026-08-24):** `call_timeout = min(15.0, budget_seconds / 3)` bounds each individual httpx call
+  (fetch_media does up to 2, describe_image adds a third), but the whole `_fetch_and_describe`
+  sequence is ALSO wrapped in `asyncio.wait_for(..., timeout=min(call_timeout * 3, budget_seconds *
+  0.6))` for a genuine wall-clock total — a first fix-round pass shipped WITHOUT the `wait_for` wrap,
+  believing the per-call float alone capped the sequence (it does not; a bare httpx `timeout=` is
+  four independent per-operation deadlines), and needed a second round to add it. If less than 2.0s
+  of `call_timeout` remains, storage/vision is skipped entirely (logged) and the function falls
+  straight to the caption/placeholder path — never risks exhausting the whole delivery on a doomed
+  network attempt. An unparseable `wa_id` (`normalize_phone` returns `None`) also skips storage/vision
+  entirely (nothing could look the stored image back up under the same key `find_inbound_images_by_phone`
+  uses) and degrades straight to caption/placeholder. Synthesized text shape: `"{caption}\n\n[Photo —
+  appears to show: {description}]"`, or just the caption, or just the bracketed description, or the
+  fixed placeholder — whichever parts are present, `"\n\n".join`-ed; this becomes the persisted
+  message `content`, so a later "in blue?" follow-up still has the product description in
+  conversation history.
+
+## LLMProvider.describe_image (vision, shared Protocol + LiteLLMProvider, 2026-08-24)
+- **File:** app/providers/base.py (`LLMProvider` Protocol); app/providers/litellm_provider.py
+  (`LiteLLMProvider.describe_image`).
+- **Purpose:** one-off vision call — describe a product photo (item type, color, pattern, material,
+  visible text/price) for `handle_inbound_image` to fold into a synthesized text turn. Added to the
+  shared `LLMProvider` Protocol (not left concrete-only as the design doc's original draft proposed)
+  because `app.deps.active_llm()` returns the Protocol type, and calling `.describe_image(...)` on a
+  Protocol-typed value needs the method declared there to stay mypy-strict-clean without a
+  cast/isinstance escape hatch — see the design doc's "Provider layer" amendment. Adding one
+  orthogonal method does not force every other agent to implement/use it; `Message.content` stays
+  string-only (the thing that WOULD ripple into every agent was deliberately not touched).
+- **Public API:** `async def describe_image(self, image_bytes: bytes, mime_type: str, api_key: str,
+  model: str, timeout: float, *, extra_params: dict[str, object] | None = None) -> str`.
+- **Used in:** `app/channels/whatsapp_image_intake.py::_fetch_and_describe`. Called directly, not
+  through the router/agent dispatch machinery every conversation turn goes through — this is a
+  one-off preprocessing call, not a turn.
+- **Notes:** reuses `complete()`'s own auth branching (`_auth_kwargs`) and error classification/
+  redaction (`_wrap_error`/`_classify`/`_redact` — same Vertex-vs-api_key posture as `complete()`,
+  including the 2026-08-04 "Vertex errors collapse to a fixed safe message, never raw text" rule).
+  Builds an OpenAI-vision-shaped message (`[{"type":"text",...}, {"type":"image_url","image_url":
+  {"url":"data:{mime_type};base64,..."}}]`) via `litellm.acompletion`, base64-encoding the image
+  bytes inline — no separate upload step. Fixed instruction prompt (`_VISION_PROMPT`, module-level
+  constant): item type/color/pattern/material/notable features, transcribe visible text/price/size
+  labels, don't guess an unclear brand, 1-2 sentences. `litellm` imported lazily inside the method
+  (mirrors `complete()`'s "never on the webhook cold path" discipline). Raises `ProviderError` on any
+  upstream failure (same wrapping as `complete()`) — callers must not `.exception()` a caught
+  `ProviderError` from this method (see error_learnings.md 2026-08-24).
+
+## InboundImage (inbound WhatsApp image message type, 2026-08-24)
+- **File:** app/channels/whatsapp_inbound.py.
+- **Purpose:** typed variant for a Meta webhook `type:"image"` message — previously silently dropped
+  (only `text`/`button`/`interactive` were parsed; `_parse_message` returned `None` for everything
+  else, including `image`).
+- **Public API:** `InboundImage(message_id: str, wa_id: str, media_id: str, mime_type: str, caption:
+  str | None, timestamp: str)` (frozen dataclass); folded into the `InboundEvent` union (`InboundText
+  | InboundInteractive | InboundButton | InboundImage`).
+- **Used in:** `app/channels/whatsapp.py`'s webhook message loop (dispatches to
+  `handle_inbound_image`); parsed by `_parse_message`/`extract_events` alongside the other message
+  types, same attacker-typed-field guards (missing/wrong-typed `image.id`/`image.mime_type` ->
+  message skipped, not raised).
+- **Notes:** video/audio/document/sticker/location inbound message types are still NOT parsed
+  (explicitly out of scope, design doc) — `_parse_message` still returns `None` for those.
+
+## inbound_images table + IngestStore image methods (2026-08-24)
+- **File:** app/store/schema.sql (`inbound_images` table); app/store/base.py
+  (`InboundImageEntry`, `StoredInboundImage`, `IngestStore.save_inbound_image`/
+  `find_inbound_images_by_phone`/`get_inbound_image`); app/store/postgres.py
+  (`PostgresIngestStore`); app/store/memory.py (`InMemoryIngestStore`).
+- **Purpose:** stores the raw bytes of an inbound customer photo, decoupled from
+  `messages`/`conversations` (no FK, no ordering dependency — the image is downloaded/stored BEFORE
+  `run_turn()` creates the corresponding `messages` row, so a `message_id` FK was unworkable; the
+  admin thread view joins by phone at READ time instead, matching how `template_sent`/`button_tap`
+  entries are already merged into a thread by timestamp, not a foreign key — design doc's
+  "amended during planning" note).
+- **Public API:** `InboundImageEntry(id: int, mime_type: str, created_at: str | None)`;
+  `StoredInboundImage(phone_e164: str, mime_type: str, bytes: bytes)`; `IngestStore.save_inbound_image
+  (phone_e164, wamid, mime_type, image_bytes: bytes) -> int` (returns the new row id);
+  `.find_inbound_images_by_phone(phone_e164, limit=100) -> list[InboundImageEntry]` (no bytes —
+  listing only); `.get_inbound_image(image_id) -> StoredInboundImage | None` (the one place bytes
+  are read back).
+- **Used in:** `app/channels/whatsapp_image_intake.py` (`save_inbound_image`, best-effort);
+  `app/admin/router.py::get_conversation_thread` (`find_inbound_images_by_phone`, merged into the
+  `entries` list as `type: "customer_image"`) and `get_conversation_image` (`get_inbound_image`, see
+  api_registry.md).
+- **Notes:** schema `inbound_images(id bigserial PK, phone_e164 text NOT NULL, wamid text NOT NULL,
+  mime_type text NOT NULL, bytes bytea NOT NULL, created_at timestamptz NOT NULL DEFAULT now())` +
+  index `idx_inbound_images_phone (phone_e164, created_at)` + unique index
+  `ux_inbound_images_wamid (wamid)`. **Not yet run in production** — `schema.sql` is a manually
+  owner-run migration file, never auto-applied by any code path (see `_pipeline_status.md`
+  CHECKPOINT). `save_inbound_image`'s plain `INSERT` (no `ON CONFLICT`) relies on the unique
+  `wamid` index to reject a duplicate write on a Meta webhook redelivery of the same message — the
+  caller's broad `except Exception: logger.warning(...)` around the call absorbs that as a
+  non-fatal "continue without storage" case, same as any other storage failure (no explicit
+  idempotency branch needed). `DeleteCounts` (DPDP `delete_by_phone`) and the retention
+  `purge_older_than` job both gained an `inbound_images: int = 0` field/DELETE — same "conversation
+  history" retention class as `conversations`/`messages`/`pending_actions`/`order_actions` (deleted
+  by BOTH erasure and age-based purge, unlike the order/customer mirror fields which are
+  `delete_by_phone`-only per the existing Q15 decision).
+
+## Admin chat page — inbound image display (2026-08-24)
+- **File:** app/admin/static/chats.js (`renderBubble`).
+- **Purpose:** render a customer-sent photo inline in the chat thread instead of only its synthesized
+  text description — the operator can see what the customer actually sent.
+- **Public API:** page-local, `renderBubble(entry)` branches on `entry.type === "customer_image"`:
+  renders an `<img class="bubble-image">` (`src = "/admin/conversations/" + currentThreadId +
+  "/images/" + entry.image_id"`) instead of the usual text `<div>`; still uses the "in" bubble side
+  (grouped with `customer_message` — both are inbound from the customer).
+- **Used in:** the chat thread view's message list, fed by `GET /admin/conversations/{thread_id}`'s
+  `customer_image`-typed entries (see api_registry.md).
+- **Notes:** the `<img>` src hits the new authenticated `GET
+  /admin/conversations/{thread_id}/images/{image_id}` endpoint (session-cookie authed, same-origin —
+  the browser's existing cookie covers the `<img>` tag's request) rather than Meta's own media URL,
+  because that URL is short-lived (expires in minutes) and not admin-authenticated. No JS test beyond
+  the existing substring-presence pattern (`tests/admin/test_static_mount.py`); not browser-verified
+  (no browser in this sandbox — same documented gap as every prior `chats.js` change).
 
 ## Admin chat page — filter chips auto-load all threads (2026-08-24)
 - **File:** backend/app/admin/static/chats.js.

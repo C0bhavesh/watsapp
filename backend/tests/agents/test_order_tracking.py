@@ -357,6 +357,27 @@ async def test_order_number_format_hint_is_rendered_into_the_prompt() -> None:
     assert hint in _system_prompt(provider)
 
 
+async def test_unmatched_order_number_hint_is_rendered_into_the_prompt() -> None:
+    """The hint conversation.py's _recover_order_by_name now emits when a shape-valid order
+    number doesn't resolve to an owned order (2026-08-23 fix) must reach the prompt exactly
+    like the wrong-digit-shape hint already does -- same channel, no new plumbing."""
+    provider = _CapturingProvider(text='{"reply": "I could not find that order."}')
+    hint = (
+        "The customer gave the order number 'tavas6543', but it is not linked to this "
+        "WhatsApp number -- it may belong to a different phone, or may not exist at all; "
+        "you cannot tell which, and must not imply either."
+    )
+    context = AgentContext(
+        wa_id="919999999999", phone_e164="+919999999999", user_text="where is tavas6543",
+        history=[], orders=[], is_vip=False, knowledge={}, provider=provider, model="m",
+        api_key="k", extra_params=None, order_number_format_hint=hint,
+    )
+
+    await run(context)
+
+    assert hint in _system_prompt(provider)
+
+
 async def test_absent_order_number_format_hint_is_not_rendered() -> None:
     provider = _CapturingProvider(text='{"reply": "Sure."}')
     await run(_context(provider, "where is my order", []))

@@ -428,6 +428,50 @@
   layout, muted WhatsApp-palette colors matching existing elements). Frontend verification
   (browser pass, manual) not yet performed.
 
+## Admin chat page — filter chips auto-load all threads (2026-08-24)
+- **File:** backend/app/admin/static/chats.js.
+- **Purpose:** bug fix — the Unread/Human/Unexchanged/Exchanged filter chips only matched threads
+  already loaded into `allThreads`, so a matching thread sitting on page 2+ of the keyset-paginated
+  `GET /admin/conversations` list stayed invisible to every filter until the operator clicked
+  "Load older chats" enough times. Design: `docs/superpowers/specs/2026-08-24-admin-chat-auto-load-all-design.md`;
+  plan: `docs/superpowers/plans/2026-08-24-admin-chat-auto-load-all.md`.
+- **Public API:** page-local in `chats.js`: `loadThreadList()` (fires on initial page open and on
+  search-term change, unchanged trigger points) now, after rendering its own first page, awaits
+  `autoLoadRemainingThreads(myGen)`; `autoLoadRemainingThreads(myGen: number)` loops
+  `fetchNextPage(myGen)` (a `myGen`-aware sibling of the existing `loadOlderThreads`'s inner fetch,
+  both now call the SAME extracted `fetchNextPage(myGen?)` helper) until `!hasMore`,
+  `nextCursor === null`, or `AUTO_LOAD_MAX_PAGES = 10` is reached (~500 threads at `limit=50`/page —
+  first page + 9 more); `loadOlderThreads()` (the pre-existing manual button handler) is unchanged
+  in behavior, still capped at 5 pages/click, and is the fallback once the auto-load cap is hit.
+- **Used in:** admin operators only, same page/auth as the rest of the chat page.
+- **Notes:** **Pacing/pool-cost mitigation (owner-decided, per the design doc's cost re-estimate —
+  see error_learnings.md 2026-08-24):** `GET /admin/conversations` does a per-thread N+1 lookup, so
+  10 auto-loaded pages is up to ~1,000 pooled DB queries against the `max_size=5` pool shared with
+  the live WhatsApp webhook ack path (<5s, CLAUDE.md rule 3) — NOT the ~10-request cost the plan
+  originally assumed. Mitigated by (a) skipping/stopping the loop while the tab is backgrounded
+  (`document.hidden`, mirrors the existing `pollTick` pattern) and (b) a 150ms `sleep()` between
+  pages instead of a tight burst. **Race-condition fix (2 rounds — see error_learnings.md
+  2026-08-24 for the general pattern):** a module-level `loadGeneration` counter + per-call `myGen`
+  token guards against a stale `autoLoadRemainingThreads`/`fetchNextPage` run mutating `allThreads`
+  after a newer `loadThreadList` call (e.g. the operator changed the search box mid-auto-load) —
+  the staleness check lives INSIDE `fetchNextPage` itself, immediately before its mutation lines,
+  not in the caller after `await fetchNextPage()` returns (round 1 put it caller-side and it never
+  actually intercepted the race). **Known, accepted limitation (not fixed, out of scope for this
+  fix):** filters are still only correct up to the ~500-thread auto-load cap — a true fix would make
+  filtering server-side, mirroring how search was made server-side 2026-08-21; explicitly discussed
+  and deferred. **Known, parked limitation (final re-review, owner-ruled acceptable — see
+  `_pipeline_status.md`):** the fix-wave's unconditional `loadingOlder = false` reset at the top of
+  `loadThreadList()` (added to fix a "stuck Loading… button" finding) can re-enable the manual
+  "Load older chats" button while an in-flight manual `loadOlderThreads()` click is still pending,
+  because that manual path is intentionally `myGen`-unaware (an earlier, separate design decision) —
+  reproducing it needs: click "Load older chats" -> edit the search box before it resolves -> click
+  "Load older chats" again within that window. Narrow, operator-only admin surface, no
+  security/data-loss impact, self-corrects on the next load/search/refresh; a full close would
+  extend the `myGen` generation guard to `loadOlderThreads()` too — a small non-blocking follow-up,
+  not a defect. Zero behavioral test coverage beyond `tests/admin/test_static_mount.py`'s
+  substring-presence checks against the served JS text (same accepted structural gap as the rest of
+  `chats.js` — no browser/JS test runner in this repo); not browser-verified.
+
 ## LazyPool (asyncpg)
 - **File:** backend/app/store/pg_factory.py
 - **Purpose:** asyncpg connection pool created on FIRST `acquire()`, never at import (serverless cold-start rule).

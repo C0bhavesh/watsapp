@@ -727,6 +727,41 @@ async function loadThreadList() {
     el("list-status").textContent = "";
   } catch (e) {
     el("list-status").textContent = e.message;
+    return;
+  }
+  await autoLoadRemainingThreads();
+}
+
+// Auto-load cap for the loop below: 10 total pages (the first page fetched by loadThreadList
+// above counts as page 1) at limit=50/page = up to ~500 threads loaded with no operator click.
+// Bounded so a store that grows well past this still falls back to the existing manual
+// "Load older chats" button instead of an unbounded burst against the shared DB pool.
+const AUTO_LOAD_MAX_PAGES = 10;
+
+async function autoLoadRemainingThreads() {
+  // Called right after loadThreadList's first page. Keeps fetching subsequent pages (reusing
+  // fetchNextPage, the same fetch loadOlderThreads uses) until history is exhausted or
+  // AUTO_LOAD_MAX_PAGES is reached, so the filter chips above (which only match allThreads) see
+  // the full loaded set with no click for realistic chat volumes. loadingOlder/updateLoadOlderButton
+  // are reused so the manual button stays hidden/disabled for the loop's duration.
+  if (!hasMore) return;
+  loadingOlder = true;
+  updateLoadOlderButton();
+  el("list-status").textContent = "Loading chats…";
+  try {
+    let pagesFetched = 1;
+    while (hasMore && pagesFetched < AUTO_LOAD_MAX_PAGES) {
+      await fetchNextPage();
+      pagesFetched++;
+      renderThreadRows(applyThreadFilters(allThreads));
+      renderFilterChips();
+    }
+    el("list-status").textContent = "";
+  } catch (e) {
+    el("list-status").textContent = e.message;
+  } finally {
+    loadingOlder = false;
+    updateLoadOlderButton();
   }
 }
 

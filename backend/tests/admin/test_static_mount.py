@@ -290,3 +290,16 @@ def test_chats_js_has_shared_fetch_next_page_helper(client: TestClient) -> None:
     js = client.get("/admin/ui/chats.js").text
     assert "async function fetchNextPage()" in js
     assert "await fetchNextPage()" in js
+
+
+def test_chats_js_auto_loads_all_threads_up_to_a_cap(client: TestClient) -> None:
+    # "All chats on load": the filter chips (Unread/Human/Unexchanged/Exchanged) are client-side
+    # over allThreads, so a matching thread sitting on page 2+ was invisible to every filter and
+    # its count until "Load older chats" was clicked enough times to reach it. Auto-page in the
+    # background (bounded, so the shared DB pool is never hit with an unbounded burst) instead of
+    # requiring a manual click for realistic chat volumes.
+    js = client.get("/admin/ui/chats.js").text
+    assert "const AUTO_LOAD_MAX_PAGES = 10" in js
+    assert "async function autoLoadRemainingThreads()" in js
+    assert "await autoLoadRemainingThreads()" in js
+    assert "Loading chats" in js

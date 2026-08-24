@@ -974,13 +974,21 @@ async def get_conversation_thread(thread_id: int) -> dict[str, object]:
             "text": _button_tap_text(action.action, action.result),
         })
 
-    for img in await c.ingest.find_inbound_images_by_phone(user_id, limit=200):
-        entries.append({
-            "type": "customer_image",
-            "timestamp": img.created_at,
-            "image_id": img.id,
-            "mime_type": img.mime_type,
-        })
+    # Guarded for the same reason as the exchanges lookup below: a failure here (e.g. the
+    # inbound_images table missing before the owner runs its migration) must never sink the
+    # whole entries/orders payload -- on failure the thread simply shows no photo bubbles.
+    try:
+        for img in await c.ingest.find_inbound_images_by_phone(user_id, limit=200):
+            entries.append({
+                "type": "customer_image",
+                "timestamp": img.created_at,
+                "image_id": img.id,
+                "mime_type": img.mime_type,
+            })
+    except Exception as exc:
+        logger.warning(
+            "failed to load inbound images for thread %s: type=%s", thread_id, type(exc).__name__
+        )
 
     # Timestamps are ISO 8601 strings (or None -> ""), which sort lexicographically in
     # chronological order. str() keeps the key type mypy-checkable (object -> str).

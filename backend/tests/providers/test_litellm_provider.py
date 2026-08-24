@@ -130,3 +130,41 @@ async def test_api_key_model_injects_api_key_not_vertex(monkeypatch: pytest.Monk
     assert kw is not None
     assert kw["api_key"] == "KEY123"
     assert "vertex_credentials" not in kw
+
+
+async def test_describe_image_returns_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeLiteLLM()
+    monkeypatch.setitem(sys.modules, "litellm", fake)
+    provider = LiteLLMProvider()
+
+    result = await provider.describe_image(
+        b"\xff\xd8\xff\xe0fakejpeg", "image/jpeg", "test-key", "gemini/gemini-flash-latest", 20.0
+    )
+
+    assert result == "pong"  # _FakeLiteLLM.acompletion always returns _FakeResp("pong")
+    kw = fake.captured
+    assert kw is not None
+    assert kw["model"] == "gemini/gemini-flash-latest"
+    assert kw["api_key"] == "test-key"
+    sent_messages = kw["messages"]
+    assert isinstance(sent_messages, list)
+    content = sent_messages[0]["content"]
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+async def test_describe_image_redacts_api_key_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _RaisingLiteLLM:
+        disable_aiohttp_transport = False
+
+        async def acompletion(self, **kwargs: object) -> object:
+            raise RuntimeError("upstream said: bad key test-key-xyz")
+
+    monkeypatch.setitem(sys.modules, "litellm", _RaisingLiteLLM())
+    provider = LiteLLMProvider()
+
+    with pytest.raises(ProviderError) as exc_info:
+        await provider.describe_image(
+            b"data", "image/jpeg", "test-key-xyz", "gemini/gemini-flash-latest", 20.0
+        )
+    assert "test-key-xyz" not in str(exc_info.value)

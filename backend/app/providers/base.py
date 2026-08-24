@@ -47,3 +47,14 @@ class LLMProvider(Protocol):
         *,
         extra_params: dict[str, object] | None = None,
     ) -> CompletionResult: ...
+
+    async def describe_image(
+        self,
+        image_bytes: bytes,
+        mime_type: str,
+        api_key: str,
+        model: str,
+        timeout: float,
+        *,
+        extra_params: dict[str, object] | None = None,
+    ) -> str: ...

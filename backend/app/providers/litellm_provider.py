@@ -16,6 +16,12 @@ _STATUS_TO_KIND: dict[int, ProviderErrorKind] = {
     429: ProviderErrorKind.RATE_LIMIT,
 }
 
+_VISION_PROMPT = (
+    "Describe this product photo concisely for a product search: item type, color, pattern, "
+    "material, and any notable features. If there is visible text, a price, or a size label, "
+    "transcribe it. Do not guess a brand unless it is clearly visible. One or two sentences."
+)
+
 
 @dataclass(frozen=True)
 class VertexConfig:
@@ -49,6 +55,29 @@ class LiteLLMProvider:
     def __init__(self, vertex: VertexConfig | None = None) -> None:
         self._vertex = vertex
 
+    def _auth_kwargs(self, model: str, api_key: str) -> dict[str, object]:
+        if model.startswith("vertex_ai/"):
+            v = self._vertex
+            if v is None or not v.credentials_json or not v.project:
+                raise ProviderError(
+                    "Vertex AI credentials are not configured", ProviderErrorKind.AUTH
+                )
+            # Vertex authenticates with the service-account JSON + project + location,
+            # NOT an api_key — omit api_key entirely for vertex_ai/* models.
+            return {
+                "vertex_credentials": v.credentials_json,
+                "vertex_project": v.project,
+                "vertex_location": v.location,
+            }
+        return {"api_key": api_key}
+
+    def _wrap_error(self, exc: Exception, model: str, api_key: str) -> ProviderError:
+        if model.startswith("vertex_ai/"):
+            # A vertex error may embed the service-account JSON (exact, reformatted, or a
+            # lone field) — discard the raw text entirely and surface a fixed safe message.
+            return ProviderError("Vertex AI request failed", _classify(exc))
+        return ProviderError(_redact(str(exc), api_key), _classify(exc))
+
     async def complete(
         self,
         model: str,
@@ -64,31 +93,52 @@ class LiteLLMProvider:
         litellm.disable_aiohttp_transport = True
         msg_dicts = [{"role": m.role, "content": m.content} for m in messages]
         call_kwargs: dict[str, object] = dict(extra_params or {})
-        if model.startswith("vertex_ai/"):
-            v = self._vertex
-            if v is None or not v.credentials_json or not v.project:
-                raise ProviderError(
-                    "Vertex AI credentials are not configured", ProviderErrorKind.AUTH
-                )
-            # Vertex authenticates with the service-account JSON + project + location,
-            # NOT an api_key — omit api_key entirely for vertex_ai/* models.
-            call_kwargs["vertex_credentials"] = v.credentials_json
-            call_kwargs["vertex_project"] = v.project
-            call_kwargs["vertex_location"] = v.location
-        else:
-            call_kwargs["api_key"] = api_key
+        call_kwargs.update(self._auth_kwargs(model, api_key))
         try:
             resp = await litellm.acompletion(
                 model=model, messages=msg_dicts, timeout=timeout, **call_kwargs
             )
         except Exception as exc:  # noqa: BLE001 — every upstream error becomes ProviderError
-            if model.startswith("vertex_ai/"):
-                # A vertex error may embed the service-account JSON (exact, reformatted, or a
-                # lone field) — discard the raw text entirely and surface a fixed safe message.
-                raise ProviderError("Vertex AI request failed", _classify(exc)) from exc
-            raise ProviderError(_redact(str(exc), api_key), _classify(exc)) from exc
+            raise self._wrap_error(exc, model, api_key) from exc
         try:
             text = resp.choices[0].message.content or ""
         except (AttributeError, IndexError, TypeError):
             text = ""
         return CompletionResult(text=text, model=model)
+
+    async def describe_image(
+        self,
+        image_bytes: bytes,
+        mime_type: str,
+        api_key: str,
+        model: str,
+        timeout: float,
+        *,
+        extra_params: dict[str, object] | None = None,
+    ) -> str:
+        import base64
+
+        import litellm  # lazy: mirrors complete()'s posture
+
+        litellm.disable_aiohttp_transport = True
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        msg_dicts = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": _VISION_PROMPT},
+                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
+            ],
+        }]
+        call_kwargs: dict[str, object] = dict(extra_params or {})
+        call_kwargs.update(self._auth_kwargs(model, api_key))
+        try:
+            resp = await litellm.acompletion(
+                model=model, messages=msg_dicts, timeout=timeout, **call_kwargs
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise self._wrap_error(exc, model, api_key) from exc
+        try:
+            text = resp.choices[0].message.content or ""
+        except (AttributeError, IndexError, TypeError):
+            text = ""
+        return str(text)

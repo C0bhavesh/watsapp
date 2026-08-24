@@ -149,3 +149,21 @@ async def test_fetch_media_returns_none_on_download_non_200() -> None:
     async with httpx.AsyncClient(transport=transport) as http:
         result = await fetch_media(http, CFG, "MEDIA123")
     assert result is None
+
+
+async def test_fetch_media_returns_none_on_missing_mime_type_field() -> None:
+    transport = _transport(
+        {"url": "https://lookaside.fbsbx.com/x"}, b"data"
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        result = await fetch_media(http, CFG, "MEDIA123")
+    assert result is None
+
+
+async def test_fetch_media_returns_none_on_mime_type_wrong_type() -> None:
+    transport = _transport(
+        {"url": "https://lookaside.fbsbx.com/x", "mime_type": 123}, b"data"
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        result = await fetch_media(http, CFG, "MEDIA123")
+    assert result is None

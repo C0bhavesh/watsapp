@@ -2,6 +2,7 @@ import pytest
 
 from app.channels.whatsapp_inbound import (
     InboundButton,
+    InboundImage,
     InboundInteractive,
     InboundText,
     extract_event,
@@ -216,6 +217,79 @@ def test_non_dict_nested_button_reply_is_none_not_exception(bad_field: object) -
         "type": "interactive",
         "interactive": {"type": "button_reply", "button_reply": bad_field},
     })) is None
+
+
+def test_extract_events_parses_image_message_with_caption() -> None:
+    payload = {
+        "entry": [{
+            "changes": [{
+                "value": {
+                    "messages": [{
+                        "id": "wamid.IMG1",
+                        "from": "919664290413",
+                        "timestamp": "1700000000",
+                        "type": "image",
+                        "image": {
+                            "id": "MEDIA123",
+                            "mime_type": "image/jpeg",
+                            "caption": "do you have this in size M?",
+                        },
+                    }]
+                }
+            }]
+        }]
+    }
+    events = extract_events(payload)
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, InboundImage)
+    assert event.message_id == "wamid.IMG1"
+    assert event.wa_id == "919664290413"
+    assert event.media_id == "MEDIA123"
+    assert event.mime_type == "image/jpeg"
+    assert event.caption == "do you have this in size M?"
+
+
+def test_extract_events_parses_image_message_without_caption() -> None:
+    payload = {
+        "entry": [{
+            "changes": [{
+                "value": {
+                    "messages": [{
+                        "id": "wamid.IMG2",
+                        "from": "919664290413",
+                        "timestamp": "1700000000",
+                        "type": "image",
+                        "image": {"id": "MEDIA456", "mime_type": "image/png"},
+                    }]
+                }
+            }]
+        }]
+    }
+    events = extract_events(payload)
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, InboundImage)
+    assert event.caption is None
+
+
+def test_extract_events_drops_image_message_missing_media_id() -> None:
+    payload = {
+        "entry": [{
+            "changes": [{
+                "value": {
+                    "messages": [{
+                        "id": "wamid.IMG3",
+                        "from": "919664290413",
+                        "timestamp": "1700000000",
+                        "type": "image",
+                        "image": {"mime_type": "image/jpeg"},
+                    }]
+                }
+            }]
+        }]
+    }
+    assert extract_events(payload) == []
 
 
 def test_extract_statuses_parses_a_delivered_event() -> None:

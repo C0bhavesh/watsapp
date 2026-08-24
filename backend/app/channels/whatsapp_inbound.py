@@ -30,6 +30,16 @@ class InboundButton:
 
 
 @dataclass(frozen=True)
+class InboundImage:
+    message_id: str
+    wa_id: str
+    media_id: str
+    mime_type: str
+    caption: str | None
+    timestamp: str
+
+
+@dataclass(frozen=True)
 class InboundStatus:
     wamid: str
     status: str
@@ -41,7 +51,7 @@ class InboundStatus:
     error_title: str | None = None
 
 
-InboundEvent = InboundText | InboundInteractive | InboundButton
+InboundEvent = InboundText | InboundInteractive | InboundButton | InboundImage
 
 
 def extract_event(payload: dict[str, Any]) -> InboundEvent | None:
@@ -172,6 +182,24 @@ def _parse_message(msg: Any) -> InboundEvent | None:
             wa_id=wa_id,
             button_id=button_id,
             button_title=str(reply.get("title") or ""),
+            timestamp=timestamp_str,
+        )
+
+    if msg_type == "image":
+        image_obj = msg.get("image")
+        if not isinstance(image_obj, dict):
+            return None
+        media_id = image_obj.get("id")
+        mime_type = image_obj.get("mime_type")
+        if not isinstance(media_id, str) or not isinstance(mime_type, str):
+            return None
+        caption = image_obj.get("caption")
+        return InboundImage(
+            message_id=message_id,
+            wa_id=wa_id,
+            media_id=media_id,
+            mime_type=mime_type,
+            caption=caption if isinstance(caption, str) else None,
             timestamp=timestamp_str,
         )
 

@@ -332,3 +332,15 @@ def test_chats_js_auto_load_paces_requests_and_skips_when_hidden(client: TestCli
     # Exactly one definition + one call site -- confirms autoLoadRemainingThreads is still only
     # invoked from loadThreadList (never from refreshFirstPage/pollTick, which stay out of scope).
     assert js.count("autoLoadRemainingThreads(") == 2
+
+
+def test_chats_js_renders_customer_image_bubbles(client: TestClient) -> None:
+    # Customer-sent photos (inbound image product lookup) must render as an <img>, not as text
+    # (renderBubble's default `text.textContent = entry.text` would otherwise show the literal
+    # string "undefined", since customer_image entries carry no `text` field).
+    js = client.get("/admin/ui/chats.js").text
+    assert '"customer_image"' in js
+    assert "bubble-image" in js
+    assert "/images/" in js
+    html = client.get("/admin/ui/chats.html").text
+    assert "bubble-image" in html

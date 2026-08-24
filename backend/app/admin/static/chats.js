@@ -297,21 +297,32 @@ function renderDeliveryMark(entry) {
 
 function renderBubble(entry) {
   const div = document.createElement("div");
-  const side = entry.type === "customer_message" ? "bubble-in" : "bubble-out";
+  const side =
+    entry.type === "customer_message" || entry.type === "customer_image"
+      ? "bubble-in"
+      : "bubble-out";
   div.className = "bubble " + side;
   const label = document.createElement("div");
   label.className = "bubble-label";
   label.textContent =
     entry.type === "ai_reply" && entry.sender === "admin" ? "you" : entry.type.replace("_", " ");
-  const text = document.createElement("div");
-  text.textContent = entry.text;
   const ts = document.createElement("div");
   ts.className = "bubble-ts";
   ts.textContent = formatBubbleTime(entry.timestamp);
   const mark = renderDeliveryMark(entry);
   if (mark) ts.appendChild(mark);
   div.appendChild(label);
-  div.appendChild(text);
+  if (entry.type === "customer_image") {
+    const img = document.createElement("img");
+    img.className = "bubble-image";
+    img.src = "/admin/conversations/" + currentThreadId + "/images/" + entry.image_id;
+    img.alt = "customer photo";
+    div.appendChild(img);
+  } else {
+    const text = document.createElement("div");
+    text.textContent = entry.text;
+    div.appendChild(text);
+  }
   if (entry.status && entry.status !== "sent" && entry.status !== "processing") {
     const status = document.createElement("div");
     status.className = "bubble-status";

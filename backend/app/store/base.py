@@ -164,6 +164,12 @@ class DeletionResult:
     always 0 for ``purge_older_than`` (order/customer data is kept indefinitely). ``order_items``
     has no count of its own — those rows follow their order via ``ON DELETE CASCADE``. Both are
     defaulted so the existing five-field construction sites stay valid.
+
+    ``inbound_images`` follows the same retention class as ``conversations``/``messages``/
+    ``pending_actions``/``order_actions`` — it is non-zero for BOTH ``delete_by_phone``
+    (on-demand erasure) and ``purge_older_than`` (automatic age-based purge), distinct from the
+    order/customer-mirror fields which are delete_by_phone-only. Defaulted to 0 so existing
+    construction sites stay valid.
     """
 
     order_mappings: int

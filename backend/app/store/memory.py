@@ -632,8 +632,9 @@ class InMemoryIngestStore:
         )
 
     async def purge_older_than(self, cutoff: datetime) -> DeletionResult:
-        # In-memory rows carry no created_at timestamp, so there is nothing to age out;
-        # the real age-based purge is the Postgres implementation.
+        # In-memory rows carry no created_at timestamp, so there is nothing to age out for most
+        # tables here; the real age-based purge for those is the Postgres implementation. The
+        # exception is inbound_images, which DOES carry created_at and IS aged out below.
         # order_mappings/outbound_messages are excluded from the age-based purge by design:
         # the client decided (round 3, 2026-08-06, client-decisions-all.md Q15) that
         # customer/order data is kept INDEFINITELY. Even once this store gains timestamps, do

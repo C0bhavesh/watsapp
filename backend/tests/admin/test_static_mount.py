@@ -307,3 +307,28 @@ def test_chats_js_auto_loads_all_threads_up_to_a_cap(client: TestClient) -> None
     # Race condition guard: generation token to detect when search changes mid-auto-load.
     assert "let loadGeneration = 0" in js
     assert "myGen !== loadGeneration" in js
+
+
+def test_chats_js_staleness_check_is_inside_fetch_next_page(client: TestClient) -> None:
+    # A prior fix round put this check caller-side (after `await fetchNextPage()` returned), which
+    # cannot intercept the race: nothing runs between fetchNextPage's own await resolving and its
+    # state writes for a caller-side check to catch. It must sit INSIDE fetchNextPage, before the
+    # mutation lines, or a stale generation's in-flight fetch can still corrupt shared state.
+    js = client.get("/admin/ui/chats.js").text
+    fn = js.index("async function fetchNextPage(myGen)")
+    check = js.index("if (myGen !== undefined && myGen !== loadGeneration) return false;", fn)
+    mutate = js.index("allThreads = mergeThreads(allThreads, body.threads)", fn)
+    assert fn < check < mutate
+
+
+def test_chats_js_auto_load_paces_requests_and_skips_when_hidden(client: TestClient) -> None:
+    # Each auto-loaded page costs the server a per-thread lookup, not just one query, against the
+    # max_size=5 DB pool shared with the live webhook ack path (<5s) -- the loop must pace itself
+    # and skip a backgrounded tab instead of firing a tight burst.
+    js = client.get("/admin/ui/chats.js").text
+    assert "document.hidden" in js
+    assert "function sleep(ms)" in js
+    assert "await sleep(150)" in js
+    # Exactly one definition + one call site -- confirms autoLoadRemainingThreads is still only
+    # invoked from loadThreadList (never from refreshFirstPage/pollTick, which stay out of scope).
+    assert js.count("autoLoadRemainingThreads(") == 2

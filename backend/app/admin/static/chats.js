@@ -718,8 +718,14 @@ function renderThreadRows(threads) {
 
 async function loadThreadList() {
   const myGen = ++loadGeneration;
-  // A fresh load of the FIRST page (initial load, refresh button, or a search-term change). Resets
-  // the paging state -- any previously appended older pages are discarded and re-fetched on demand.
+  // Claim the "loading older" UI slot for this generation immediately, releasing any state a
+  // superseded generation left behind (e.g. it was mid-auto-load and its finally deferred cleanup
+  // to us, or its own first-page fetch is about to fail before ever reaching autoLoadRemainingThreads).
+  loadingOlder = false;
+  updateLoadOlderButton();
+  // A fresh load of the FIRST page (initial load or a search-term change -- NOT the Refresh button,
+  // which calls refreshFirstPage() instead). Resets the paging state -- any previously appended
+  // older pages are discarded and re-fetched on demand.
   try {
     const body = await api(conversationsUrl({ q: currentQuery }));
     if (myGen !== loadGeneration) return; // superseded by a newer call while this awaited
@@ -732,6 +738,7 @@ async function loadThreadList() {
     listSnapshotKey = threadListKey(body.threads);
     el("list-status").textContent = "";
   } catch (e) {
+    if (myGen !== loadGeneration) return; // a newer call owns the UI now
     el("list-status").textContent = e.message;
     return;
   }
@@ -743,6 +750,10 @@ async function loadThreadList() {
 // Bounded so a store that grows well past this still falls back to the existing manual
 // "Load older chats" button instead of an unbounded burst against the shared DB pool.
 const AUTO_LOAD_MAX_PAGES = 10;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 async function autoLoadRemainingThreads(myGen) {
   // Called right after loadThreadList's first page. Keeps fetching subsequent pages (reusing
@@ -758,16 +769,28 @@ async function autoLoadRemainingThreads(myGen) {
   el("list-status").textContent = "Loading chats…";
   try {
     let pagesFetched = 1;
-    while (hasMore && pagesFetched < AUTO_LOAD_MAX_PAGES) {
+    // Each page here costs the server a per-thread lookup, not just one query, so this loop
+    // deliberately paces itself and yields on a backgrounded tab instead of firing a tight burst --
+    // it shares the max_size=5 DB pool with the live webhook ack path (<5s), the same resource the
+    // manual "Load older" button's own small per-click cap protects (see loadOlderThreads below).
+    while (hasMore && pagesFetched < AUTO_LOAD_MAX_PAGES && nextCursor !== null) {
+      if (document.hidden) break; // an unwatched background tab isn't worth the pool cost
       await fetchNextPage(myGen);
       if (myGen !== loadGeneration) return; // a newer loadThreadList call superseded this run;
                                              // stop writing/rendering on its behalf
       pagesFetched++;
+      const list = el("thread-list");
+      const savedScroll = list.scrollTop;
       renderThreadRows(applyThreadFilters(allThreads));
       renderFilterChips();
+      list.scrollTop = savedScroll; // re-rendering clears+rebuilds the list, which would otherwise
+                                     // yank an operator who started scrolling back to the top
+      if (hasMore && pagesFetched < AUTO_LOAD_MAX_PAGES) await sleep(150); // pace requests instead
+                                                                            // of a tight burst
     }
     el("list-status").textContent = "";
   } catch (e) {
+    if (myGen !== loadGeneration) return; // a newer call owns the UI now
     el("list-status").textContent = e.message;
   } finally {
     // Only clean up if we're still the current generation. If superseded, the newer call owns

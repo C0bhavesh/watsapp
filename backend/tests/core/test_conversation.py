@@ -66,9 +66,11 @@ async def test_recover_order_by_name_returns_owned_order() -> None:
     assert hint is None
 
 
-async def test_recover_order_by_name_unowned_returns_empty() -> None:
-    # The order exists but belongs to a different phone -> resolve_by_order_name returns None,
-    # so nothing is revealed (and the None is indistinguishable from "no such order").
+async def test_recover_order_by_name_unowned_returns_hint_not_none() -> None:
+    # The order exists but belongs to a different phone -> resolve_by_order_name returns None.
+    # Nothing about the order is revealed (Critical Rule 3), but the caller must be told a
+    # shape-valid candidate WAS given, so it isn't confused with "no order number mentioned at
+    # all" (test_recover_order_by_name_no_token_returns_empty, unchanged, right below).
     shopify = _FakeShopify(
         orders_by_name={"tavas6543": _order("gid://6", "tavas6543", "+911111111111")}
     )
@@ -76,7 +78,11 @@ async def test_recover_order_by_name_unowned_returns_empty() -> None:
     orders, hint = await _recover_order_by_name(shopify, "919999999999", "where is tavas6543")
 
     assert orders == []
-    assert hint is None
+    assert hint is not None
+    assert "tavas6543" in hint
+    # Must not confirm the order exists -- same wording whether it belongs to someone else
+    # or doesn't exist at all.
+    assert "belong to a different phone, or may not exist" in hint
 
 
 async def test_recover_order_by_name_no_token_returns_empty() -> None:

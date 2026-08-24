@@ -296,6 +296,12 @@ async def _recover_order_by_name(
     never queried for a token already known to be the wrong shape; the caller threads the hint
     to the agent so it can ask the customer to double-check their order ID instead of silently
     finding nothing, which reads to the customer as "that order doesn't exist."
+
+    ``format_hint`` is ALSO set (again with ``orders`` empty) when a shape-valid candidate does
+    not resolve to an order the sender owns -- so this case is distinct from "no order number
+    was mentioned at all" (both had previously returned ``([], None)``) and the caller is not
+    left guessing which happened. The hint stays non-enumerable: it never implies whether the
+    order belongs to a different number or does not exist.
     """
     candidate = _extract_order_number_candidate(text)
     if candidate is None:
@@ -319,7 +325,19 @@ async def _recover_order_by_name(
             f"their order ID."
         )
     order = await resolve_by_order_name(shopify, wa_id, candidate)
-    return ([order] if order is not None else []), None
+    if order is not None:
+        return [order], None
+    return [], (
+        f"The customer gave the order number '{candidate}', but it is not linked to this "
+        f"WhatsApp number -- it may belong to a different phone, or may not exist at all; "
+        f"you cannot tell which, and must not imply either. Tell them, in your own words: "
+        f"you could not find that order linked to this WhatsApp number, and ask if they "
+        f"used a different phone number when placing the order -- if so, invite them to "
+        f"message from that number, or share the order email so you can look into it "
+        f"another way. Do not ask them to resend their order number (they already gave a "
+        f"valid one), and do not offer to connect them with the team for this reason alone "
+        f"unless they explicitly ask to speak with a person."
+    )
 
 
 async def _agent_reply(

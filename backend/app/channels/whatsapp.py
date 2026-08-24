@@ -165,8 +165,16 @@ async def receive_webhook(request: Request) -> Response:
                         len(events) - processed + 1,
                     )
                 else:
-                    synthesized = await handle_inbound_image(c, cfg, event)
-                    await run_turn(c, synthesized, budget_seconds=remaining)
+                    synthesized = await handle_inbound_image(c, cfg, event, remaining)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        logger.warning(
+                            "request budget spent after image intake; skipping conversation "
+                            "turn for %s",
+                            event.message_id,
+                        )
+                    else:
+                        await run_turn(c, synthesized, budget_seconds=remaining)
             elif isinstance(event, (InboundButton, InboundInteractive)):
                 # Deterministic confirm/cancel dispatch (order:confirm/cancel -> tagsAdd/
                 # orderCancel). NO LLM. A tap is processed even for a paused/handed-off

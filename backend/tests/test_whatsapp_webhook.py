@@ -2216,7 +2216,7 @@ async def test_post_image_event_calls_handle_inbound_image_then_run_turn(
 ) -> None:
     from app.channels.whatsapp_inbound import InboundText
 
-    async def fake_handle_inbound_image(c, cfg, event):
+    async def fake_handle_inbound_image(c, cfg, event, budget_seconds):
         assert event.media_id == "MEDIA1"
         return InboundText(
             message_id=event.message_id, wa_id=event.wa_id,
@@ -2265,4 +2265,7 @@ async def test_post_image_event_calls_handle_inbound_image_then_run_turn(
     # reporting on `event`, never the downstream-transformed value.
     assert resp.json()["results"][0]["event_type"] == "InboundImage"
     assert len(provider.calls) == 2  # router classify + product_search's own completion
+    # Proves the SYNTHESIZED text (caption + vision description) is what actually reached the
+    # LLM, not just that some turn ran.
+    assert any("[Photo — appears to show:" in (m.content or "") for m in provider.calls[0])
     assert sent["body"] == "That hoodie is Rs. 1499, in stock in M/L."

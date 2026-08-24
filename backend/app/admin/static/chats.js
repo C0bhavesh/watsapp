@@ -100,9 +100,19 @@ function insertAtCursor(input, text) {
   const newPos = start + text.length;
   input.focus();
   input.setSelectionRange(newPos, newPos);
+  input.dispatchEvent(new Event("input"));
 }
 
 buildEmojiPopup();
+
+const REPLY_INPUT_MAX_HEIGHT = 220; // px -- matches chats.html's #reply-input max-height (~10 lines)
+
+function autoGrowReplyInput() {
+  const input = el("reply-input");
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, REPLY_INPUT_MAX_HEIGHT) + "px";
+  input.style.overflowY = input.scrollHeight > REPLY_INPUT_MAX_HEIGHT ? "auto" : "hidden";
+}
 
 el("emoji-btn").addEventListener("click", () => {
   const popup = el("emoji-popup");
@@ -565,6 +575,7 @@ async function loadThread(threadId, phone, silent = false) {
   currentPhone = phone;
   if (isThreadSwitch) {
     el("reply-input").value = "";
+    autoGrowReplyInput();
     el("reply-status").textContent = "";
   }
   document.querySelectorAll(".thread-row").forEach((row) => {
@@ -922,6 +933,7 @@ el("reply-send-btn").addEventListener("click", async () => {
       { text }
     );
     input.value = "";
+    autoGrowReplyInput();
     await loadThread(currentThreadId, currentPhone);
   } catch (e) {
     el("reply-status").textContent = e.message;
@@ -932,8 +944,13 @@ el("reply-send-btn").addEventListener("click", async () => {
   }
 });
 
+el("reply-input").addEventListener("input", autoGrowReplyInput);
+
 el("reply-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") el("reply-send-btn").click();
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    el("reply-send-btn").click();
+  }
 });
 
 let listSnapshotKey = "";

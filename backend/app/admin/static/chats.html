@@ -72,9 +72,10 @@
     #chat-empty { display: flex; align-items: center; justify-content: center; flex: 1;
       color: #667781; font-size: .9rem; }
     #reply-bar { display: flex; gap: .5rem; padding: .6rem 1.2rem; background: #f0f2f5;
-      border-top: 1px solid #e9edef; position: relative; }
+      border-top: 1px solid #e9edef; position: relative; align-items: flex-end; }
     #reply-input { flex: 1; padding: .5rem .7rem; border: 1px solid #d1d7db; border-radius: 8px;
-      font-size: .85rem; outline: none; }
+      font-size: .85rem; font-family: inherit; line-height: 1.25rem; outline: none; resize: none;
+      overflow-y: hidden; max-height: 220px; }
     #reply-input:disabled { background: #e9edef; color: #8696a0; }
     #reply-send-btn { background: #00a884; color: #fff; border: none; border-radius: 6px;
       padding: .5rem 1.1rem; font-size: .82rem; cursor: pointer; }
@@ -164,7 +165,7 @@
       <div id="reply-bar">
         <button id="emoji-btn" type="button" title="Emoji">😊</button>
         <button id="template-btn" type="button" title="Send a template">📋</button>
-        <input id="reply-input" type="text" placeholder="Type a message" />
+        <textarea id="reply-input" placeholder="Type a message" rows="1"></textarea>
         <button id="reply-send-btn">Send</button>
         <div id="emoji-popup" style="display:none"></div>
       </div>

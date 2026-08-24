@@ -344,3 +344,15 @@ def test_chats_js_renders_customer_image_bubbles(client: TestClient) -> None:
     assert "/images/" in js
     html = client.get("/admin/ui/chats.html").text
     assert "bubble-image" in html
+
+
+def test_chats_reply_input_is_an_auto_growing_textarea(client: TestClient) -> None:
+    # The reply box used to be a single-line <input>, so typing a long message scrolled earlier
+    # text out of view. It's now a <textarea> that grows with content (up to a cap, then scrolls
+    # internally) -- Enter still sends, Shift+Enter inserts a newline instead.
+    html = client.get("/admin/ui/chats.html").text
+    assert '<textarea id="reply-input"' in html
+    assert "<input id=\"reply-input\"" not in html
+    js = client.get("/admin/ui/chats.js").text
+    assert "autoGrowReplyInput" in js
+    assert "e.shiftKey" in js

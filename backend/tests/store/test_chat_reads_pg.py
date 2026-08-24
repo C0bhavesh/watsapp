@@ -512,3 +512,33 @@ async def test_search_order_phones_matches_name_pg(pool: LazyPool) -> None:
 
     by_customer = await store.search_order_phones("amita", limit=100)
     assert phone in [p for p, _ in by_customer]
+
+
+# --- IngestStore.save_inbound_image / find_inbound_images_by_phone / get_inbound_image ---
+
+
+async def test_save_and_find_inbound_images_by_phone_pg(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    phone = f"+91{uuid.uuid4().int % 10**10:010d}"
+    image_id = await store.save_inbound_image(phone, f"wamid.{uuid.uuid4()}", "image/jpeg", b"data")
+
+    entries = await store.find_inbound_images_by_phone(phone)
+
+    assert len(entries) == 1
+    assert entries[0].id == image_id
+    assert entries[0].mime_type == "image/jpeg"
+
+
+async def test_get_inbound_image_returns_bytes_pg(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    phone = f"+91{uuid.uuid4().int % 10**10:010d}"
+    image_id = await store.save_inbound_image(
+        phone, f"wamid.{uuid.uuid4()}", "image/png", b"\x89PNGfakepng"
+    )
+
+    stored = await store.get_inbound_image(image_id)
+
+    assert stored is not None
+    assert stored.phone_e164 == phone
+    assert stored.mime_type == "image/png"
+    assert stored.bytes == b"\x89PNGfakepng"

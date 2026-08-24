@@ -7,6 +7,7 @@ from app.shopify.models import Customer, Fulfillment, LineItem, Order, normalize
 from app.store.base import (
     ConversationSummary,
     DeletionResult,
+    InboundImageEntry,
     IngestResult,
     MappingUpsert,
     MappingView,
@@ -17,6 +18,7 @@ from app.store.base import (
     OutboundEntry,
     OutboundRetryInfo,
     OutboundView,
+    StoredInboundImage,
     StoredMessage,
 )
 from app.store.postgres import MAX_MIRROR_FULFILLMENTS, _e164, _search_name_patterns
@@ -176,6 +178,10 @@ class InMemoryIngestStore:
         # split shipments (several fulfillments per order). Kept separate from `self.orders` so it
         # survives an order re-mirror, exactly like the Postgres fulfillments table + FK.
         self.fulfillments: dict[str, dict[str, Fulfillment]] = {}
+        # id -> (phone_e164, wamid, mime_type, bytes, created_at). A plain dict keyed by an
+        # incrementing int id mirrors this class's other "_by_id" tables (e.g. _outbound_by_id).
+        self._inbound_images: dict[int, tuple[str, str, str, bytes, datetime]] = {}
+        self._inbound_images_next_id = 1
 
     async def ingest_order_created(
         self,
@@ -370,6 +376,37 @@ class InMemoryIngestStore:
             )
             for dedupe_key, draft in matches[-limit:]
         ]
+
+    async def save_inbound_image(
+        self, phone_e164: str, wamid: str, mime_type: str, image_bytes: bytes
+    ) -> int:
+        image_id = self._inbound_images_next_id
+        self._inbound_images_next_id += 1
+        self._inbound_images[image_id] = (
+            phone_e164, wamid, mime_type, image_bytes, datetime.now(UTC)
+        )
+        return image_id
+
+    async def find_inbound_images_by_phone(
+        self, phone_e164: str, limit: int = 100
+    ) -> list[InboundImageEntry]:
+        matches = [
+            (image_id, mime_type, created_at)
+            for image_id, (phone, _wamid, mime_type, _bytes, created_at)
+            in self._inbound_images.items()
+            if phone == phone_e164
+        ]
+        return [
+            InboundImageEntry(id=image_id, mime_type=mime_type, created_at=created_at.isoformat())
+            for image_id, mime_type, created_at in matches[-limit:]
+        ]
+
+    async def get_inbound_image(self, image_id: int) -> StoredInboundImage | None:
+        row = self._inbound_images.get(image_id)
+        if row is None:
+            return None
+        phone_e164, _wamid, mime_type, image_bytes, _created_at = row
+        return StoredInboundImage(phone_e164=phone_e164, mime_type=mime_type, bytes=image_bytes)
 
     async def find_order_actions_by_wa_ids(
         self, wa_ids: list[str], limit: int = 100
@@ -574,6 +611,13 @@ class InMemoryIngestStore:
         ]
         for gid in removed_customers:
             del self.customers[gid]
+        removed_images = [
+            image_id
+            for image_id, (phone, _w, _m, _b, _c) in self._inbound_images.items()
+            if phone == phone_e164
+        ]
+        for image_id in removed_images:
+            del self._inbound_images[image_id]
         # No in-memory conversation/message/action store yet (Phase 4) -> those counts stay 0.
         return DeletionResult(
             order_mappings=len(removed_mappings),
@@ -584,6 +628,7 @@ class InMemoryIngestStore:
             order_actions=0,
             customers=len(removed_customers),
             orders=len(removed_orders),
+            inbound_images=len(removed_images),
         )
 
     async def purge_older_than(self, cutoff: datetime) -> DeletionResult:
@@ -593,6 +638,13 @@ class InMemoryIngestStore:
         # the client decided (round 3, 2026-08-06, client-decisions-all.md Q15) that
         # customer/order data is kept INDEFINITELY. Even once this store gains timestamps, do
         # NOT age those out here — only delete_by_phone (erasure-on-request) may remove them.
+        removed_images = [
+            image_id
+            for image_id, (_p, _w, _m, _b, created_at) in self._inbound_images.items()
+            if created_at < cutoff
+        ]
+        for image_id in removed_images:
+            del self._inbound_images[image_id]
         return DeletionResult(
             order_mappings=0,
             outbound_messages=0,
@@ -600,6 +652,7 @@ class InMemoryIngestStore:
             messages=0,
             pending_actions=0,
             order_actions=0,
+            inbound_images=len(removed_images),
         )
 
     async def count_orders_by_phone(self, phone_e164: str) -> int:

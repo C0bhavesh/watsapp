@@ -65,6 +65,19 @@ async def test_delete_by_phone_removes_only_that_number() -> None:
     assert set(store.outbound) == {"order_created:gid://shopify/Order/3"}
 
 
+async def test_delete_by_phone_removes_inbound_images() -> None:
+    store = InMemoryIngestStore()
+    await store.save_inbound_image("+919111111111", "wamid.A", "image/jpeg", b"x")
+    await store.save_inbound_image("+919111111111", "wamid.B", "image/jpeg", b"y")
+    await store.save_inbound_image("+919222222222", "wamid.C", "image/jpeg", b"z")
+
+    result = await store.delete_by_phone("+919111111111")
+
+    assert result.inbound_images == 2
+    assert await store.find_inbound_images_by_phone("+919111111111") == []
+    assert await store.find_inbound_images_by_phone("+919222222222") != []
+
+
 async def test_delete_by_phone_no_match_returns_zeros() -> None:
     store = InMemoryIngestStore()
     await _seed(store, "gid://shopify/Order/1", "+919111111111")
@@ -230,6 +243,18 @@ async def test_pg_delete_by_phone_targets_every_phone_bearing_table() -> None:
     assert "DELETE FROM order_actions WHERE actor_wa_id = $1" in joined
 
 
+async def test_pg_delete_by_phone_targets_inbound_images() -> None:
+    conn = _FakeConn()
+    store = PostgresIngestStore(_FakePool(conn))  # type: ignore[arg-type]
+
+    await store.delete_by_phone("+919111111111")
+
+    tables = _targets(conn)
+    assert "inbound_images" in tables
+    bound = {sql: args for sql, args in conn.calls}
+    assert bound["DELETE FROM inbound_images WHERE phone_e164 = $1"] == ("+919111111111",)
+
+
 async def test_pg_delete_by_phone_covers_the_order_mirror_tables() -> None:
     """The mirror's customers/orders rows hold personal data keyed to a phone number."""
     conn = _FakeConn()
@@ -293,6 +318,16 @@ async def test_pg_purge_older_than_ages_actions_and_dedupe_tables() -> None:
     assert "DELETE FROM order_actions WHERE created_at < $1" in joined
     # processed_messages is a dedupe table: not phone-scoped, aged on its own received_at.
     assert "DELETE FROM processed_messages WHERE received_at < $1" in joined
+
+
+async def test_pg_purge_older_than_ages_inbound_images() -> None:
+    conn = _FakeConn()
+    store = PostgresIngestStore(_FakePool(conn))  # type: ignore[arg-type]
+
+    await store.purge_older_than(datetime.now(UTC))
+
+    joined = " ".join(conn.executed)
+    assert "DELETE FROM inbound_images WHERE created_at < $1" in joined
 
 
 class _PurgeOneConn(_FakeConn):

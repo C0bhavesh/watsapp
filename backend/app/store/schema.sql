@@ -306,3 +306,20 @@ CREATE INDEX IF NOT EXISTS idx_exchange_requests_phone ON exchange_requests (pho
 DROP INDEX IF EXISTS ux_exchange_requests_active_order;
 CREATE UNIQUE INDEX ux_exchange_requests_active_order
     ON exchange_requests (order_gid);
+
+-- Inbound customer photos (product-lookup feature, 2026-08-24). Keyed by phone + WhatsApp
+-- message id (wamid) -- deliberately NOT a foreign key into messages/conversations, so storing
+-- the image never depends on when (or whether) the synthesized turn's own message row is
+-- created; the admin thread view joins by phone at read time instead (see
+-- IngestStore.find_inbound_images_by_phone). NOTE: an OWNER-RUN manual migration -- nothing in
+-- the app executes schema.sql automatically; documented here as the source-of-truth DDL.
+CREATE TABLE IF NOT EXISTS inbound_images (
+    id          bigserial PRIMARY KEY,
+    phone_e164  text NOT NULL,
+    wamid       text NOT NULL,
+    mime_type   text NOT NULL,
+    bytes       bytea NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_inbound_images_phone ON inbound_images (phone_e164, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_inbound_images_wamid ON inbound_images (wamid);

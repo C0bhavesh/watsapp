@@ -756,3 +756,44 @@ async def test_user_role_messages_unaffected_by_delivery_status_default() -> Non
     await store.append_message(conv_id, "user", "hi")
     messages = await store.find_messages_by_user_id("+919876500053")
     assert messages[-1].delivery_status is None
+
+
+# --- IngestStore.save_inbound_image / find_inbound_images_by_phone / get_inbound_image ---
+
+
+async def test_save_and_find_inbound_images_by_phone() -> None:
+    store = InMemoryIngestStore()
+    image_id = await store.save_inbound_image(
+        "+919664290413", "wamid.ABC123", "image/jpeg", b"\xff\xd8\xff\xe0fakejpeg"
+    )
+    entries = await store.find_inbound_images_by_phone("+919664290413")
+    assert len(entries) == 1
+    assert entries[0].id == image_id
+    assert entries[0].mime_type == "image/jpeg"
+    assert entries[0].created_at is not None
+
+
+async def test_find_inbound_images_by_phone_no_match_returns_empty() -> None:
+    store = InMemoryIngestStore()
+    await store.save_inbound_image(
+        "+919664290413", "wamid.ABC123", "image/jpeg", b"data"
+    )
+    entries = await store.find_inbound_images_by_phone("+910000000000")
+    assert entries == []
+
+
+async def test_get_inbound_image_returns_bytes() -> None:
+    store = InMemoryIngestStore()
+    image_id = await store.save_inbound_image(
+        "+919664290413", "wamid.ABC123", "image/png", b"\x89PNGfakepng"
+    )
+    stored = await store.get_inbound_image(image_id)
+    assert stored is not None
+    assert stored.phone_e164 == "+919664290413"
+    assert stored.mime_type == "image/png"
+    assert stored.bytes == b"\x89PNGfakepng"
+
+
+async def test_get_inbound_image_missing_id_returns_none() -> None:
+    store = InMemoryIngestStore()
+    assert await store.get_inbound_image(999) is None

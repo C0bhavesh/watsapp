@@ -18,6 +18,7 @@ from app.shopify.models import (
 from app.store.base import (
     ConversationSummary,
     DeletionResult,
+    InboundImageEntry,
     IngestResult,
     MappingUpsert,
     MappingView,
@@ -28,6 +29,7 @@ from app.store.base import (
     OutboundEntry,
     OutboundRetryInfo,
     OutboundView,
+    StoredInboundImage,
     StoredMessage,
 )
 from app.store.pg_factory import LazyPool
@@ -730,6 +732,50 @@ class PostgresIngestStore:
             for r in rows
         ]
 
+    async def save_inbound_image(
+        self, phone_e164: str, wamid: str, mime_type: str, image_bytes: bytes
+    ) -> int:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "INSERT INTO inbound_images (phone_e164, wamid, mime_type, bytes)"
+                " VALUES ($1, $2, $3, $4) RETURNING id",
+                phone_e164, wamid, mime_type, image_bytes,
+            )
+        assert row is not None
+        return int(row["id"])
+
+    async def find_inbound_images_by_phone(
+        self, phone_e164: str, limit: int = 100
+    ) -> list[InboundImageEntry]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, mime_type, created_at FROM inbound_images WHERE phone_e164 = $1"
+                " ORDER BY created_at DESC LIMIT $2",
+                phone_e164, limit,
+            )
+        return [
+            InboundImageEntry(
+                id=int(r["id"]),
+                mime_type=str(r["mime_type"]),
+                created_at=r["created_at"].isoformat() if r["created_at"] else None,
+            )
+            for r in rows
+        ]
+
+    async def get_inbound_image(self, image_id: int) -> StoredInboundImage | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT phone_e164, mime_type, bytes FROM inbound_images WHERE id = $1",
+                image_id,
+            )
+        if row is None:
+            return None
+        return StoredInboundImage(
+            phone_e164=str(row["phone_e164"]),
+            mime_type=str(row["mime_type"]),
+            bytes=bytes(row["bytes"]),
+        )
+
     async def find_order_actions_by_wa_ids(
         self, wa_ids: list[str], limit: int = 100
     ) -> list[OrderActionEntry]:
@@ -1016,6 +1062,9 @@ class PostgresIngestStore:
                 actions = await conn.execute(
                     "DELETE FROM order_actions WHERE actor_wa_id = $1", phone_e164
                 )
+                images = await conn.execute(
+                    "DELETE FROM inbound_images WHERE phone_e164 = $1", phone_e164
+                )
                 order_rows = await conn.fetch(
                     "DELETE FROM orders WHERE phone = $1 OR shipping_phone = $1 "
                     "OR billing_phone = $1 RETURNING customer_gid",
@@ -1038,6 +1087,7 @@ class PostgresIngestStore:
             order_actions=_rows_affected(actions),
             customers=_rows_affected(customers),
             orders=len(order_rows),
+            inbound_images=_rows_affected(images),
         )
 
     async def purge_older_than(self, cutoff: datetime) -> DeletionResult:
@@ -1079,6 +1129,9 @@ class PostgresIngestStore:
                 await conn.execute(
                     "DELETE FROM processed_messages WHERE received_at < $1", cutoff
                 )
+                images = await conn.execute(
+                    "DELETE FROM inbound_images WHERE created_at < $1", cutoff
+                )
         return DeletionResult(
             order_mappings=0,  # kept indefinitely — never age-purged (client Q15)
             outbound_messages=0,  # kept indefinitely — never age-purged (client Q15)
@@ -1086,6 +1139,7 @@ class PostgresIngestStore:
             messages=_rows_affected(msgs),
             pending_actions=_rows_affected(pending),
             order_actions=_rows_affected(actions),
+            inbound_images=_rows_affected(images),
         )
 
     async def count_orders_by_phone(self, phone_e164: str) -> int:

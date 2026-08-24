@@ -106,6 +106,20 @@ class OutboundEntry:
 
 
 @dataclass(frozen=True)
+class InboundImageEntry:
+    id: int
+    mime_type: str
+    created_at: str | None
+
+
+@dataclass(frozen=True)
+class StoredInboundImage:
+    phone_e164: str
+    mime_type: str
+    bytes: bytes
+
+
+@dataclass(frozen=True)
 class OutboundRetryInfo:
     """Retry state of a sent template row, looked up by its current template_wamid. Consumed by
     the delivery-failure auto-retry resend logic: `id` re-targets the row for record_outbound_retry,
@@ -160,6 +174,7 @@ class DeletionResult:
     order_actions: int
     customers: int = 0
     orders: int = 0
+    inbound_images: int = 0
 
 
 class IngestStore(Protocol):
@@ -256,6 +271,16 @@ class IngestStore(Protocol):
     async def find_outbound_by_phone(
         self, phone_e164: str, limit: int = 100
     ) -> list[OutboundEntry]: ...
+
+    async def save_inbound_image(
+        self, phone_e164: str, wamid: str, mime_type: str, image_bytes: bytes
+    ) -> int: ...
+
+    async def find_inbound_images_by_phone(
+        self, phone_e164: str, limit: int = 100
+    ) -> list[InboundImageEntry]: ...
+
+    async def get_inbound_image(self, image_id: int) -> StoredInboundImage | None: ...
 
     # actor_wa_id is written RAW (no leading +, see core/order_actions.py). The unified chat
     # view resolves a thread from the NORMALIZED phone, so it must query with BOTH the normalized

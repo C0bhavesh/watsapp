@@ -281,3 +281,12 @@ def test_chats_js_template_send_surfaces_non_sent_outcome(client: TestClient) ->
     js = client.get("/admin/ui/chats.js").text
     assert "TEMPLATE_STATUS_NOTES" in js
     assert "result.status" in js or "sendStatus" in js
+
+
+def test_chats_js_has_shared_fetch_next_page_helper(client: TestClient) -> None:
+    # loadOlderThreads' single-page fetch-and-merge body must be extracted into a shared
+    # fetchNextPage() helper so the auto-load loop (added next) can reuse it instead of
+    # duplicating the fetch/merge/cursor-update logic.
+    js = client.get("/admin/ui/chats.js").text
+    assert "async function fetchNextPage()" in js
+    assert "await fetchNextPage()" in js

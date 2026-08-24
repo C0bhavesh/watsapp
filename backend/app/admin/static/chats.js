@@ -730,6 +730,22 @@ async function loadThreadList() {
   }
 }
 
+async function fetchNextPage() {
+  // Fetches ONE older page using the current cursor, merges it into allThreads, and updates the
+  // paging state (nextCursor/hasMore). Returns true if any new thread was actually added. Shared
+  // by the manual "Load older" button (loadOlderThreads, below) and the auto-load-on-open/search
+  // loop (autoLoadRemainingThreads) so there is one source of truth for "fetch the next keyset page".
+  const body = await api(
+    conversationsUrl({ q: currentQuery, before_last_active_at: nextCursor })
+  );
+  const before = allThreads.length;
+  allThreads = mergeThreads(allThreads, body.threads);
+  const addedNew = allThreads.length > before;
+  nextCursor = body.next_cursor;
+  hasMore = body.has_more;
+  return addedNew;
+}
+
 async function loadOlderThreads() {
   if (!hasMore || loadingOlder || nextCursor === null) return;
   loadingOlder = true;
@@ -748,14 +764,7 @@ async function loadOlderThreads() {
     // run needs more, the operator clicks again (has_more keeps the button visible).
     let addedNew = false;
     for (let guard = 0; guard < 5 && !addedNew; guard++) {
-      const body = await api(
-        conversationsUrl({ q: currentQuery, before_last_active_at: nextCursor })
-      );
-      const before = allThreads.length;
-      allThreads = mergeThreads(allThreads, body.threads);
-      addedNew = allThreads.length > before;
-      nextCursor = body.next_cursor;
-      hasMore = body.has_more;
+      addedNew = await fetchNextPage();
       if (!hasMore || nextCursor === null) break;
     }
     renderThreadRows(applyThreadFilters(allThreads));

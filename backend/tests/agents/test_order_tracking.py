@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 
 from app.agents.base import DEFAULT_REVEAL_FIELDS, AgentContext
 from app.agents.order_tracking import _format_money, run
+from app.core.conversation import _recover_order_by_name
 from app.providers.base import CompletionResult, Message, ProviderError, ProviderErrorKind
 from app.shopify.models import AuthorizedOrder, Customer, Fulfillment, LineItem, Money, Order
 
@@ -26,6 +27,24 @@ def _order(
         line_items=line_items, fulfillments=fulfillments, customer=customer,
         created_at=created_at,
     )
+
+
+class _UnownedShopify:
+    """Minimal OrderSource whose one order is owned by a DIFFERENT phone, so
+    _recover_order_by_name resolves nothing and produces its unmatched-order-number hint.
+    Only find_order_by_name is exercised; the rest satisfy the structural shape."""
+
+    def __init__(self, order: Order) -> None:
+        self._order = order
+
+    async def get_order(self, gid: str) -> Order | None:
+        return None
+
+    async def find_order_by_name(self, raw_name: str) -> Order | None:
+        return self._order if raw_name == self._order.name else None
+
+    async def find_customer_orders_by_phone(self, phone_e164: str) -> list[Order]:
+        return []
 
 
 _TRACKED = Fulfillment(
@@ -358,15 +377,17 @@ async def test_order_number_format_hint_is_rendered_into_the_prompt() -> None:
 
 
 async def test_unmatched_order_number_hint_is_rendered_into_the_prompt() -> None:
-    """The hint conversation.py's _recover_order_by_name now emits when a shape-valid order
-    number doesn't resolve to an owned order (2026-08-23 fix) must reach the prompt exactly
-    like the wrong-digit-shape hint already does -- same channel, no new plumbing."""
+    """The hint conversation.py's _recover_order_by_name emits when a shape-valid order number
+    doesn't resolve to an owned order (2026-08-23 fix) must reach the prompt exactly like the
+    wrong-digit-shape hint already does -- same channel, no new plumbing. The hint is generated
+    by the REAL _recover_order_by_name (order owned by a different phone), so a future wording
+    change to the generator is caught here -- not just that arbitrary hint text reaches the
+    prompt (which test_order_number_format_hint_is_rendered_into_the_prompt already proves)."""
+    shopify = _UnownedShopify(_order("tavas6543", "+911111111111"))
+    _orders, hint = await _recover_order_by_name(shopify, "919999999999", "where is tavas6543")
+    assert hint is not None
+
     provider = _CapturingProvider(text='{"reply": "I could not find that order."}')
-    hint = (
-        "The customer gave the order number 'tavas6543', but it is not linked to this "
-        "WhatsApp number -- it may belong to a different phone, or may not exist at all; "
-        "you cannot tell which, and must not imply either."
-    )
     context = AgentContext(
         wa_id="919999999999", phone_e164="+919999999999", user_text="where is tavas6543",
         history=[], orders=[], is_vip=False, knowledge={}, provider=provider, model="m",
@@ -376,6 +397,10 @@ async def test_unmatched_order_number_hint_is_rendered_into_the_prompt() -> None
     await run(context)
 
     assert hint in _system_prompt(provider)
+    # The hint must explicitly neutralise the shared HANDOFF_JSON_CONTRACT's own "genuinely
+    # cannot answer or resolve" escalation trigger (appended after it), so an unresolved order
+    # number never re-arms the 24h AI pause -- code-review fix 2026-08-23.
+    assert "keep 'handoff' false for this reason alone" in hint
 
 
 async def test_absent_order_number_format_hint_is_not_rendered() -> None:

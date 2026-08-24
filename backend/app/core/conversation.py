@@ -335,8 +335,12 @@ async def _recover_order_by_name(
         f"used a different phone number when placing the order -- if so, invite them to "
         f"message from that number, or share the order email so you can look into it "
         f"another way. Do not ask them to resend their order number (they already gave a "
-        f"valid one), and do not offer to connect them with the team for this reason alone "
-        f"unless they explicitly ask to speak with a person."
+        f"valid one). Guiding them to the different-phone or order-email path is itself how "
+        f"you help here: it counts as answering the customer, and is NOT the reply "
+        f"contract's case of 'genuinely cannot answer or resolve their request with what "
+        f"you know' (you have told them exactly what to say and do next) -- so keep "
+        f"'handoff' false for this reason alone; only set 'handoff' to true if the customer "
+        f"explicitly asks to speak with a person."
     )
 
 

@@ -604,6 +604,75 @@ def test_conversation_thread_non_template_entries_have_no_status_key(
     assert "delivery_status" not in customer_entry
 
 
+def test_conversation_thread_includes_customer_image_entry(client: TestClient) -> None:
+    login(client)
+    _send_ai_message("+919664290413", "hi", "hello there")
+    thread_id = _thread_id_for(client, "+919664290413")
+
+    async def _save_image() -> int:
+        return await get_container().ingest.save_inbound_image(
+            "+919664290413", "wamid.IMG1", "image/jpeg", b"\xff\xd8\xff\xe0fakejpeg"
+        )
+
+    image_id = asyncio.run(_save_image())
+
+    resp = client.get(f"/admin/conversations/{thread_id}")
+    entries = resp.json()["entries"]
+    image_entry = next(e for e in entries if e["type"] == "customer_image")
+    assert image_entry["image_id"] == image_id
+    assert image_entry["mime_type"] == "image/jpeg"
+
+
+def test_get_conversation_image_returns_bytes(client: TestClient) -> None:
+    login(client)
+    _send_ai_message("+919664290413", "hi", "hello there")
+    thread_id = _thread_id_for(client, "+919664290413")
+
+    async def _save_image() -> int:
+        return await get_container().ingest.save_inbound_image(
+            "+919664290413", "wamid.IMG1", "image/png", b"\x89PNGfakepng"
+        )
+
+    image_id = asyncio.run(_save_image())
+
+    resp = client.get(f"/admin/conversations/{thread_id}/images/{image_id}")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/png"
+    assert resp.content == b"\x89PNGfakepng"
+
+
+def test_get_conversation_image_404s_for_wrong_thread(client: TestClient) -> None:
+    login(client)
+    _send_ai_message("+919664290413", "hi", "hello there")
+    _send_ai_message("+919876500000", "hi", "hello there")
+    thread_a = _thread_id_for(client, "+919664290413")
+
+    async def _save_image() -> int:
+        return await get_container().ingest.save_inbound_image(
+            "+919876500000", "wamid.IMG2", "image/jpeg", b"other-customer-photo"
+        )
+
+    image_id = asyncio.run(_save_image())
+
+    resp = client.get(f"/admin/conversations/{thread_a}/images/{image_id}")
+    assert resp.status_code == 404
+
+
+def test_get_conversation_image_404s_for_missing_id(client: TestClient) -> None:
+    login(client)
+    _send_ai_message("+919664290413", "hi", "hello there")
+    thread_id = _thread_id_for(client, "+919664290413")
+
+    resp = client.get(f"/admin/conversations/{thread_id}/images/999999")
+    assert resp.status_code == 404
+
+
+def test_get_conversation_image_404s_for_unknown_thread(client: TestClient) -> None:
+    login(client)
+    resp = client.get("/admin/conversations/999999/images/1")
+    assert resp.status_code == 404
+
+
 def test_conversation_thread_template_entry_includes_delivery_status(
     client: TestClient,
 ) -> None:

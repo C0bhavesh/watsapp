@@ -974,6 +974,14 @@ async def get_conversation_thread(thread_id: int) -> dict[str, object]:
             "text": _button_tap_text(action.action, action.result),
         })
 
+    for img in await c.ingest.find_inbound_images_by_phone(user_id, limit=200):
+        entries.append({
+            "type": "customer_image",
+            "timestamp": img.created_at,
+            "image_id": img.id,
+            "mime_type": img.mime_type,
+        })
+
     # Timestamps are ISO 8601 strings (or None -> ""), which sort lexicographically in
     # chronological order. str() keeps the key type mypy-checkable (object -> str).
     entries.sort(key=lambda e: str(e["timestamp"] or ""))
@@ -1013,6 +1021,22 @@ async def get_conversation_thread(thread_id: int) -> dict[str, object]:
         "orders": order_summaries,
         "paused_until": paused_until.isoformat() if paused_until else None,
     }
+
+
+@admin_router.get(
+    "/conversations/{thread_id}/images/{image_id}", dependencies=[Depends(require_admin)]
+)
+async def get_conversation_image(thread_id: int, image_id: int) -> Response:
+    c = get_container()
+    user_id = await c.conversations.get_user_id(thread_id)
+    if user_id is None:
+        raise HTTPException(status_code=404, detail="thread not found")
+    image = await c.ingest.get_inbound_image(image_id)
+    # Ownership check: an image id belonging to a DIFFERENT thread's phone must never be
+    # revealed via this thread's id.
+    if image is None or image.phone_e164 != user_id:
+        raise HTTPException(status_code=404, detail="image not found")
+    return Response(content=image.bytes, media_type=image.mime_type)
 
 
 @admin_router.post("/exchanges/{exchange_id}", dependencies=[Depends(require_admin)])

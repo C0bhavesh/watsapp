@@ -652,6 +652,10 @@ let nextCursor = null;
 let hasMore = false;
 let currentQuery = "";
 let loadingOlder = false;
+// Generation token to guard against race conditions: when search changes while auto-load is running,
+// the new loadThreadList() call increments this, and in-flight requests from the old call detect
+// they've been superseded and discard their responses to prevent corrupting the new query's state.
+let loadGeneration = 0;
 
 function conversationsUrl(params) {
   const usp = new URLSearchParams();
@@ -713,10 +717,12 @@ function renderThreadRows(threads) {
 }
 
 async function loadThreadList() {
+  const myGen = ++loadGeneration;
   // A fresh load of the FIRST page (initial load, refresh button, or a search-term change). Resets
   // the paging state -- any previously appended older pages are discarded and re-fetched on demand.
   try {
     const body = await api(conversationsUrl({ q: currentQuery }));
+    if (myGen !== loadGeneration) return; // superseded by a newer call while this awaited
     allThreads = body.threads;
     nextCursor = body.next_cursor;
     hasMore = body.has_more;
@@ -729,7 +735,7 @@ async function loadThreadList() {
     el("list-status").textContent = e.message;
     return;
   }
-  await autoLoadRemainingThreads();
+  await autoLoadRemainingThreads(myGen);
 }
 
 // Auto-load cap for the loop below: 10 total pages (the first page fetched by loadThreadList
@@ -738,12 +744,14 @@ async function loadThreadList() {
 // "Load older chats" button instead of an unbounded burst against the shared DB pool.
 const AUTO_LOAD_MAX_PAGES = 10;
 
-async function autoLoadRemainingThreads() {
+async function autoLoadRemainingThreads(myGen) {
   // Called right after loadThreadList's first page. Keeps fetching subsequent pages (reusing
   // fetchNextPage, the same fetch loadOlderThreads uses) until history is exhausted or
   // AUTO_LOAD_MAX_PAGES is reached, so the filter chips above (which only match allThreads) see
   // the full loaded set with no click for realistic chat volumes. loadingOlder/updateLoadOlderButton
   // are reused so the manual button stays hidden/disabled for the loop's duration.
+  // myGen guards against race conditions: if search changes while auto-load runs, the new call
+  // increments loadGeneration, and this call detects it via myGen !== loadGeneration and stops.
   if (!hasMore) return;
   loadingOlder = true;
   updateLoadOlderButton();
@@ -752,6 +760,8 @@ async function autoLoadRemainingThreads() {
     let pagesFetched = 1;
     while (hasMore && pagesFetched < AUTO_LOAD_MAX_PAGES) {
       await fetchNextPage();
+      if (myGen !== loadGeneration) return; // a newer loadThreadList call superseded this run;
+                                             // stop writing/rendering on its behalf
       pagesFetched++;
       renderThreadRows(applyThreadFilters(allThreads));
       renderFilterChips();
@@ -760,8 +770,12 @@ async function autoLoadRemainingThreads() {
   } catch (e) {
     el("list-status").textContent = e.message;
   } finally {
-    loadingOlder = false;
-    updateLoadOlderButton();
+    // Only clean up if we're still the current generation. If superseded, the newer call owns
+    // the UI state and will set loadingOlder/button to its own values.
+    if (myGen === loadGeneration) {
+      loadingOlder = false;
+      updateLoadOlderButton();
+    }
   }
 }
 

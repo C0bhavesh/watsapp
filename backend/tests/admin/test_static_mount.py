@@ -300,6 +300,9 @@ def test_chats_js_auto_loads_all_threads_up_to_a_cap(client: TestClient) -> None
     # requiring a manual click for realistic chat volumes.
     js = client.get("/admin/ui/chats.js").text
     assert "const AUTO_LOAD_MAX_PAGES = 10" in js
-    assert "async function autoLoadRemainingThreads()" in js
-    assert "await autoLoadRemainingThreads()" in js
+    assert "async function autoLoadRemainingThreads(myGen)" in js
+    assert "await autoLoadRemainingThreads(myGen)" in js
     assert "Loading chats" in js
+    # Race condition guard: generation token to detect when search changes mid-auto-load.
+    assert "let loadGeneration = 0" in js
+    assert "myGen !== loadGeneration" in js

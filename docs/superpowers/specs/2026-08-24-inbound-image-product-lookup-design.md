@@ -53,21 +53,43 @@ every other schema change in this project's history):
 ```sql
 CREATE TABLE IF NOT EXISTS inbound_images (
     id          bigserial PRIMARY KEY,
-    message_id  bigint NOT NULL REFERENCES messages (id) ON DELETE CASCADE,
+    phone_e164  text NOT NULL,
+    wamid       text NOT NULL,
     mime_type   text NOT NULL,
     bytes       bytea NOT NULL,
     created_at  timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_inbound_images_message_id ON inbound_images (message_id);
+CREATE INDEX IF NOT EXISTS idx_inbound_images_phone ON inbound_images (phone_e164, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_inbound_images_wamid ON inbound_images (wamid);
 ```
 
-One row per image, one-to-one with the `messages` row `append_message()` already returns an id for.
-Stored in the existing Supabase Postgres database (owner-chosen — no new infrastructure/credentials,
-consistent with this project's current all-Postgres stack). The existing `retention_days` purge job
-is extended to also delete `inbound_images` rows for purged conversations (same lifecycle as every
-other per-phone data this project already retains/purges).
+**Amended during planning (2026-08-24), before implementation:** the schema above replaces an
+earlier draft that FK'd `inbound_images.message_id -> messages.id`. That draft turned out to be
+unworkable — the image is downloaded/stored *before* `run_turn()` is called, but the corresponding
+`messages` row (role="user", the synthesized text) is only created *inside* `run_turn()`, so no
+message row exists yet at the point the image needs to be stored. The implemented design instead
+keys `inbound_images` on `(phone_e164, wamid)` — decoupled from `messages`/`conversations` entirely,
+with no FK and no ordering dependency. The admin thread view (`IngestStore.find_inbound_images_by_phone`)
+joins by phone at *read* time instead, mirroring the existing pattern already used there for
+`template_sent`/`button_tap` entries (each a separate source merged into the thread by timestamp,
+not a foreign key into `messages`). Stored in the existing Supabase Postgres database (owner-chosen
+— no new infrastructure/credentials, consistent with this project's current all-Postgres stack).
+The existing DPDP erasure (`delete_by_phone`) and retention purge (`purge_older_than`) are both
+extended to also remove `inbound_images` rows, in the same "conversation history" retention class as
+`conversations`/`messages`/`pending_actions`/`order_actions` (non-zero for both operations, unlike
+the order/customer-mirror fields which are `delete_by_phone`-only per the existing Q15 decision).
 
 ## Provider layer
+
+**Amended during planning (2026-08-24):** implemented as a new method on the shared `LLMProvider`
+Protocol (`app/providers/base.py`), not concrete-only as originally drafted below. Reason: the
+resolution helper `app.deps.active_llm()` returns the `LLMProvider` Protocol type, not the concrete
+`LiteLLMProvider`; calling `.describe_image(...)` on that Protocol-typed value requires the method to
+be declared on the Protocol to stay mypy-strict-clean without a cast/isinstance check. Adding one
+orthogonal method to the Protocol does not force every existing agent to implement or use it (only
+`Message.content` staying string-only — the thing that WOULD have rippled into every agent — was the
+real minimal-blast-radius boundary, and that boundary is unchanged either way). Original rationale,
+for context:
 
 A new method on the concrete `LiteLLMProvider` (not added to the shared `LLMProvider` Protocol —
 there is only one implementation today and nothing else needs to be swappable for this one narrow

@@ -165,16 +165,28 @@ async def receive_webhook(request: Request) -> Response:
                         len(events) - processed + 1,
                     )
                 else:
-                    synthesized = await handle_inbound_image(c, cfg, event, remaining)
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        logger.warning(
-                            "request budget spent after image intake; skipping conversation "
-                            "turn for %s",
+                    try:
+                        synthesized = await handle_inbound_image(c, cfg, event, remaining)
+                    except Exception:
+                        # handle_inbound_image is documented as never-raising, but an
+                        # infrastructure failure (a DB pool error inside active_llm, a
+                        # urlsplit ValueError on a malformed Meta URL) is not one of the
+                        # cases it explicitly guards -- a tap/turn must never 500 the signed
+                        # webhook (matches dispatch_button's own posture below).
+                        logger.exception(
+                            "image intake failed unexpectedly; webhook still acks 200 for %s",
                             event.message_id,
                         )
                     else:
-                        await run_turn(c, synthesized, budget_seconds=remaining)
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            logger.warning(
+                                "request budget spent after image intake; skipping "
+                                "conversation turn for %s",
+                                event.message_id,
+                            )
+                        else:
+                            await run_turn(c, synthesized, budget_seconds=remaining)
             elif isinstance(event, (InboundButton, InboundInteractive)):
                 # Deterministic confirm/cancel dispatch (order:confirm/cancel -> tagsAdd/
                 # orderCancel). NO LLM. A tap is processed even for a paused/handed-off

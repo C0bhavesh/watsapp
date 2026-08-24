@@ -2314,3 +2314,63 @@ async def test_post_image_event_budget_exhausted_by_intake_skips_run_turn_but_st
     assert resp.json()["processed"] == 1  # still deduped and acked
     assert run_turn_calls == []  # budget was spent by intake itself, before run_turn could fire
     assert "budget spent after image intake" in caplog.text
+
+
+async def test_post_image_event_stores_image_under_the_same_phone_key_run_turn_uses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end proof that handle_inbound_image's storage key matches _run_turn's conversation
+    key -- unlike the sibling test above, fetch_media/active_llm are faked one level lower than
+    handle_inbound_image itself, so this exercises the real intake function, not a stub of it."""
+    from app.channels.whatsapp_media import FetchedMedia
+
+    async def fake_fetch_media(http, cfg, media_id, timeout=20.0):
+        return FetchedMedia(bytes=b"fakejpeg", mime_type="image/jpeg")
+
+    async def fake_active_llm_for_vision(settings, config):
+        class _FakeVisionProvider:
+            async def describe_image(self, *a, **kw):
+                return "a black cotton hoodie"
+        return (_FakeVisionProvider(), "gemini/gemini-flash-latest", "test-key", None)
+
+    monkeypatch.setattr("app.channels.whatsapp_image_intake.fetch_media", fake_fetch_media)
+    monkeypatch.setattr(
+        "app.channels.whatsapp_image_intake.active_llm", fake_active_llm_for_vision
+    )
+
+    sent: dict[str, object] = {}
+
+    async def fake_send_text(http, cfg, to, body, timeout=20.0):
+        from app.channels.whatsapp_sender import SendResult
+        sent["body"] = body
+        return SendResult(ok=True, status_code=200, wamid="x", error=None)
+
+    monkeypatch.setattr("app.core.conversation.send_text", fake_send_text)
+
+    provider = FakeProvider(
+        responses=[
+            json.dumps({"intent": "product_search"}),
+            json.dumps({"reply": "That hoodie is Rs. 1499, in stock in M/L."}),
+        ]
+    )
+    monkeypatch.setattr("app.core.conversation.active_llm", _fake_active_llm(provider))
+
+    from app.admin.controls import AdminControls, save_controls
+    await save_controls(get_container().config, AdminControls(send_mode="live"))
+
+    body = json.dumps(
+        envelope({
+            "from": "919999999999",
+            "id": "wamid.imgE2E",
+            "timestamp": "1",
+            "type": "image",
+            "image": {"id": "MEDIA1", "mime_type": "image/jpeg", "caption": "what's the price?"},
+        })
+    ).encode()
+    resp = await post(body, {"X-Hub-Signature-256": sign(body)})
+
+    assert resp.status_code == 200
+    saved = await get_container().ingest.find_inbound_images_by_phone("+919999999999")
+    assert len(saved) == 1
+    assert saved[0].mime_type == "image/jpeg"
+    assert sent["body"] == "That hoodie is Rs. 1499, in stock in M/L."

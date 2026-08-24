@@ -29,7 +29,7 @@ async def _fetch_and_describe(
     try:
         await c.ingest.save_inbound_image(phone, event.message_id, media.mime_type, media.bytes)
     except Exception:
-        logger.exception("failed to persist inbound image; continuing without storage")
+        logger.warning("failed to persist inbound image; continuing without storage")
 
     try:
         llm = await active_llm(c.settings, c.config)
@@ -45,7 +45,7 @@ async def _fetch_and_describe(
             media.bytes, media.mime_type, api_key, model, call_timeout, extra_params=extra_params
         )
     except ProviderError:
-        logger.exception("vision description failed; continuing without it")
+        logger.warning("vision description failed; continuing without it")
         return None
 
 
@@ -63,11 +63,12 @@ async def handle_inbound_image(
     budget_seconds is the per-delivery time remaining when this call started. call_timeout caps
     each individual network call (fetch_media does up to 2 sequential HTTP calls, describe_image
     adds a third); asyncio.wait_for around the whole sequence ALSO enforces a genuine wall-clock
-    total of 3x call_timeout -- a bare timeout= float handed to httpx is four independent
-    per-operation deadlines, never a wall-clock cap, so the per-call bound alone cannot guarantee
-    this function returns in time (see error_learnings.md, 2026-08-14). If too little budget
-    remains to safely attempt a network round trip, skip straight to the caption/placeholder
-    fallback rather than risk exhausting the whole delivery.
+    total of 3x call_timeout, capped at 60% of budget_seconds so run_turn is always guaranteed
+    some minimum share of the remaining delivery budget -- a bare timeout= float handed to httpx
+    is four independent per-operation deadlines, never a wall-clock cap, so the per-call bound
+    alone cannot guarantee this function returns in time (see error_learnings.md, 2026-08-14). If
+    too little budget remains to safely attempt a network round trip, skip straight to the
+    caption/placeholder fallback rather than risk exhausting the whole delivery.
     """
     phone = normalize_phone(event.wa_id)
     description: str | None = None
@@ -75,14 +76,15 @@ async def handle_inbound_image(
     if phone is not None:
         call_timeout = min(15.0, budget_seconds / 3)
         if call_timeout >= 2.0:
+            wait_timeout = min(call_timeout * 3, budget_seconds * 0.6)
             try:
                 description = await asyncio.wait_for(
                     _fetch_and_describe(c, cfg, event, phone, call_timeout),
-                    timeout=call_timeout * 3,
+                    timeout=wait_timeout,
                 )
             except TimeoutError:
                 logger.warning(
-                    "image intake timed out after %.1fs; continuing without it", call_timeout * 3
+                    "image intake timed out after %.1fs; continuing without it", wait_timeout
                 )
         else:
             logger.warning(

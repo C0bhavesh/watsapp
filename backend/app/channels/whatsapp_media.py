@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -13,6 +14,8 @@ _ALLOWED_IMAGE_MIME_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
 # suffix match (mirrors shopify/client.py::_is_shopify_image_url) so a lookalike host
 # ("fbsbx.com.evil.com") is rejected, not just a substring match.
 _META_MEDIA_HOST_SUFFIXES = (".fbsbx.com", ".fbcdn.net", ".facebook.com")
+
+logger = logging.getLogger("app.channels.whatsapp_media")
 
 
 @dataclass(frozen=True)
@@ -63,6 +66,10 @@ async def fetch_media(
     if mime_type not in _ALLOWED_IMAGE_MIME_TYPES:
         return None
     if not _is_trusted_meta_media_url(url):
+        logger.warning(
+            "rejected media download host %r (not in the Meta CDN allowlist)",
+            urlsplit(url).hostname,
+        )
         return None
 
     try:

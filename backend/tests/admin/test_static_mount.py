@@ -286,9 +286,10 @@ def test_chats_js_template_send_surfaces_non_sent_outcome(client: TestClient) ->
 def test_chats_js_has_shared_fetch_next_page_helper(client: TestClient) -> None:
     # loadOlderThreads' single-page fetch-and-merge body must be extracted into a shared
     # fetchNextPage() helper so the auto-load loop (added next) can reuse it instead of
-    # duplicating the fetch/merge/cursor-update logic.
+    # duplicating the fetch/merge/cursor-update logic. The function accepts an optional generation
+    # token for the auto-load path to guard against race conditions.
     js = client.get("/admin/ui/chats.js").text
-    assert "async function fetchNextPage()" in js
+    assert "async function fetchNextPage(myGen)" in js
     assert "await fetchNextPage()" in js
 
 

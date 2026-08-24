@@ -759,7 +759,7 @@ async function autoLoadRemainingThreads(myGen) {
   try {
     let pagesFetched = 1;
     while (hasMore && pagesFetched < AUTO_LOAD_MAX_PAGES) {
-      await fetchNextPage();
+      await fetchNextPage(myGen);
       if (myGen !== loadGeneration) return; // a newer loadThreadList call superseded this run;
                                              // stop writing/rendering on its behalf
       pagesFetched++;
@@ -779,14 +779,19 @@ async function autoLoadRemainingThreads(myGen) {
   }
 }
 
-async function fetchNextPage() {
+async function fetchNextPage(myGen) {
   // Fetches ONE older page using the current cursor, merges it into allThreads, and updates the
   // paging state (nextCursor/hasMore). Returns true if any new thread was actually added. Shared
-  // by the manual "Load older" button (loadOlderThreads, below) and the auto-load-on-open/search
-  // loop (autoLoadRemainingThreads) so there is one source of truth for "fetch the next keyset page".
+  // by loadOlderThreads (manual "Load older" button, calls with no generation token -- the manual
+  // button's own supersession race is a separate, pre-existing, out-of-scope concern) and
+  // autoLoadRemainingThreads (passes its generation token). The staleness check must happen HERE,
+  // before the mutation lines, not in the caller after this function returns -- nothing runs
+  // between this function's own await resolving and its state writes for a caller-side check
+  // placed after the call to intercept.
   const body = await api(
     conversationsUrl({ q: currentQuery, before_last_active_at: nextCursor })
   );
+  if (myGen !== undefined && myGen !== loadGeneration) return false;
   const before = allThreads.length;
   allThreads = mergeThreads(allThreads, body.threads);
   const addedNew = allThreads.length > before;

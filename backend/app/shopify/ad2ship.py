@@ -72,7 +72,18 @@ class Ad2shipTracking:
         )
 
 
+def _log_failure(exc: Exception) -> None:
+    """Log a fetch/parse failure with the exception TYPE only (no awb/URL/message)."""
+    logger.warning("ad2ship fetch failed: type=%s", type(exc).__name__)
+
+
 def _first_history_item(html: str) -> str:
+    """Return everything after the FIRST ``history-item`` marker.
+
+    Caveat: this is the tail of the document, not a single isolated block — safe
+    for the current `.search`-first-match callers, but a future caller that
+    iterates history items must slice to the next marker itself.
+    """
     parts = html.split(_HISTORY_ITEM_MARKER, 2)
     return parts[1] if len(parts) > 1 else ""
 
@@ -153,7 +164,7 @@ async def fetch_tracking(
             follow_redirects=False,
         )
     except (httpx.HTTPError, ValueError) as exc:
-        logger.warning("ad2ship fetch failed: type=%s", type(exc).__name__)
+        _log_failure(exc)
         return None
 
     if resp.status_code != 200:
@@ -162,5 +173,5 @@ async def fetch_tracking(
     try:
         return _parse(resp.text)
     except Exception as exc:
-        logger.warning("ad2ship fetch failed: type=%s", type(exc).__name__)
+        _log_failure(exc)
         return None

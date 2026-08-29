@@ -30,15 +30,20 @@ async def test_delivered_page_parses_as_customer_delivery() -> None:
     assert isinstance(t, Ad2shipTracking)
     assert t.status == "delivered"
     assert t.is_delivered_to_customer() and not t.is_rto()
+    assert t.is_terminal()
     assert t.last_scan_remark == "Delivered"
     assert t.current_city == "Maharashtra"
+    assert t.expected_date is None  # only a "Delivered Date" box present
 
 
+@pytest.mark.parametrize(
+    "fixture", sorted(FIX.glob("rto_delivered_*.html")), ids=lambda p: p.name
+)
 @pytest.mark.asyncio
-async def test_rto_page_parses_as_rto() -> None:
-    html = (FIX / "rto_delivered_tavas3908.html").read_text(encoding="utf-8")
+async def test_rto_page_parses_as_rto(fixture: pathlib.Path) -> None:
+    html = fixture.read_text(encoding="utf-8")
     async with _client(html) as c:
-        t = await fetch_tracking(c, "57143610373752")
+        t = await fetch_tracking(c, "x")
     assert t is not None and t.status == "rto_delivered"
     assert t.is_rto() and t.is_terminal() and not t.is_delivered_to_customer()
     assert (t.current_hub or "").startswith("Surat_")
@@ -51,6 +56,10 @@ async def test_in_transit_page_is_non_terminal() -> None:
     async with _client(html) as c:
         t = await fetch_tracking(c, "x")
     assert t is not None and not t.is_terminal()
+    assert t.status == "in_transit"
+    assert t.expected_date == "Aug 29, 2026"  # "Expected Delivery" date-box
+    assert t.current_hub == "Mumbai_AzadNagar_D"
+    assert t.current_city == "Maharashtra"
 
 
 @pytest.mark.asyncio

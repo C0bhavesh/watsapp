@@ -18,11 +18,17 @@ from app.store.base import (
     OutboundEntry,
     OutboundRetryInfo,
     OutboundView,
+    PendingDeliveryConfirmation,
     StoredInboundImage,
     StoredMessage,
     ThreadActivity,
 )
 from app.store.postgres import MAX_MIRROR_FULFILLMENTS, _e164, _search_name_patterns
+
+# Terminal normalized shipment states: once a fulfillment reaches one of these, an incoming
+# set_fulfillment_shipment_status must NOT regress it to a non-terminal state (the tracking_*
+# snapshot still updates). Mirrors the Postgres CASE guard so the two impls agree.
+_TERMINAL_SHIPMENT_STATES = frozenset({"delivered", "failure", "rto"})
 
 
 def _parse_iso(value: str | None) -> datetime | None:
@@ -188,6 +194,11 @@ class InMemoryIngestStore:
         # every upsert_order_mirror AND upsert_fulfillment so latest_activity_for_phone can detect a
         # mirror refresh for this customer's orders, matching the Postgres MAX(synced_at) signal.
         self._order_mirror_synced_at: dict[str, datetime] = {}
+        # fulfillment_gid -> parked delivery-confirmation (RTO-aware flow). Keyed by fulfillment_gid
+        # so record_* is idempotent per shipment, mirroring the Postgres PRIMARY KEY. Kept separate
+        # from `self.fulfillments` because a confirmation outlives (and is queried without) the
+        # fulfillment mirror row, exactly like the Postgres table + its FK.
+        self._pending_confirmations: dict[str, PendingDeliveryConfirmation] = {}
 
     async def ingest_order_created(
         self,
@@ -284,6 +295,78 @@ class InMemoryIngestStore:
             fulfillment = replace(fulfillment, delivered_at=existing.delivered_at)
         self.fulfillments.setdefault(order_gid, {})[fulfillment.gid] = fulfillment
         self._order_mirror_synced_at[order_gid] = datetime.now(UTC)
+
+    async def record_pending_delivery_confirmation(
+        self, *, fulfillment_gid: str, order_gid: str, phone_e164: str, due_at: datetime
+    ) -> None:
+        # Idempotent on fulfillment_gid (mirrors the Postgres ON CONFLICT DO NOTHING): a second
+        # record for the same shipment must NOT reset due_at / phone_e164 / state.
+        if fulfillment_gid in self._pending_confirmations:
+            return
+        self._pending_confirmations[fulfillment_gid] = PendingDeliveryConfirmation(
+            fulfillment_gid=fulfillment_gid, order_gid=order_gid,
+            phone_e164=phone_e164, due_at=due_at, state="pending",
+        )
+
+    async def due_delivery_confirmations(
+        self, now: datetime, limit: int = 50
+    ) -> list[PendingDeliveryConfirmation]:
+        due = [
+            row for row in self._pending_confirmations.values()
+            if row.state == "pending" and row.due_at <= now
+        ]
+        due.sort(key=lambda r: r.due_at)  # earliest first, mirroring ORDER BY due_at
+        return due[:limit]
+
+    async def set_delivery_confirmation_state(
+        self, fulfillment_gid: str, state: str
+    ) -> None:
+        row = self._pending_confirmations.get(fulfillment_gid)
+        if row is not None:
+            self._pending_confirmations[fulfillment_gid] = replace(row, state=state)
+
+    async def set_fulfillment_shipment_status(
+        self, fulfillment_gid: str, shipment_status: str,
+        *, tracking_city: str | None = None, tracking_hub: str | None = None,
+        last_scan: str | None = None, expected_date: str | None = None,
+        checked_at: datetime | None = None,
+    ) -> None:
+        # Locate the mirrored fulfillment by its gid across all orders (no-op if absent). The
+        # shipment_status write is monotonic -- a terminal stored state is never regressed -- but
+        # the tracking_* snapshot + checked_at are written unconditionally (COALESCE semantics: a
+        # None argument leaves the stored value untouched). Mirrors the Postgres CASE + COALESCE.
+        for order_gid, fmap in self.fulfillments.items():
+            existing = fmap.get(fulfillment_gid)
+            if existing is None:
+                continue
+            new_status = (
+                existing.shipment_status
+                if existing.shipment_status in _TERMINAL_SHIPMENT_STATES
+                else shipment_status
+            )
+            fmap[fulfillment_gid] = replace(
+                existing,
+                shipment_status=new_status,
+                tracking_city=(
+                    tracking_city if tracking_city is not None else existing.tracking_city
+                ),
+                tracking_hub=(
+                    tracking_hub if tracking_hub is not None else existing.tracking_hub
+                ),
+                tracking_last_scan=(
+                    last_scan if last_scan is not None else existing.tracking_last_scan
+                ),
+                tracking_expected_date=(
+                    expected_date if expected_date is not None
+                    else existing.tracking_expected_date
+                ),
+                tracking_checked_at=(
+                    checked_at.isoformat() if checked_at is not None
+                    else existing.tracking_checked_at
+                ),
+            )
+            self._order_mirror_synced_at[order_gid] = datetime.now(UTC)
+            return
 
     def _with_fulfillments(self, order: Order | None) -> Order | None:
         if order is None:

@@ -21,6 +21,20 @@ class ConfigRepo(Protocol):
 
 
 @dataclass(frozen=True)
+class PendingDeliveryConfirmation:
+    """A shipment that reported 'delivered' and is now parked, awaiting a due-time re-check before
+    the customer is messaged (RTO-aware delivery flow). A 'delivered' webhook records one of these
+    instead of sending immediately; the sweep job promotes/aborts it by moving `state`
+    (pending -> sent | rto | abandoned)."""
+
+    fulfillment_gid: str
+    order_gid: str
+    phone_e164: str
+    due_at: datetime
+    state: str  # pending | sent | rto | abandoned
+
+
+@dataclass(frozen=True)
 class MappingUpsert:
     order_gid: str
     order_name: str
@@ -354,6 +368,36 @@ class IngestStore(Protocol):
     async def upsert_order_mirror(self, order: Order) -> None: ...
 
     async def upsert_fulfillment(self, order_gid: str, fulfillment: Fulfillment) -> None: ...
+
+    # --- RTO-aware delivery: parked delivery-confirmations + normalized shipment status ---
+
+    # Records a 'delivered' shipment to re-check at due_at before messaging the customer.
+    # Idempotent: ON CONFLICT (fulfillment_gid) DO NOTHING -- a second call for the same
+    # fulfillment_gid must NOT change the stored due_at or phone_e164.
+    async def record_pending_delivery_confirmation(
+        self, *, fulfillment_gid: str, order_gid: str, phone_e164: str, due_at: datetime
+    ) -> None: ...
+
+    # Rows with state='pending' AND due_at <= now, ordered by due_at (earliest first), capped.
+    async def due_delivery_confirmations(
+        self, now: datetime, limit: int = 50
+    ) -> list[PendingDeliveryConfirmation]: ...
+
+    async def set_delivery_confirmation_state(
+        self, fulfillment_gid: str, state: str
+    ) -> None: ...
+
+    # Writes our OWN normalized shipment_status + cached ad2ship tracking snapshot onto a mirrored
+    # fulfillment. shipment_status is MONOTONIC: progression is in_transit -> out_for_delivery ->
+    # attempted_delivery -> (delivered|failure|rto), the last three TERMINAL. If the stored
+    # shipment_status is already one of {delivered, failure, rto}, an incoming call does NOT change
+    # it -- but the tracking_* fields + checked_at ARE written unconditionally regardless.
+    async def set_fulfillment_shipment_status(
+        self, fulfillment_gid: str, shipment_status: str,
+        *, tracking_city: str | None = None, tracking_hub: str | None = None,
+        last_scan: str | None = None, expected_date: str | None = None,
+        checked_at: datetime | None = None,
+    ) -> None: ...
 
     async def customer_exists(self, gid: str) -> bool: ...
 

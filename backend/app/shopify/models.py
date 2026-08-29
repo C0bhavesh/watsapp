@@ -81,14 +81,23 @@ class Fulfillment:
     # Populated ONLY on the live GraphQL read path; the RTO-aware delivery rule reads it to decide
     # if a shipment is genuinely delivered vs attempted/returned. None on any webhook/mirror parse.
     display_status: str | None = None
-    # The fulfillment's Shopify tracking timeline, newest-relevant first (see FulfillmentEvent).
-    # GraphQL-read-path only; empty on webhook/mirror parses. The delivery rule scans this for an
-    # ATTEMPTED/failure event AFTER a DELIVERED to catch a marked-delivered-then-returned shipment.
+    # The fulfillment's Shopify tracking timeline, oldest-first (ascending by HAPPENED_AT, per the
+    # `sortKey: HAPPENED_AT` GraphQL query -- see FulfillmentEvent). GraphQL-read-path only; empty
+    # on webhook/mirror parses. The delivery rule scans this for an ATTEMPTED/failure event AFTER a
+    # DELIVERED to catch a marked-delivered-then-returned shipment.
     events: tuple[FulfillmentEvent, ...] = ()
-    # Our OWN normalized delivery-state mirror column (Task 4 populates it from ad2ship/the events
-    # rule). Not a Shopify field -- distinct from display_status. Left defaulted on every read path
-    # here; only the mirror write path sets it.
+    # Our OWN normalized delivery-state mirror column (populated from ad2ship/the events rule). Not
+    # a Shopify field -- distinct from display_status. Left defaulted on every read path here; only
+    # the mirror write path (IngestStore.set_fulfillment_shipment_status) sets it.
     shipment_status: str | None = None
+    # Our OWN cached ad2ship tracking snapshot, written alongside shipment_status by
+    # set_fulfillment_shipment_status (Task 7's agent enrichment reads them). Not Shopify fields.
+    # Left defaulted on every read path here; only the mirror write path sets them.
+    tracking_checked_at: str | None = None  # ISO-8601, when tracking_* was last refreshed
+    tracking_city: str | None = None
+    tracking_hub: str | None = None
+    tracking_last_scan: str | None = None
+    tracking_expected_date: str | None = None
 
     def has_tracking(self) -> bool:
         return bool(self.tracking_number or self.tracking_url)

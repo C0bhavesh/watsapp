@@ -323,3 +323,37 @@ CREATE TABLE IF NOT EXISTS inbound_images (
 );
 CREATE INDEX IF NOT EXISTS idx_inbound_images_phone ON inbound_images (phone_e164, created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_inbound_images_wamid ON inbound_images (wamid);
+
+-- Parked delivery-confirmations (RTO-aware delivery, 2026-08-29). A 'delivered' fulfillment
+-- webhook records a row here (state='pending') INSTEAD of messaging the customer immediately;
+-- a sweep job re-checks each at due_at and advances state (pending -> sent | rto | abandoned).
+-- PRIMARY KEY (fulfillment_gid) makes "one parked confirmation per shipment" a DB invariant, so
+-- record_pending_delivery_confirmation is an idempotent ON CONFLICT DO NOTHING. FK to orders(gid)
+-- ON DELETE CASCADE so a DPDP erasure of the order clears it too. NOTE: an OWNER-RUN manual
+-- migration -- nothing in the app executes schema.sql automatically; documented here as the
+-- source-of-truth DDL.
+CREATE TABLE IF NOT EXISTS pending_delivery_confirmations (
+    fulfillment_gid text PRIMARY KEY,
+    order_gid       text NOT NULL REFERENCES orders(gid) ON DELETE CASCADE,
+    phone_e164      text NOT NULL,
+    due_at          timestamptz NOT NULL,
+    state           text NOT NULL DEFAULT 'pending',
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    updated_at      timestamptz NOT NULL DEFAULT now()
+);
+-- Partial index for the sweep's WHERE state = 'pending' AND due_at <= now ORDER BY due_at scan.
+CREATE INDEX IF NOT EXISTS idx_pending_delivery_conf_due
+    ON pending_delivery_confirmations (due_at) WHERE state = 'pending';
+
+-- Our OWN normalized delivery-state mirror + cached ad2ship tracking snapshot on a fulfillment
+-- (RTO-aware delivery, 2026-08-29). shipment_status is monotonic (see
+-- IngestStore.set_fulfillment_shipment_status); the tracking_* columns feed Task 7's agent
+-- enrichment. Written ONLY by set_fulfillment_shipment_status -- the webhook mirror upsert
+-- (_upsert_fulfillment_on_conn) never touches them, so they survive a webhook re-mirror unchanged.
+-- Additive + idempotent (mirrors the shopify_updated_at/delivered_at ALTERs above).
+ALTER TABLE fulfillments ADD COLUMN IF NOT EXISTS shipment_status        text;
+ALTER TABLE fulfillments ADD COLUMN IF NOT EXISTS tracking_checked_at    timestamptz;
+ALTER TABLE fulfillments ADD COLUMN IF NOT EXISTS tracking_city          text;
+ALTER TABLE fulfillments ADD COLUMN IF NOT EXISTS tracking_hub           text;
+ALTER TABLE fulfillments ADD COLUMN IF NOT EXISTS tracking_last_scan     text;
+ALTER TABLE fulfillments ADD COLUMN IF NOT EXISTS tracking_expected_date text;

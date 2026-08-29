@@ -646,7 +646,9 @@ async def test_find_mirrored_orders_by_phone_pg_batch_fetches_items_without_n_pl
          "tracking_company": "Delhivery", "tracking_number": "AWB-A",
          "tracking_url": "https://track/AWB-A", "created_at": None,
          "shopify_updated_at": datetime(2026, 8, 14, 3, 20, tzinfo=UTC),
-         "delivered_at": datetime(2026, 8, 15, 11, 30, tzinfo=UTC)},
+         "delivered_at": datetime(2026, 8, 15, 11, 30, tzinfo=UTC),
+         "shipment_status": None, "tracking_checked_at": None, "tracking_city": None,
+         "tracking_hub": None, "tracking_last_scan": None, "tracking_expected_date": None},
     ]
     conn = _FakeReadConn(order_rows, item_rows, fulfillment_rows)
     store = PostgresIngestStore(_FakePool(conn))  # type: ignore[arg-type]

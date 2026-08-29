@@ -129,3 +129,80 @@ async def test_purge_older_than_deletes_only_aged_rows(pool: LazyPool) -> None:
         gone = await conn.fetchval("SELECT 1 FROM order_mappings WHERE order_gid = $1", old_gid)
         kept = await conn.fetchval("SELECT 1 FROM order_mappings WHERE order_gid = $1", new_gid)
     assert gone is None and kept == 1
+
+
+# --- pending_delivery_confirmations + fulfillment shipment_status (RTO-aware delivery) ---
+
+from app.shopify.models import Fulfillment, Order  # noqa: E402
+
+
+def _pg_order(gid: str) -> Order:
+    return Order(
+        gid=gid, name=f"tavas{uuid.uuid4().int % 9000 + 1000}", email=None,
+        phone="+911111111111", shipping_phone=None, billing_phone=None,
+        financial_status="PENDING", fulfillment_status="FULFILLED", cancelled_at=None,
+        tags=(), payment_gateway_names=(), total=None, customer_locale="en",
+    )
+
+
+async def test_pending_confirmation_idempotent_pg(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    gid = f"gid://shopify/Order/{uuid.uuid4()}"
+    fgid = f"gid://shopify/Fulfillment/{uuid.uuid4()}"
+    await store.upsert_order_mirror(_pg_order(gid))
+    now = datetime.now(UTC)
+    await store.record_pending_delivery_confirmation(
+        fulfillment_gid=fgid, order_gid=gid, phone_e164="+911111111111",
+        due_at=now + timedelta(hours=1),
+    )
+    # Second record for the same fulfillment_gid must NOT reset due_at / phone.
+    await store.record_pending_delivery_confirmation(
+        fulfillment_gid=fgid, order_gid=gid, phone_e164="+912222222222",
+        due_at=now + timedelta(hours=2),
+    )
+    due = await store.due_delivery_confirmations(now + timedelta(hours=3))
+    mine = [r for r in due if r.fulfillment_gid == fgid]
+    assert len(mine) == 1
+    assert mine[0].phone_e164 == "+911111111111"
+    assert mine[0].order_gid == gid
+
+
+async def test_pending_confirmation_due_threshold_and_state_pg(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    gid = f"gid://shopify/Order/{uuid.uuid4()}"
+    fgid = f"gid://shopify/Fulfillment/{uuid.uuid4()}"
+    await store.upsert_order_mirror(_pg_order(gid))
+    now = datetime.now(UTC)
+    await store.record_pending_delivery_confirmation(
+        fulfillment_gid=fgid, order_gid=gid, phone_e164="+911111111111",
+        due_at=now + timedelta(hours=2),
+    )
+    # Not yet due.
+    early = await store.due_delivery_confirmations(now)
+    assert fgid not in [r.fulfillment_gid for r in early]
+    # Due at threshold.
+    ready = await store.due_delivery_confirmations(now + timedelta(hours=2))
+    assert fgid in [r.fulfillment_gid for r in ready]
+    # After a state change it no longer appears.
+    await store.set_delivery_confirmation_state(fgid, "sent")
+    gone = await store.due_delivery_confirmations(now + timedelta(hours=5))
+    assert fgid not in [r.fulfillment_gid for r in gone]
+
+
+async def test_set_fulfillment_shipment_status_monotonic_pg(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    gid = f"gid://shopify/Order/{uuid.uuid4()}"
+    fgid = f"gid://shopify/Fulfillment/{uuid.uuid4()}"
+    await store.upsert_order_mirror(_pg_order(gid))
+    await store.upsert_fulfillment(gid, Fulfillment(
+        gid=fgid, status="success", tracking_company="Delhivery",
+        tracking_number="AWB", tracking_url="https://t/AWB",
+    ))
+    await store.set_fulfillment_shipment_status(fgid, "rto")
+    # A later non-terminal call must NOT regress shipment_status, but tracking_city still updates.
+    await store.set_fulfillment_shipment_status(fgid, "in_transit", tracking_city="Pune")
+    order = await store.get_mirrored_order(gid)
+    assert order is not None
+    match = next(f for f in order.fulfillments if f.gid == fgid)
+    assert match.shipment_status == "rto"
+    assert match.tracking_city == "Pune"

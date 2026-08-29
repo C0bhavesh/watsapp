@@ -29,6 +29,7 @@ from app.store.base import (
     OutboundEntry,
     OutboundRetryInfo,
     OutboundView,
+    PendingDeliveryConfirmation,
     StoredInboundImage,
     StoredMessage,
     ThreadActivity,
@@ -148,7 +149,8 @@ def _order_from_row(
 
 _FULFILLMENT_COLUMNS = (
     "gid, status, tracking_company, tracking_number, tracking_url, created_at, "
-    "shopify_updated_at, delivered_at"
+    "shopify_updated_at, delivered_at, shipment_status, tracking_checked_at, "
+    "tracking_city, tracking_hub, tracking_last_scan, tracking_expected_date"
 )
 
 
@@ -156,7 +158,9 @@ def _fulfillment_from_row(r: asyncpg.Record) -> Fulfillment:
     # Single builder shared by the per-order and batched (`= ANY`) fulfillment reads so they
     # cannot silently diverge (same discipline as _line_item_from_row). shopify_updated_at maps
     # back onto Fulfillment.updated_at so a mirror read carries the same freshness stamp the
-    # in-memory store returns (otherwise updated_at would always read back None).
+    # in-memory store returns (otherwise updated_at would always read back None). shipment_status +
+    # the tracking_* snapshot (our OWN columns, written only by set_fulfillment_shipment_status)
+    # surface here so one mirror read serves Task 7's agent enrichment.
     return Fulfillment(
         gid=str(r["gid"]),
         status=r["status"],
@@ -168,6 +172,14 @@ def _fulfillment_from_row(r: asyncpg.Record) -> Fulfillment:
             r["shopify_updated_at"].isoformat() if r["shopify_updated_at"] else None
         ),
         delivered_at=r["delivered_at"].isoformat() if r["delivered_at"] else None,
+        shipment_status=r["shipment_status"],
+        tracking_checked_at=(
+            r["tracking_checked_at"].isoformat() if r["tracking_checked_at"] else None
+        ),
+        tracking_city=r["tracking_city"],
+        tracking_hub=r["tracking_hub"],
+        tracking_last_scan=r["tracking_last_scan"],
+        tracking_expected_date=r["tracking_expected_date"],
     )
 
 
@@ -724,6 +736,79 @@ class PostgresIngestStore:
                 )
                 return
             await _upsert_fulfillment_on_conn(conn, order_gid, fulfillment)
+
+    async def record_pending_delivery_confirmation(
+        self, *, fulfillment_gid: str, order_gid: str, phone_e164: str, due_at: datetime
+    ) -> None:
+        # Idempotent per shipment: ON CONFLICT (fulfillment_gid) DO NOTHING -- a re-run of a
+        # 'delivered' webhook must not reset the parked due_at / phone_e164.
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO pending_delivery_confirmations "
+                "(fulfillment_gid, order_gid, phone_e164, due_at) "
+                "VALUES ($1, $2, $3, $4) "
+                "ON CONFLICT (fulfillment_gid) DO NOTHING",
+                fulfillment_gid, order_gid, phone_e164, due_at,
+            )
+
+    async def due_delivery_confirmations(
+        self, now: datetime, limit: int = 50
+    ) -> list[PendingDeliveryConfirmation]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT fulfillment_gid, order_gid, phone_e164, due_at, state "
+                "FROM pending_delivery_confirmations "
+                "WHERE state = 'pending' AND due_at <= $1 "
+                "ORDER BY due_at LIMIT $2",
+                now, limit,
+            )
+        return [
+            PendingDeliveryConfirmation(
+                fulfillment_gid=str(r["fulfillment_gid"]),
+                order_gid=str(r["order_gid"]),
+                phone_e164=str(r["phone_e164"]),
+                due_at=r["due_at"],
+                state=str(r["state"]),
+            )
+            for r in rows
+        ]
+
+    async def set_delivery_confirmation_state(
+        self, fulfillment_gid: str, state: str
+    ) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE pending_delivery_confirmations "
+                "SET state = $2, updated_at = now() WHERE fulfillment_gid = $1",
+                fulfillment_gid, state,
+            )
+
+    async def set_fulfillment_shipment_status(
+        self, fulfillment_gid: str, shipment_status: str,
+        *, tracking_city: str | None = None, tracking_hub: str | None = None,
+        last_scan: str | None = None, expected_date: str | None = None,
+        checked_at: datetime | None = None,
+    ) -> None:
+        # Monotonic shipment_status via the CASE guard (a terminal stored state is never regressed);
+        # the tracking_* snapshot + checked_at are written unconditionally via COALESCE (a None
+        # argument keeps the stored value). Mirrors the in-memory impl exactly. This is the ONLY
+        # writer of these columns -- the webhook mirror upsert never touches them.
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE fulfillments SET "
+                "shipment_status = CASE "
+                "WHEN fulfillments.shipment_status IN ('delivered','failure','rto') "
+                "THEN fulfillments.shipment_status ELSE $2 END, "
+                "tracking_checked_at = COALESCE($3, fulfillments.tracking_checked_at), "
+                "tracking_city = COALESCE($4, fulfillments.tracking_city), "
+                "tracking_hub = COALESCE($5, fulfillments.tracking_hub), "
+                "tracking_last_scan = COALESCE($6, fulfillments.tracking_last_scan), "
+                "tracking_expected_date = COALESCE($7, fulfillments.tracking_expected_date), "
+                "updated_at = now() "
+                "WHERE gid = $1",
+                fulfillment_gid, shipment_status, checked_at,
+                tracking_city, tracking_hub, last_scan, expected_date,
+            )
 
     async def recent_mappings(self, limit: int) -> list[MappingView]:
         async with self._pool.acquire() as conn:

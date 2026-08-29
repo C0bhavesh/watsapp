@@ -91,11 +91,22 @@ def test_chats_js_search_is_server_side(client: TestClient) -> None:
     assert "q: currentQuery" in js
 
 
-def test_chats_js_polls_every_three_seconds(client: TestClient) -> None:
+def test_chats_js_polls_every_ten_seconds(client: TestClient) -> None:
+    # Raised 3s -> 10s (2026-08-29 egress work) to cut the dominant Supabase read-egress source.
     resp = client.get("/admin/ui/chats.js")
     assert resp.status_code == 200
     assert "setInterval" in resp.text
-    assert "3000" in resp.text
+    assert "10000" in resp.text
+    assert "3000" not in resp.text
+
+
+def test_chats_js_uses_cheap_activity_precheck(client: TestClient) -> None:
+    # The open thread is no longer re-fetched in full every tick: a tiny /activity signature gates
+    # the full fetch (2026-08-29 egress work).
+    resp = client.get("/admin/ui/chats.js")
+    assert resp.status_code == 200
+    assert "/activity" in resp.text
+    assert "threadActivitySnapshot" in resp.text
 
 
 def test_chats_js_clears_order_number_and_products_when_no_orders(client: TestClient) -> None:

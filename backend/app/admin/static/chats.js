@@ -955,6 +955,10 @@ el("reply-input").addEventListener("keydown", (e) => {
 
 let listSnapshotKey = "";
 let threadSnapshotKey = "";
+// Cheap-poll state (2026-08-29 egress work): the last activity signature seen for the open thread,
+// tagged with its thread id. The poll compares a tiny /activity signature against this and only
+// pays for the full thread fetch when it differs -- see pollTick.
+let threadActivitySnapshot = null;
 
 function threadListKey(threads) {
   return threads
@@ -979,7 +983,7 @@ let pollInFlight = false;
 
 async function pollTick() {
   // Skip while the tab is hidden -- no point hammering the shared DB pool (max_size=5) with
-  // 3s ticks for a backgrounded admin tab that nobody is watching.
+  // ticks for a backgrounded admin tab that nobody is watching.
   if (document.hidden) return;
   // In-flight guard: a slow tick must not overlap with the next scheduled one and double the load.
   if (pollInFlight) return;
@@ -997,11 +1001,35 @@ async function pollTick() {
       renderFilterChips();
     }
     if (currentThreadId !== null) {
-      const data = await api("/admin/conversations/" + encodeURIComponent(currentThreadId));
-      const nextThreadKey = threadEntriesKey(data.entries);
-      if (nextThreadKey !== threadSnapshotKey) {
-        threadSnapshotKey = nextThreadKey;
-        await loadThread(currentThreadId, currentPhone, true);
+      // Cheap "has this thread changed" check (2026-08-29 egress work): the open thread used to be
+      // re-fetched IN FULL every tick (up to ~800 rows across 5+ tables + a mark_read write) even
+      // when nothing changed. Instead fetch a tiny activity signature and only pay for the full
+      // fetch when it differs. The full fetch below still runs the threadEntriesKey re-render diff
+      // AND the mark_read side effect, so unread-marking still fires whenever real content arrives
+      // -- just not on a no-op tick. (The initial click-to-open calls loadThread directly, bypassing
+      // this check on first open.)
+      const activity = await api(
+        "/admin/conversations/" + encodeURIComponent(currentThreadId) + "/activity"
+      );
+      // Fold `paused_until` AND whether it is currently in the future into the signature: the raw
+      // stamp catches an explicit pause/resume, and pausedActive catches the natural expiry of a
+      // pause window (paused_until passing wall-clock time does NOT change the stored value, so
+      // without this the Resume-AI button could linger after the pause has actually lapsed).
+      const pausedActive = activity.paused_until && new Date(activity.paused_until) > new Date();
+      const sig =
+        (activity.latest || "") + "|" + (activity.paused_until || "") + "|" + (pausedActive ? "1" : "0");
+      const changed =
+        threadActivitySnapshot === null ||
+        threadActivitySnapshot.threadId !== currentThreadId ||
+        threadActivitySnapshot.sig !== sig;
+      if (changed) {
+        threadActivitySnapshot = { threadId: currentThreadId, sig };
+        const data = await api("/admin/conversations/" + encodeURIComponent(currentThreadId));
+        const nextThreadKey = threadEntriesKey(data.entries);
+        if (nextThreadKey !== threadSnapshotKey) {
+          threadSnapshotKey = nextThreadKey;
+          await loadThread(currentThreadId, currentPhone, true);
+        }
       }
     }
   } catch (e) {
@@ -1012,7 +1040,10 @@ async function pollTick() {
   }
 }
 
-setInterval(pollTick, 3000);
+// 10s poll (2026-08-29): raised from 3s to cut the dominant source of Supabase read egress (the
+// admin chat live-poll), paired with the cheap /activity pre-check above and the batched thread
+// list. 10s keeps the panel feeling live while roughly cutting the tick rate to a third.
+setInterval(pollTick, 10000);
 
 renderFilterChips();
 loadThreadList();

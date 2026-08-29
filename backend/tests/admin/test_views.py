@@ -2149,3 +2149,91 @@ def test_queued_admin_resend_row_drains_via_backstop_job(
     assert summary["sent"] == 1
     assert len(fake.calls) == 1
     assert fake.calls[0]["template"] == "order_delivered"
+
+
+# --- Cheap thread-activity poll endpoint (2026-08-29 egress work) ---
+
+
+def test_conversation_activity_requires_auth(client: TestClient) -> None:
+    assert client.get("/admin/conversations/1/activity").status_code == 401
+
+
+def test_conversation_activity_unknown_thread_404s(client: TestClient) -> None:
+    login(client)
+    assert client.get("/admin/conversations/999999/activity").status_code == 404
+
+
+def test_conversation_activity_returns_latest_and_paused(client: TestClient) -> None:
+    login(client)
+    _send_ai_message("+919664290413", "hi", "hello there")
+    thread_id = _thread_id_for(client, "+919664290413")
+
+    body = client.get(f"/admin/conversations/{thread_id}/activity").json()
+    assert body["latest"] is not None
+    assert body["paused_until"] is None
+
+
+def test_conversation_activity_signature_moves_on_new_message(client: TestClient) -> None:
+    login(client)
+    _send_ai_message("+919664290413", "hi", "hello there")
+    thread_id = _thread_id_for(client, "+919664290413")
+    before = client.get(f"/admin/conversations/{thread_id}/activity").json()
+
+    time.sleep(0.05)
+
+    async def _new_customer_message() -> None:
+        await get_container().conversations.append_message(thread_id, "user", "still there?")
+
+    asyncio.run(_new_customer_message())
+
+    after = client.get(f"/admin/conversations/{thread_id}/activity").json()
+    # A new inbound message must move the cheap signature so the client refetches the full thread.
+    assert after["latest"] != before["latest"]
+
+
+def test_conversation_activity_reflects_pause_change(client: TestClient) -> None:
+    login(client)
+    _send_ai_message("+919664290413", "hi", "hello there")
+    thread_id = _thread_id_for(client, "+919664290413")
+    before = client.get(f"/admin/conversations/{thread_id}/activity").json()
+    assert before["paused_until"] is None
+
+    future = datetime.now(UTC) + timedelta(hours=1)
+    asyncio.run(get_container().conversations.pause_until(thread_id, future))
+
+    after = client.get(f"/admin/conversations/{thread_id}/activity").json()
+    # An AI-pause/resume change is carried in its own field so a future stamp never masks a message.
+    assert after["paused_until"] is not None
+
+
+def test_conversation_activity_reflects_button_tap(client: TestClient) -> None:
+    login(client)
+    _send_ai_message("+919664290413", "hi", "hello there")
+    thread_id = _thread_id_for(client, "+919664290413")
+    before = client.get(f"/admin/conversations/{thread_id}/activity").json()
+
+    time.sleep(0.05)
+    # actor_wa_id is written RAW (no +), the same key the endpoint queries via wa_ids candidates.
+    _record_button_tap("gid://shopify/Order/1", "919664290413")
+
+    after = client.get(f"/admin/conversations/{thread_id}/activity").json()
+    assert after["latest"] != before["latest"]
+
+
+def test_conversation_activity_reflects_inbound_image(client: TestClient) -> None:
+    login(client)
+    _send_ai_message("+919664290413", "hi", "hello there")
+    thread_id = _thread_id_for(client, "+919664290413")
+    before = client.get(f"/admin/conversations/{thread_id}/activity").json()
+
+    time.sleep(0.05)
+
+    async def _save_image() -> None:
+        await get_container().ingest.save_inbound_image(
+            "+919664290413", "wamid.IMG1", "image/jpeg", b"data"
+        )
+
+    asyncio.run(_save_image())
+
+    after = client.get(f"/admin/conversations/{thread_id}/activity").json()
+    assert after["latest"] != before["latest"]

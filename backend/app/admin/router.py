@@ -718,9 +718,11 @@ def _button_tap_text(action: str, result: str) -> str:
 
 @admin_router.get("/conversations", dependencies=[Depends(require_admin)])
 # Higher ceiling than the sibling mutation routes (30/min): this is the polled thread list --
-# pollTick hits it every 3s (~20/min per open tab) and "Load older" can fan a few pages per click --
-# so 120/min gives normal multi-tab polling + interactive paging comfortable headroom while still
-# capping a runaway loop or an abusive client on this per-request-N+1 endpoint.
+# pollTick hits it every 10s (~6/min per open tab, since 2026-08-29) and "Load older" can fan a few
+# pages per click -- so 120/min gives normal multi-tab polling + interactive paging comfortable
+# headroom while still capping a runaway loop or an abusive client. The per-row N+1 that used to
+# make this endpoint expensive is gone (2026-08-29): the per-thread enrichment is now page-wide
+# batched, so a page costs a handful of queries instead of ~8 per row.
 @limiter.limit("120/minute")
 async def list_conversations(
     request: Request,
@@ -815,19 +817,40 @@ async def list_conversations(
     page_phones = ordered_phones[:limit]
     next_cursor = last_active_by_phone.get(page_phones[-1]) if (page_phones and has_more) else None
 
+    # PAGE-WIDE BATCHING (2026-08-29 egress work): the per-thread loop below used to fire ~8 pooled
+    # queries PER ROW (get_or_create + preview + mirrored-orders[3 sub-queries] + unread + paused +
+    # exchanges) -> up to ~400 queries for one 50-row page, re-run on every poll tick. Each lookup
+    # is now a SINGLE page-wide batched query (`= ANY($1)` / unnest, grouped back by key in Python),
+    # following the exact pattern find_mirrored_orders_by_phone already used internally. Net: ~400
+    # per-page queries down to a handful. Nothing about the response envelope or any thread field
+    # changes -- the values are identical, just computed in far fewer round trips.
+    thread_id_by_phone = await c.conversations.get_or_create_batch(page_phones)
+    previews_by_phone = await c.conversations.last_messages_by_user_ids(page_phones)
+    orders_by_phone = await c.ingest.find_mirrored_orders_by_phones(page_phones)
+    thread_ids = [thread_id_by_phone[p] for p in page_phones]
+    unread_by_thread = await c.conversations.count_unread_messages_batch(thread_ids)
+    paused_by_thread = await c.conversations.get_paused_until_batch(thread_ids)
+    # Exchange + mirror lookups touch tables/features that can be mid-migration in some environments
+    # (documented in error_learnings.md 2026-08-21/24) -- a failure there must degrade this list to
+    # "no exchange badges / no order names", never 500 the whole thread list. Same guard nature as
+    # the per-call try/except these batched calls replace.
+    try:
+        exchanges_by_phone = await c.exchanges.list_for_phones(page_phones)
+    except Exception as exc:
+        logger.warning("failed to batch exchanges for thread list: type=%s", type(exc).__name__)
+        exchanges_by_phone = {}
+
+    now = datetime.now(UTC)
     result: list[dict[str, object]] = []
     for norm in page_phones:
-        # Materialize a stable conversation.id for the thread (idempotent -- repeated list views
-        # fetch the existing id, they do not create duplicates). This is the one place a create-on-
-        # miss is intended: the next sub-project (manual send) needs every thread to have an id.
-        thread_id = await c.conversations.get_or_create(norm)
-        recent = await c.conversations.find_messages_by_user_id(norm, limit=1)
-        preview = recent[-1].content[:120] if recent else ""
+        thread_id = thread_id_by_phone[norm]
+        recent = previews_by_phone.get(norm)
+        preview = recent.content[:120] if recent is not None else ""
         # Prefer the latest message timestamp; fall back to the MAX-across-sources last_active
         # captured above (used for outbound-only / tap-only threads that have no messages).
-        last_active = recent[-1].created_at if recent else last_active_by_phone.get(norm)
+        last_active = recent.created_at if recent is not None else last_active_by_phone.get(norm)
 
-        orders_for_phone = await c.ingest.find_mirrored_orders_by_phone(norm)
+        orders_for_phone = orders_by_phone.get(norm, [])
         orders_sorted_for_name = sorted(
             orders_for_phone, key=lambda o: str(o.updated_at or ""), reverse=True
         )
@@ -838,11 +861,11 @@ async def list_conversations(
             customer_name = name or None
         order_names = [o.name for o in orders_for_phone]
 
-        unread_count = await c.conversations.count_unread_messages(thread_id)
-        paused_until = await c.conversations.get_paused_until(thread_id)
-        ai_paused = paused_until is not None and paused_until > datetime.now(UTC)
+        unread_count = unread_by_thread.get(thread_id, 0)
+        paused_until = paused_by_thread.get(thread_id)
+        ai_paused = paused_until is not None and paused_until > now
 
-        exchange_requests_for_phone = await c.exchanges.list_for_phone(norm)
+        exchange_requests_for_phone = exchanges_by_phone.get(norm, [])
         exchange_unprocessed = any(
             r.status == "requested" and not r.return_tracking_url
             for r in exchange_requests_for_phone
@@ -1016,10 +1039,11 @@ async def get_conversation_thread(thread_id: int) -> dict[str, object]:
     ]
 
     paused_until = await c.conversations.get_paused_until(thread_id)
-    # Opening a thread (this endpoint fires both on click-open and on every 3s poll tick while it
-    # stays open) marks it read. Placed last and guarded so a failure here can never prevent the
-    # entries/orders payload from returning -- worst case a badge stays stale one tick, never a
-    # broken thread view.
+    # Opening a thread marks it read. Since 2026-08-29 this endpoint fires on click-open and only on
+    # a poll tick where the cheap /activity check detected a real change (not every tick) -- so
+    # mark_read still runs whenever new content actually arrives, just not on a no-op tick. Placed
+    # last and guarded so a failure here can never prevent the entries/orders payload from returning
+    # -- worst case a badge stays stale one tick, never a broken thread view.
     try:
         await c.conversations.mark_read(thread_id, datetime.now(UTC))
     except Exception:
@@ -1028,6 +1052,67 @@ async def get_conversation_thread(thread_id: int) -> dict[str, object]:
         "entries": entries,
         "orders": order_summaries,
         "paused_until": paused_until.isoformat() if paused_until else None,
+    }
+
+
+def _newer(current: datetime | None, candidate: datetime | None) -> datetime | None:
+    """MAX of two optional timestamps (None = absent)."""
+    if candidate is None:
+        return current
+    if current is None or candidate > current:
+        return candidate
+    return current
+
+
+@admin_router.get(
+    "/conversations/{thread_id}/activity", dependencies=[Depends(require_admin)]
+)
+async def get_conversation_activity(thread_id: int) -> dict[str, object]:
+    """Cheap "has this thread changed" check for the admin chat poll (2026-08-29 egress work).
+
+    The poll used to re-fetch the FULL thread detail (up to ~800 rows across 5+ tables, plus a
+    mark_read write) every tick while a thread stayed open, even when nothing had changed. This
+    endpoint returns a tiny signature instead -- a single `latest` activity timestamp (MAX across
+    the customer's messages / outbound sends / button taps / inbound images / order+fulfillment
+    mirror-sync / exchange updates) plus `paused_until`, in a handful of scalar queries. The client
+    only pays for the full get_conversation_thread fetch (which still marks the thread read) when
+    this signature differs from what it last saw. `paused_until` is returned SEPARATELY from
+    `latest` so a future pause stamp can never mask a newer customer message (see ThreadActivity).
+    """
+    c = get_container()
+    activity = await c.conversations.thread_activity(thread_id)
+    if activity is None:
+        # A bad literal id genuinely does not exist -> 404, exactly like get_conversation_thread.
+        raise HTTPException(status_code=404, detail="thread not found")
+    user_id = activity.user_id
+    # order_actions.actor_wa_id is written RAW (no +); query with both candidate keys, same as the
+    # full thread detail does, so a button tap moves the signature into the right thread.
+    wa_ids = list({user_id, user_id.lstrip("+")})
+    latest = activity.latest_message_at
+
+    # Each enrichment source is guarded so a mid-migration table (inbound_images / exchange table)
+    # degrades this signal gracefully -- worst case the client misses a change for that one category
+    # for one tick and catches it via another signal, never a 500 (same posture as the thread-detail
+    # guards). The ingest method has its own internal inbound_images fallback; this outer guard
+    # covers any other DB failure.
+    try:
+        latest = _newer(latest, await c.ingest.latest_activity_for_phone(user_id, wa_ids))
+    except Exception as exc:
+        logger.warning(
+            "activity: ingest lookup failed for thread %s: type=%s", thread_id, type(exc).__name__
+        )
+    try:
+        latest = _newer(latest, await c.exchanges.latest_activity_for_phone(user_id))
+    except Exception as exc:
+        logger.warning(
+            "activity: exchange lookup failed for thread %s: type=%s", thread_id, type(exc).__name__
+        )
+
+    return {
+        "latest": latest.isoformat() if latest is not None else None,
+        "paused_until": (
+            activity.paused_until.isoformat() if activity.paused_until is not None else None
+        ),
     }
 
 

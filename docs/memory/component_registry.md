@@ -47,6 +47,24 @@
   internally rather than taking an injectable clock, so prompt-layer tests can only assert
   substring presence, not the exact rendered date.
 
+## fulfillment_is_genuinely_delivered (Shopify-only delivery fallback rule, 2026-08-29)
+- **File:** app/core/delivery_outcome.py
+- **Purpose:** cheap Shopify-only test of "was this fulfillment genuinely delivered?" — the
+  FALLBACK the RTO-aware delivery-status sweep (Task 6) uses when the ad2ship page can't be read.
+  Intentionally leaky (Shopify still marks some RTOs — e.g. tavas3674/tavas3813 — DELIVERED); it
+  only has to beat blindly sending. Pure function of one `Fulfillment`, no I/O/logging/exceptions.
+- **Public API:** `fulfillment_is_genuinely_delivered(f: Fulfillment) -> bool` — `True` iff
+  `f.display_status == "DELIVERED"` AND `f.events` non-empty AND the `happened_at` of the FIRST
+  event whose `status == "DELIVERED"` equals `max(e.happened_at for e in f.events)` (i.e. the
+  DELIVERED event is the latest event; a later ATTEMPTED/failure scan → not genuine). Else `False`.
+- **Used in:** Task 6's delivery-status sweep job (as the ad2ship-unavailable fallback) — not yet
+  wired at time of this entry.
+- **Notes:** relies on `Fulfillment.display_status` + `Fulfillment.events`, both populated ONLY on
+  the LIVE Shopify GraphQL read path (empty on webhook/mirror parses). `events` is **oldest-first**
+  (ascending `happened_at`, GraphQL `sortKey: HAPPENED_AT`), so the latest event is the lexical
+  `max()` of the raw ISO-8601 strings — string compare is correct for same-format UTC `...Z` stamps.
+  Mirrors `delivery_estimate.py`'s pure-function discipline.
+
 ## Order.created_at (Shopify Order.createdAt, 2026-08-20)
 - **File:** app/shopify/models.py (`Order.created_at: str | None = None`).
 - **Purpose:** raw ISO-8601 order-creation timestamp, the starting point for

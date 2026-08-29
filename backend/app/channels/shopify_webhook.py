@@ -3,7 +3,7 @@ import json
 import logging
 import math
 import traceback
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -215,14 +215,23 @@ async def _notify_fulfillment_events(
             ],
         )
     if is_delivered:
-        await _enqueue_and_send_fulfillment_notification(
-            c,
-            order_gid=order_gid,
-            dedupe_key=f"fulfillment_delivered:{fulfillment.gid}",
-            phone=to,
-            template=TEMPLATE_NAME_DELIVERED,
-            body_params=[name, order.name],
-        )
+        # RTO-aware deferral: DO NOT send order_delivered now. Delhivery stamps shipment_status
+        # "delivered" on an RTO's final "delivered back to origin" scan exactly as it does on a real
+        # customer delivery, so an immediate send mis-congratulates RTO'd customers (the tavas3908
+        # bug). Instead park a pending-delivery-confirmation row; the sweep job (Task 6) re-checks
+        # the real delivery state ~2h later (ad2ship first, Shopify fallback) before it sends.
+        # Recorded inside the same never-raise-past-the-ack posture as the sends above: an
+        # unmirrored order_gid (mirror race) makes Postgres' FK-checked INSERT raise -- that
+        # degrades to a logged skip here, never a 500 on the signed delivery.
+        try:
+            await c.ingest.record_pending_delivery_confirmation(
+                fulfillment_gid=fulfillment.gid,
+                order_gid=order_gid,
+                phone_e164=to,
+                due_at=datetime.now(UTC) + timedelta(hours=2),
+            )
+        except Exception as exc:
+            _log_notify_failure(order_gid, exc)
 
 
 def _log_notify_failure(order_gid: str, exc: BaseException) -> None:

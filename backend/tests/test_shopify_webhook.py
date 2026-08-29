@@ -5,7 +5,7 @@ import hmac as hmac_lib
 import json
 import logging
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -406,6 +406,9 @@ async def test_fulfillment_with_tracking_sends_order_shipped() -> None:
     assert "buttons" not in params
     # No delivered notification -- shipment_status is absent from this payload.
     assert f"fulfillment_delivered:{fulfillment_gid}" not in store.outbound  # type: ignore[attr-defined]
+    # And no pending-delivery-confirmation row either -- nothing was "delivered".
+    due = await store.due_delivery_confirmations(datetime.now(UTC) + timedelta(days=1))
+    assert not [r for r in due if r.fulfillment_gid == fulfillment_gid]
 
 
 async def test_fulfillment_replay_does_not_re_enqueue_shipped() -> None:
@@ -428,7 +431,10 @@ async def test_fulfillment_replay_does_not_re_enqueue_shipped() -> None:
     assert len(shipped_rows) == 1
 
 
-async def test_fulfillment_shipment_status_delivered_sends_order_delivered() -> None:
+async def test_fulfillment_delivered_records_pending_confirmation_instead_of_sending() -> None:
+    # RTO-aware change: a "delivered" shipment_status must NOT send order_delivered immediately
+    # (Delhivery stamps the SAME status on an RTO's final "delivered back to origin" scan). Instead
+    # it parks a pending-delivery-confirmation row for the sweep job to re-check ~2h later.
     order_gid = "gid://shopify/Order/502"
     body = json.dumps(payload(order_gid)).encode()
     await post(body, headers(body, webhook_id="wh-o-502"))
@@ -441,15 +447,61 @@ async def test_fulfillment_shipment_status_delivered_sends_order_delivered() -> 
 
     assert resp.status_code == 200
     store = get_container().ingest
-    assert f"fulfillment_delivered:{fulfillment_gid}" in store.outbound  # type: ignore[attr-defined]
-    draft = store.outbound[f"fulfillment_delivered:{fulfillment_gid}"]  # type: ignore[attr-defined]
-    params = json.loads(draft.payload_json)
-    assert params["template"] == "order_delivered"
-    assert params["language"] == "en"
-    assert params["body_params"] == ["Suman B", "tavas3733"]
-    assert "buttons" not in params
-    # This payload ALSO has tracking info (fulfillment_payload's defaults) -> shipped fires too.
+    # No order_delivered send happens here any more.
+    assert f"fulfillment_delivered:{fulfillment_gid}" not in store.outbound  # type: ignore[attr-defined]
+    # A single pending-confirmation row is parked, routed to the resolved (mapping) phone, with a
+    # due_at ~2h out (comfortably inside a 3h window).
+    due = await store.due_delivery_confirmations(datetime.now(UTC) + timedelta(hours=3))
+    rows = [r for r in due if r.fulfillment_gid == fulfillment_gid]
+    assert len(rows) == 1
+    assert rows[0].order_gid == order_gid
+    assert rows[0].phone_e164 == "+919664290413"
+    assert rows[0].state == "pending"
+    # It is genuinely deferred: nothing is due within the next few minutes.
+    soon = await store.due_delivery_confirmations(datetime.now(UTC) + timedelta(minutes=5))
+    assert not [r for r in soon if r.fulfillment_gid == fulfillment_gid]
+    # This payload ALSO has tracking info (fulfillment_payload's defaults) -> shipped still fires.
     assert f"fulfillment_shipped:{fulfillment_gid}" in store.outbound  # type: ignore[attr-defined]
+
+
+async def test_fulfillment_delivered_twice_records_one_pending_row() -> None:
+    # Shopify may replay a delivered webhook; the pending row is idempotent on fulfillment_gid, so
+    # the second delivery must NOT create a second row nor reset the first row's due_at.
+    order_gid = "gid://shopify/Order/5022"
+    body = json.dumps(payload(order_gid)).encode()
+    await post(body, headers(body, webhook_id="wh-o-5022"))
+
+    fulfillment_gid = "gid://shopify/Fulfillment/5022"
+    fpayload = fulfillment_payload(order_gid, fulfillment_gid)
+    fpayload["shipment_status"] = "delivered"
+    fbody = json.dumps(fpayload).encode()
+    await post(fbody, headers(fbody, topic="fulfillments/update", webhook_id="wh-f-5022-1"))
+    store = get_container().ingest
+    first = await store.due_delivery_confirmations(datetime.now(UTC) + timedelta(hours=3))
+    first_row = next(r for r in first if r.fulfillment_gid == fulfillment_gid)
+    first_due = first_row.due_at
+
+    await post(fbody, headers(fbody, topic="fulfillments/update", webhook_id="wh-f-5022-2"))
+    again = await store.due_delivery_confirmations(datetime.now(UTC) + timedelta(hours=3))
+    rows = [r for r in again if r.fulfillment_gid == fulfillment_gid]
+    assert len(rows) == 1
+    assert rows[0].due_at == first_due
+
+
+async def test_fulfillment_delivered_no_mirrored_order_records_no_pending_row() -> None:
+    # A "delivered" for an order this bot never saw orders/create for -- no mirror row, so no
+    # pending confirmation is parked and the webhook still acks 200 (never a 500).
+    order_gid = "gid://shopify/Order/5023"  # deliberately never posted via orders/create
+    fulfillment_gid = "gid://shopify/Fulfillment/5023"
+    fpayload = fulfillment_payload(order_gid, fulfillment_gid)
+    fpayload["shipment_status"] = "delivered"
+    fbody = json.dumps(fpayload).encode()
+    resp = await post(fbody, headers(fbody, topic="fulfillments/update", webhook_id="wh-f-5023"))
+
+    assert resp.status_code == 200
+    store = get_container().ingest
+    due = await store.due_delivery_confirmations(datetime.now(UTC) + timedelta(days=1))
+    assert not [r for r in due if r.fulfillment_gid == fulfillment_gid]
 
 
 async def test_fulfillment_non_delivered_shipment_status_does_not_send_delivered() -> None:
@@ -465,6 +517,9 @@ async def test_fulfillment_non_delivered_shipment_status_does_not_send_delivered
 
     store = get_container().ingest
     assert f"fulfillment_delivered:{fulfillment_gid}" not in store.outbound  # type: ignore[attr-defined]
+    # A non-"delivered" status also parks no pending-delivery-confirmation row.
+    due = await store.due_delivery_confirmations(datetime.now(UTC) + timedelta(days=1))
+    assert not [r for r in due if r.fulfillment_gid == fulfillment_gid]
 
 
 async def test_fulfillment_no_mirrored_order_skips_notification() -> None:
@@ -548,8 +603,9 @@ async def test_shipped_notification_failure_does_not_block_delivered(
 ) -> None:
     # Per-notification isolation: when BOTH shipped and delivered are newly true in one event (a
     # delivered payload still carries tracking), a failure enqueuing the shipped notification must
-    # NOT prevent the delivered one from being attempted -- otherwise the delivered dedupe key is
-    # never written and that notification is lost until an unrelated future webhook re-triggers it.
+    # NOT prevent the delivered side from being handled -- otherwise the pending-delivery-
+    # confirmation row is never parked and the delivered flow is lost until a future webhook
+    # re-triggers it. (Delivered no longer sends; it records a pending confirmation for the sweep.)
     order_gid = "gid://shopify/Order/508"
     body = json.dumps(payload(order_gid)).encode()
     await post(body, headers(body, webhook_id="wh-o-508"))
@@ -571,9 +627,10 @@ async def test_shipped_notification_failure_does_not_block_delivered(
     resp = await post(fbody, headers(fbody, topic="fulfillments/update", webhook_id="wh-f-508"))
 
     assert resp.status_code == 200
-    # Shipped failed, but delivered was still attempted and queued.
+    # Shipped failed, but the delivered side was still handled and parked a pending confirmation.
     assert f"fulfillment_shipped:{fulfillment_gid}" not in store.outbound  # type: ignore[attr-defined]
-    assert f"fulfillment_delivered:{fulfillment_gid}" in store.outbound  # type: ignore[attr-defined]
+    due = await store.due_delivery_confirmations(datetime.now(UTC) + timedelta(hours=3))
+    assert [r for r in due if r.fulfillment_gid == fulfillment_gid]
 
 
 async def test_fulfillments_malformed_payload_ignored() -> None:

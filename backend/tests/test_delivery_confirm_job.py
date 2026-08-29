@@ -135,6 +135,12 @@ async def _outbound_rows(dedupe_key: str) -> list[object]:
     return [v for v in await c.ingest.recent_outbound(20) if v.dedupe_key == dedupe_key]
 
 
+def _confirmation_state(fulfillment_gid: str) -> str | None:
+    c = get_container()
+    row = c.ingest._pending_confirmations.get(fulfillment_gid)  # type: ignore[attr-defined]
+    return row.state if row is not None else None
+
+
 async def test_ad2ship_delivered_sends_and_marks_delivered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -238,6 +244,7 @@ async def test_ad2ship_non_terminal_writes_snapshot_but_stays_pending(
     assert stored.shipment_status == "in_transit"
     assert stored.tracking_city == "Pune"
     assert stored.tracking_hub == "Hadapsar"
+    assert stored.tracking_checked_at is not None  # snapshot timestamp written (brief listed it)
 
 
 async def test_shopify_fallback_unreadable_stays_pending(
@@ -255,6 +262,65 @@ async def test_shopify_fallback_unreadable_stays_pending(
     assert result["sent"] == 0
     assert result["errors"] == 0
     assert await _outbound_rows(DEDUPE) == []
+
+
+async def test_one_row_failure_does_not_abort_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Per-row failure isolation: a poison row (row 1's ad2ship fetch raises) must NOT stop row 2
+    # from being processed normally, must count as errors==1, and must be left pending (re-swept).
+    from datetime import UTC, datetime, timedelta
+
+    c = get_container()
+    _install_sender(monkeypatch)
+    order2_gid = "gid://shopify/Order/2"
+    ful2_gid = "gid://shopify/Fulfillment/2"
+    dedupe2 = f"fulfillment_delivered:{ful2_gid}"
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+
+    # Row 1 (poison): default order/fulfillment, AWB123.
+    await c.ingest.upsert_order_mirror(_order())
+    await c.ingest.upsert_fulfillment(ORDER_GID, _fulfillment())
+    await c.ingest.record_pending_delivery_confirmation(
+        fulfillment_gid=FUL_GID, order_gid=ORDER_GID, phone_e164=PHONE, due_at=due_at
+    )
+    # Row 2 (healthy): distinct order/fulfillment, AWB999.
+    order2 = Order(
+        gid=order2_gid, name="tavas4000", email=None, phone=PHONE, shipping_phone=None,
+        billing_phone=None, financial_status=None, fulfillment_status=None,
+        cancelled_at=None, tags=(), payment_gateway_names=(), total=None, customer_locale=None,
+    )
+    await c.ingest.upsert_order_mirror(order2)
+    await c.ingest.upsert_fulfillment(
+        order2_gid,
+        Fulfillment(
+            gid=ful2_gid, status=None, tracking_company="Delhivery",
+            tracking_number="AWB999", tracking_url=None,
+        ),
+    )
+    await c.ingest.record_pending_delivery_confirmation(
+        fulfillment_gid=ful2_gid, order_gid=order2_gid, phone_e164=PHONE, due_at=due_at
+    )
+
+    async def _stub(http, awb: str, *, timeout: float = 4.0) -> Ad2shipTracking | None:
+        if awb == "AWB123":
+            raise RuntimeError("ad2ship blew up for row 1")
+        return _tracking("delivered")
+
+    monkeypatch.setattr("app.jobs.delivery_confirm.fetch_tracking", _stub)
+
+    result = await run_delivery_confirm(c)
+
+    assert result["swept"] == 2
+    assert result["errors"] == 1  # row 1 failed and was isolated
+    assert result["sent"] == 1  # row 2 still processed normally
+    assert len(await _outbound_rows(dedupe2)) == 1  # row 2's notification went out
+    assert await _outbound_rows(DEDUPE) == []  # row 1 sent nothing
+    still_due = [
+        r.fulfillment_gid for r in await c.ingest.due_delivery_confirmations(datetime.now(UTC))
+    ]
+    assert FUL_GID in still_due  # row 1 left pending -> retried next run
+    assert ful2_gid not in still_due  # row 2 consumed (state advanced to sent)
 
 
 async def test_row_past_abandon_window_is_abandoned(
@@ -275,7 +341,7 @@ async def test_row_past_abandon_window_is_abandoned(
 
 async def test_second_run_does_not_resend(monkeypatch: pytest.MonkeyPatch) -> None:
     c = get_container()
-    _install_sender(monkeypatch)
+    sender = _install_sender(monkeypatch)
     _install_ad2ship(monkeypatch, _tracking("delivered"))
     await _seed()
 
@@ -285,6 +351,7 @@ async def test_second_run_does_not_resend(monkeypatch: pytest.MonkeyPatch) -> No
     assert first["sent"] == 1
     assert second["swept"] == 0  # row now state=sent, no longer due
     assert len(await _outbound_rows(DEDUPE)) == 1  # exactly one outbound row total
+    assert len(sender.calls) == 1  # the WhatsApp send fired exactly once across both runs
 
 
 async def test_kill_switch_suppresses_actual_send(
@@ -296,13 +363,18 @@ async def test_kill_switch_suppresses_actual_send(
     _install_ad2ship(monkeypatch, _tracking("delivered"))
     await _seed()
 
-    await run_delivery_confirm(c)
+    result = await run_delivery_confirm(c)
 
-    # Kill switch: zero WhatsApp HTTP calls, and the queued outbound row is NOT sent.
+    # Kill switch is enforced at the WhatsApp-call layer, NOT at enqueue: the outbound row IS
+    # created (durable, queued for later delivery), so zero Meta calls happen now but the
+    # confirmation is genuinely queued -> the job counts it sent and advances the confirmation row
+    # to "sent" (it is not lost, just not yet on the wire).
     assert sender.calls == []
+    assert result["sent"] == 1
     rows = await _outbound_rows(DEDUPE)
     assert len(rows) == 1
     assert rows[0].state == "queued"  # type: ignore[attr-defined]
+    assert _confirmation_state(FUL_GID) == "sent"
 
 
 def test_delivery_confirm_registered_in_jobs() -> None:

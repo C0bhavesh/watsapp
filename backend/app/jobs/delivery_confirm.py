@@ -8,9 +8,10 @@ and decides, per shipment, whether the customer was really delivered to:
 
 1. Primary signal — the ad2ship public tracking page (``fetch_tracking``): it distinguishes a
    genuine customer delivery from an RTO, which Shopify's own status cannot.
-2. Fallback — used ONLY when ad2ship can't be read (returns ``None``): the intentionally leaky
-   Shopify heuristic (``fulfillment_is_genuinely_delivered``). It still marks some RTOs as
-   DELIVERED, but it only has to beat blindly sending.
+2. Fallback — used when ad2ship can't be read (returns ``None``) OR reports a non-terminal
+   (not-yet-resolved, e.g. still in transit) status: the intentionally leaky Shopify heuristic
+   (``fulfillment_is_genuinely_delivered``). It still marks some RTOs as DELIVERED, but it only has
+   to beat blindly sending.
 
 Outcomes: a confirmed genuine delivery sends ``order_delivered`` and marks the row ``sent``; an RTO
 is recorded (``state=rto``, ``shipment_status=rto``) and NEVER messaged; anything inconclusive
@@ -39,18 +40,26 @@ logger = logging.getLogger("app.jobs.delivery_confirm")
 
 _BATCH_LIMIT = 50
 _ABANDON_AFTER = timedelta(days=7)
+# The store's monotonic-guard terminal tokens (parity with IngestStore.set_fulfillment_shipment_
+# status' CASE / _TERMINAL_SHIPMENT_STATES). Only the two we CONFIRM upstream via
+# is_delivered_to_customer()/is_rto() are ever written as terminal; a non-terminal ad2ship badge
+# that merely happens to equal one of these literally is a data anomaly, not a confirmed fact, and
+# must not be persisted (it would wrongly pin the monotonic guard). See the fallback write below.
+_TERMINAL_SHIPMENT_TOKENS = frozenset({"delivered", "failure", "rto"})
 
 
-async def _send(c: Container, row: PendingDeliveryConfirmation, order: Order) -> None:
-    """Enqueue + inline-send ONE ``order_delivered`` notification, then mark the row ``sent``.
+async def _send(c: Container, row: PendingDeliveryConfirmation, order: Order) -> bool:
+    """Enqueue + inline-send ONE ``order_delivered`` notification; mark the row ``sent`` ONLY when a
+    durable outbound row was actually created. Returns that success bool so the caller counts the
+    row correctly.
 
     ``_enqueue_and_send_fulfillment_notification`` never raises and enforces the ``send_mode`` kill
-    switch downstream (a suppressed send leaves the queued row untouched, zero Meta calls). The
-    confirmation state is advanced regardless so a suppressed/kill-switched shipment is not re-swept
-    forever — parity with reconcile, where the tag/status write proceeds even when the send is
-    suppressed.
+    switch downstream (a suppressed send leaves the queued row untouched, zero Meta calls — but the
+    row IS still enqueued, so this returns ``True`` and the confirmation is genuinely queued for
+    later delivery, not lost). It returns ``False`` only when the enqueue itself failed (DB error /
+    no row created); in that case we do NOT advance to ``sent``, so the sweep retries the row.
     """
-    await _enqueue_and_send_fulfillment_notification(
+    ok = await _enqueue_and_send_fulfillment_notification(
         c,
         order_gid=row.order_gid,
         dedupe_key=f"fulfillment_delivered:{row.fulfillment_gid}",
@@ -58,7 +67,9 @@ async def _send(c: Container, row: PendingDeliveryConfirmation, order: Order) ->
         template=TEMPLATE_NAME_DELIVERED,
         body_params=[customer_display_name(order), order.name],
     )
-    await c.ingest.set_delivery_confirmation_state(row.fulfillment_gid, "sent")
+    if ok:
+        await c.ingest.set_delivery_confirmation_state(row.fulfillment_gid, "sent")
+    return ok
 
 
 def _log_row_failure(fulfillment_gid: str, exc: BaseException) -> None:
@@ -110,14 +121,19 @@ async def run_delivery_confirm(c: Container) -> dict[str, Any]:
             tracking = await fetch_tracking(c.http, awb) if awb else None
 
             if tracking is not None and tracking.is_delivered_to_customer():
-                await _send(c, row, order)
-                sent += 1
-                await c.ingest.set_fulfillment_shipment_status(
-                    row.fulfillment_gid, "delivered",
-                    tracking_city=tracking.current_city, tracking_hub=tracking.current_hub,
-                    last_scan=tracking.last_scan_remark or tracking.last_scan,
-                    expected_date=tracking.expected_date, checked_at=now,
-                )
+                if await _send(c, row, order):
+                    # sent += 1 AFTER the status write (invariant: a row counts exactly once; if the
+                    # write raises, the outer except counts it as errors, never as both).
+                    await c.ingest.set_fulfillment_shipment_status(
+                        row.fulfillment_gid, "delivered",
+                        tracking_city=tracking.current_city, tracking_hub=tracking.current_hub,
+                        last_scan=tracking.last_scan_remark or tracking.last_scan,
+                        expected_date=tracking.expected_date, checked_at=now,
+                    )
+                    sent += 1
+                else:
+                    # Enqueue failed -> notification not durable. Leave pending, retry next run.
+                    errors += 1
             elif tracking is not None and tracking.is_rto():
                 # A returned shipment: record it and NEVER congratulate the customer.
                 await c.ingest.set_delivery_confirmation_state(row.fulfillment_gid, "rto")
@@ -130,9 +146,13 @@ async def run_delivery_confirm(c: Container) -> dict[str, Any]:
                 rto += 1
             else:
                 # ad2ship unreadable (None) or a non-terminal state -> Shopify fallback.
-                if tracking is not None:
-                    # Persist whatever ad2ship DID give us (real but non-terminal movement) so Task
-                    # 7's agent enrichment sees the freshest snapshot even though we're not acting.
+                if tracking is not None and tracking.status not in _TERMINAL_SHIPMENT_TOKENS:
+                    # Persist whatever ad2ship DID give us (real but non-terminal movement) so
+                    # Task 7's agent enrichment sees the freshest snapshot even though we're not
+                    # acting. The _TERMINAL_SHIPMENT_TOKENS guard above skips the write for a
+                    # non-terminal badge that literally equals a terminal token (delivered/failure/
+                    # rto) but was NOT confirmed upstream by is_delivered_to_customer()/is_rto() --
+                    # a data anomaly that must not wrongly pin the store's monotonic terminal guard.
                     await c.ingest.set_fulfillment_shipment_status(
                         row.fulfillment_gid, tracking.status,
                         tracking_city=tracking.current_city, tracking_hub=tracking.current_hub,
@@ -147,11 +167,13 @@ async def run_delivery_confirm(c: Container) -> dict[str, Any]:
                     (f for f in shopify_fulfillments if f.gid == row.fulfillment_gid), None
                 )
                 if shopify_f is not None and fulfillment_is_genuinely_delivered(shopify_f):
-                    await _send(c, row, order)
-                    sent += 1
-                    await c.ingest.set_fulfillment_shipment_status(
-                        row.fulfillment_gid, "delivered", checked_at=now
-                    )
+                    if await _send(c, row, order):
+                        await c.ingest.set_fulfillment_shipment_status(
+                            row.fulfillment_gid, "delivered", checked_at=now
+                        )
+                        sent += 1
+                    else:
+                        errors += 1
                 else:
                     pending += 1
         except Exception as exc:  # noqa: BLE001 — one row never fails the whole run (see reconcile)

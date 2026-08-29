@@ -249,10 +249,19 @@ def _log_notify_failure(order_gid: str, exc: BaseException) -> None:
 async def _enqueue_and_send_fulfillment_notification(
     c: Container, order_gid: str, dedupe_key: str, phone: str, template: str,
     body_params: list[str],
-) -> None:
+) -> bool:
     """Enqueue + inline-send ONE fulfillment notification. Self-contained and failure-isolated:
     it NEVER raises past this call, so one notification failing never prevents a sibling (shipped
-    vs delivered) from being attempted, and never turns the signed webhook's ack into a 500."""
+    vs delivered) from being attempted, and never turns the signed webhook's ack into a 500.
+
+    Returns ``True`` when a durable outbound row now exists — ``enqueue_outbound`` returned a
+    non-None id, so the row is queued and ``send_inline_outbound`` (best-effort, kill-switch aware)
+    will deliver it now or the backstop drain later. Returns ``False`` when ``enqueue_outbound``
+    itself raised or returned ``None`` before any row was created, so a caller that tracks state
+    (the delivery-confirm sweep) can leave its row pending and retry rather than silently losing the
+    notification. A FAILURE of only the inline send (a row exists) is still ``True`` — the row is
+    durable and retryable, not lost.
+    """
     try:
         draft = OutboundDraft(
             dedupe_key=dedupe_key,
@@ -264,11 +273,19 @@ async def _enqueue_and_send_fulfillment_notification(
             ),
         )
         outbound_id = await c.ingest.enqueue_outbound(draft)
+    except Exception as exc:
+        _log_notify_failure(order_gid, exc)
+        return False
+    if outbound_id is None:
+        return False
+    try:
         await send_inline_outbound(
             c, outbound_id, timeout=_FULFILLMENT_INLINE_SEND_TIMEOUT_SECONDS
         )
     except Exception as exc:
+        # The row is already durable; an inline-send failure is best-effort and retryable.
         _log_notify_failure(order_gid, exc)
+    return True
 
 
 async def _resolve_product_image(

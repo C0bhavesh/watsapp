@@ -3,13 +3,18 @@ without TEST_DATABASE_URL (confirmed UNSET in this environment; never point it a
 
 import os
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 
 from app.channels.shopify_orders import order_from_webhook_payload
 from app.store.base import MappingUpsert, OutboundDraft
 from app.store.pg_factory import LazyPool
-from app.store.postgres import PostgresConversationStore, PostgresIngestStore
+from app.store.postgres import (
+    PostgresConversationStore,
+    PostgresExchangeStore,
+    PostgresIngestStore,
+)
 
 DSN = os.environ.get("TEST_DATABASE_URL", "")
 pytestmark = pytest.mark.skipif(not DSN, reason="TEST_DATABASE_URL not set")
@@ -542,3 +547,127 @@ async def test_get_inbound_image_returns_bytes_pg(pool: LazyPool) -> None:
     assert stored.phone_e164 == phone
     assert stored.mime_type == "image/png"
     assert stored.bytes == b"\x89PNGfakepng"
+
+
+# --- Batched thread-list enrichment + cheap activity signal (2026-08-29 egress work) ---
+
+
+async def test_find_mirrored_orders_by_phones_groups_and_caps_pg(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    phone_a = f"+91{uuid.uuid4().int % 10**10:010d}"
+    phone_b = f"+91{uuid.uuid4().int % 10**10:010d}"
+    for phone, name in ((phone_a, "amita"), (phone_b, "other")):
+        gid = f"gid://shopify/Order/{uuid.uuid4()}"
+        order = order_from_webhook_payload({
+            "admin_graphql_api_id": gid,
+            "name": f"tavas{uuid.uuid4().int % 10**7}",
+            "phone": phone,
+            "updated_at": "2026-08-15T10:00:00+05:30",
+            "customer": {
+                "admin_graphql_api_id": gid.replace("Order", "Customer"),
+                "first_name": name, "last_name": "x",
+            },
+        })
+        assert order is not None
+        if order.customer is not None:
+            await store.upsert_customer(order.customer)
+        await store.upsert_order_mirror(order)
+
+    by_phone = await store.find_mirrored_orders_by_phones([phone_a, phone_b])
+
+    assert set(by_phone) == {phone_a, phone_b}
+    assert by_phone[phone_a][0].customer is not None
+    assert by_phone[phone_a][0].customer.first_name == "amita"
+    # List-tailored: line items / fulfillments are intentionally not fetched.
+    assert by_phone[phone_a][0].line_items == ()
+    assert by_phone[phone_a][0].fulfillments == ()
+
+
+async def test_find_mirrored_orders_by_phones_empty_pg(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    assert await store.find_mirrored_orders_by_phones([]) == {}
+
+
+async def test_get_or_create_batch_returns_ids_without_bumping_pg(pool: LazyPool) -> None:
+    store = PostgresConversationStore(pool)
+    u1 = f"+91{uuid.uuid4().int % 10**10:010d}"
+    u2 = f"+91{uuid.uuid4().int % 10**10:010d}"
+    existing = await store.get_or_create(u1)
+
+    batch = await store.get_or_create_batch([u1, u2])
+
+    assert batch[u1] == existing
+    assert isinstance(batch[u2], int)
+
+
+async def test_last_messages_by_user_ids_most_recent_pg(pool: LazyPool) -> None:
+    store = PostgresConversationStore(pool)
+    u = f"+91{uuid.uuid4().int % 10**10:010d}"
+    conv = await store.get_or_create(u)
+    await store.append_message(conv, "user", "first")
+    await store.append_message(conv, "assistant", "latest")
+
+    previews = await store.last_messages_by_user_ids([u, f"no-{uuid.uuid4()}"])
+
+    assert previews[u].content == "latest"
+    assert len(previews) == 1
+
+
+async def test_count_unread_and_paused_batch_pg(pool: LazyPool) -> None:
+    store = PostgresConversationStore(pool)
+    u = f"+91{uuid.uuid4().int % 10**10:010d}"
+    conv = await store.get_or_create(u)
+    await store.append_message(conv, "user", "unread")
+
+    counts = await store.count_unread_messages_batch([conv])
+    assert counts[conv] >= 1
+
+    future = datetime(2099, 1, 1, tzinfo=UTC)
+    await store.pause_until(conv, future)
+    paused = await store.get_paused_until_batch([conv])
+    assert paused[conv] == future
+
+
+async def test_thread_activity_pg(pool: LazyPool) -> None:
+    store = PostgresConversationStore(pool)
+    u = f"+91{uuid.uuid4().int % 10**10:010d}"
+    conv = await store.get_or_create(u)
+    await store.append_message(conv, "user", "hi")
+
+    activity = await store.thread_activity(conv)
+
+    assert activity is not None
+    assert activity.user_id == u
+    assert activity.latest_message_at is not None
+    assert await store.thread_activity(-1) is None
+
+
+async def test_ingest_latest_activity_reflects_order_pg(pool: LazyPool) -> None:
+    store = PostgresIngestStore(pool)
+    phone = f"+91{uuid.uuid4().int % 10**10:010d}"
+    assert await store.latest_activity_for_phone(phone, [phone]) is None
+    gid = f"gid://shopify/Order/{uuid.uuid4()}"
+    order = order_from_webhook_payload({
+        "admin_graphql_api_id": gid,
+        "name": f"tavas{uuid.uuid4().int % 10**7}",
+        "phone": phone,
+        "updated_at": "2026-08-15T10:00:00+05:30",
+    })
+    assert order is not None
+    await store.upsert_order_mirror(order)
+
+    assert await store.latest_activity_for_phone(phone, [phone]) is not None
+
+
+async def test_exchange_list_for_phones_and_latest_activity_pg(pool: LazyPool) -> None:
+    store = PostgresExchangeStore(pool)
+    phone = f"+91{uuid.uuid4().int % 10**10:010d}"
+    gid = f"gid://shopify/Order/{uuid.uuid4()}"
+    created = await store.create(gid, "tavas1", phone, "M")
+
+    by_phone = await store.list_for_phones([phone, f"+91{uuid.uuid4().int % 10**10:010d}"])
+    assert [r.id for r in by_phone[phone]] == [created.id]
+
+    before = await store.latest_activity_for_phone(phone)
+    assert before is not None
+    assert await store.list_for_phones([]) == {}

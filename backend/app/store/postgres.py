@@ -31,6 +31,7 @@ from app.store.base import (
     OutboundView,
     StoredInboundImage,
     StoredMessage,
+    ThreadActivity,
 )
 from app.store.pg_factory import LazyPool
 
@@ -540,6 +541,87 @@ class PostgresIngestStore:
             )
             for row in rows
         ]
+
+    async def find_mirrored_orders_by_phones(
+        self, phones: list[str]
+    ) -> dict[str, list[Order]]:
+        # Batched sibling of find_mirrored_orders_by_phone for the admin thread LIST, which only
+        # reads each order's name + customer name. It therefore deliberately does NOT fetch
+        # order_items / fulfillments (the single-phone method does, for the thread DETAIL) -- so a
+        # 50-thread page no longer pays 50 * (1 order query + 1 items query + 1 fulfillments query).
+        # LATERAL + ROW_NUMBER caps each phone at its 10 most-recent orders (parity with the
+        # single-phone LIMIT 10) and yields `match_phone` so results group back by the queried phone
+        # exactly like the single-phone `o.phone = $1 OR o.shipping_phone = $1` predicate (an order
+        # is listed under whichever queried phone(s) it matches). No unbounded scan: the per-phone
+        # cap bounds the result to at most 10 * len(phones) rows.
+        if not phones:
+            return {}
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT ph AS match_phone, o.gid, o.name, o.email, o.phone, o.shipping_phone, "
+                "o.billing_phone, o.financial_status, o.fulfillment_status, o.cancelled_at, "
+                "o.tags, o.payment_gateway_names, o.total_amount, o.total_currency, "
+                "o.customer_locale, o.updated_at, o.order_created_at, "
+                "c.gid AS c_gid, c.first_name AS c_first_name, c.last_name AS c_last_name, "
+                "c.email AS c_email, c.phone AS c_phone, c.address_line1 AS c_address_line1, "
+                "c.address_line2 AS c_address_line2, c.city AS c_city, c.state AS c_state, "
+                "c.postal_code AS c_postal_code, c.country AS c_country, "
+                "c.updated_at AS c_updated_at "
+                "FROM unnest($1::text[]) AS ph "
+                "JOIN LATERAL ("
+                "  SELECT o2.*, ROW_NUMBER() OVER ("
+                "    ORDER BY o2.updated_at DESC NULLS LAST, o2.gid DESC) AS rn "
+                "  FROM orders o2 WHERE o2.phone = ph OR o2.shipping_phone = ph"
+                ") o ON o.rn <= 10 "
+                "LEFT JOIN customers c ON c.gid = o.customer_gid",
+                phones,
+            )
+        result: dict[str, list[Order]] = {}
+        for row in rows:
+            # Empty items/fulfillments: this list read never touches those tables (see docstring).
+            result.setdefault(str(row["match_phone"]), []).append(
+                _order_from_row(row, [], [])
+            )
+        return result
+
+    async def latest_activity_for_phone(
+        self, phone_e164: str, wa_ids: list[str]
+    ) -> datetime | None:
+        # One-round-trip "latest activity" scalar for the admin chat cheap-poll: GREATEST over this
+        # customer's outbound sends, button taps, inbound images, and the mirror-sync stamp of their
+        # orders + fulfillments. GREATEST ignores NULLs (all-NULL -> NULL). inbound_images may not
+        # exist yet (owner-run migration) -- on a PostgresError the query is retried WITHOUT that
+        # subquery so the rest of the signal still computes (degrade, never 500; matches the
+        # get_conversation_thread inbound-images guard). A missing inbound_images table also means
+        # no images can be saved, so dropping its contribution loses no real signal in that window.
+        full = (
+            "SELECT GREATEST("
+            " (SELECT MAX(created_at) FROM outbound_messages WHERE phone_e164 = $1),"
+            " (SELECT MAX(created_at) FROM order_actions WHERE actor_wa_id = ANY($2)),"
+            " (SELECT MAX(created_at) FROM inbound_images WHERE phone_e164 = $1),"
+            " (SELECT MAX(synced_at) FROM orders WHERE phone = $1 OR shipping_phone = $1),"
+            " (SELECT MAX(f.updated_at) FROM fulfillments f"
+            "    JOIN orders o ON f.order_gid = o.gid"
+            "    WHERE o.phone = $1 OR o.shipping_phone = $1)"
+            ") AS latest"
+        )
+        without_images = (
+            "SELECT GREATEST("
+            " (SELECT MAX(created_at) FROM outbound_messages WHERE phone_e164 = $1),"
+            " (SELECT MAX(created_at) FROM order_actions WHERE actor_wa_id = ANY($2)),"
+            " (SELECT MAX(synced_at) FROM orders WHERE phone = $1 OR shipping_phone = $1),"
+            " (SELECT MAX(f.updated_at) FROM fulfillments f"
+            "    JOIN orders o ON f.order_gid = o.gid"
+            "    WHERE o.phone = $1 OR o.shipping_phone = $1)"
+            ") AS latest"
+        )
+        async with self._pool.acquire() as conn:
+            try:
+                row = await conn.fetchrow(full, phone_e164, wa_ids)
+            except asyncpg.PostgresError:
+                logger.warning("latest_activity full query failed; retrying without inbound_images")
+                row = await conn.fetchrow(without_images, phone_e164, wa_ids)
+        return row["latest"] if row is not None else None
 
     async def upsert_order_mirror(self, order: Order) -> None:
         # LOCK ORDER: customers, then orders. `delete_by_phone` takes them the other way round
@@ -1482,6 +1564,51 @@ class PostgresConversationStore:
                 user_id,
             )
 
+    async def get_or_create_batch(self, user_ids: list[str]) -> dict[str, int]:
+        # Page-wide get_or_create in ONE round trip (replaces the admin thread list's per-row
+        # get_or_create N+1). Same display-only semantics: the ON CONFLICT branch is a
+        # self-assignment (no last_active_at bump on an existing row). RETURNING yields a row for
+        # both freshly-inserted and conflicting user_ids, so every id comes back. DISTINCT guards
+        # against a duplicate in the input tripping "ON CONFLICT ... cannot affect row a second
+        # time" (page_phones are already deduped, but this keeps the method safe standalone).
+        if not user_ids:
+            return {}
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "INSERT INTO conversations (user_id) SELECT DISTINCT unnest($1::text[])"
+                " ON CONFLICT (user_id) DO UPDATE SET last_active_at = conversations.last_active_at"
+                " RETURNING id, user_id",
+                user_ids,
+            )
+        return {str(r["user_id"]): int(r["id"]) for r in rows}
+
+    async def last_messages_by_user_ids(
+        self, user_ids: list[str]
+    ) -> dict[str, StoredMessage]:
+        # Most-recent message per user_id in ONE round trip (DISTINCT ON), replacing the admin
+        # thread list's per-row find_messages_by_user_id(..., limit=1) preview lookup. Read-only.
+        if not user_ids:
+            return {}
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT DISTINCT ON (c.user_id) c.user_id, m.role, m.content, m.created_at,"
+                " m.delivery_status, m.sender"
+                " FROM messages m JOIN conversations c ON c.id = m.conversation_id"
+                " WHERE c.user_id = ANY($1)"
+                " ORDER BY c.user_id, m.created_at DESC",
+                user_ids,
+            )
+        return {
+            str(r["user_id"]): StoredMessage(
+                role=str(r["role"]),
+                content=str(r["content"]),
+                created_at=r["created_at"].isoformat() if r["created_at"] else None,
+                delivery_status=r["delivery_status"],
+                sender=r["sender"],
+            )
+            for r in rows
+        }
+
     async def get_user_id(self, conversation_id: int) -> str | None:
         # Read-only reverse lookup (id -> user_id) for the unified thread view; None on unknown id.
         async with self._pool.acquire() as conn:
@@ -1687,6 +1814,45 @@ class PostgresConversationStore:
             )
         return None if row is None else row["paused_until"]
 
+    async def get_paused_until_batch(
+        self, conversation_ids: list[int]
+    ) -> dict[int, datetime | None]:
+        # Page-wide get_paused_until in ONE round trip. Every requested id is present in the result
+        # (defaulted to None) so the caller never distinguishes "row absent" from "not paused".
+        result: dict[int, datetime | None] = {cid: None for cid in conversation_ids}
+        if not conversation_ids:
+            return result
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, paused_until FROM conversations WHERE id = ANY($1)",
+                conversation_ids,
+            )
+        for r in rows:
+            result[int(r["id"])] = r["paused_until"]
+        return result
+
+    async def thread_activity(self, conversation_id: int) -> ThreadActivity | None:
+        # Cheap "has this thread changed" signal for the admin chat poll, ONE round trip: the
+        # thread's user_id (also the 404 signal -- None means the id does not exist), paused_until,
+        # and MAX(messages.created_at). paused_until is returned SEPARATELY, never folded into a
+        # GREATEST with the message stamp (see ThreadActivity: a future paused_until would mask a
+        # newer customer message). The caller combines this with the ingest/exchange activity.
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT c.user_id, c.paused_until,"
+                " (SELECT MAX(m.created_at) FROM messages m WHERE m.conversation_id = c.id)"
+                "   AS latest_message_at"
+                " FROM conversations c WHERE c.id = $1",
+                conversation_id,
+            )
+        if row is None:
+            return None
+        return ThreadActivity(
+            user_id=str(row["user_id"]),
+            latest_message_at=row["latest_message_at"],
+            paused_until=row["paused_until"],
+        )
+
     async def mark_handoff_attempted(self, conversation_id: int, at: datetime) -> None:
         async with self._pool.acquire() as conn:
             await conn.execute(
@@ -1728,6 +1894,30 @@ class PostgresConversationStore:
             )
         return int(row["n"]) if row is not None else 0
 
+    async def count_unread_messages_batch(
+        self, conversation_ids: list[int]
+    ) -> dict[int, int]:
+        # Page-wide count_unread_messages in ONE round trip (LEFT JOIN + GROUP BY), replacing the
+        # admin thread list's per-row count. Every requested id is present (defaulted to 0) even if
+        # it has no unread rows, so the caller never has to distinguish absent from zero. The join
+        # predicate mirrors count_unread_messages exactly (role='user' AND created_at>last_read_at).
+        result: dict[int, int] = {cid: 0 for cid in conversation_ids}
+        if not conversation_ids:
+            return result
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT c.id, COUNT(m.id) AS n"
+                " FROM conversations c"
+                " LEFT JOIN messages m ON m.conversation_id = c.id"
+                "   AND m.role = 'user' AND m.created_at > c.last_read_at"
+                " WHERE c.id = ANY($1)"
+                " GROUP BY c.id",
+                conversation_ids,
+            )
+        for r in rows:
+            result[int(r["id"])] = int(r["n"])
+        return result
+
 
 def _exchange_from_row(row: asyncpg.Record) -> ExchangeRequest:
     return ExchangeRequest(
@@ -1767,6 +1957,34 @@ class PostgresExchangeStore:
                 phone_e164,
             )
         return [_exchange_from_row(r) for r in rows]
+
+    async def list_for_phones(
+        self, phones: list[str]
+    ) -> dict[str, list[ExchangeRequest]]:
+        # Page-wide list_for_phone in ONE round trip for the admin thread list. Groups by phone.
+        if not phones:
+            return {}
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, order_gid, order_name, phone_e164, requested_size, status, "
+                "requested_at, return_tracking_url, replacement_tracking_url, updated_at "
+                "FROM exchange_requests WHERE phone_e164 = ANY($1) ORDER BY requested_at DESC",
+                phones,
+            )
+        result: dict[str, list[ExchangeRequest]] = {}
+        for r in rows:
+            result.setdefault(str(r["phone_e164"]), []).append(_exchange_from_row(r))
+        return result
+
+    async def latest_activity_for_phone(self, phone_e164: str) -> datetime | None:
+        # One-scalar "latest exchange activity" for the chat cheap-poll: MAX(updated_at), which is
+        # bumped by set_status / set_*_tracking_url, so an exchange status change moves it.
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT MAX(updated_at) AS latest FROM exchange_requests WHERE phone_e164 = $1",
+                phone_e164,
+            )
+        return row["latest"] if row is not None else None
 
     async def get(self, id: int) -> ExchangeRequest | None:
         async with self._pool.acquire() as conn:

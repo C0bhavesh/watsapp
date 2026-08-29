@@ -96,6 +96,25 @@ class ConversationSummary:
 
 
 @dataclass(frozen=True)
+class ThreadActivity:
+    """Cheap "has this thread changed" signal for the admin chat poll (2026-08-29 egress work).
+
+    Returned by ConversationStore.thread_activity in ONE round trip so the admin page's poll can
+    decide whether to pay for the full get_conversation_thread fetch. `user_id` is the thread's
+    normalized phone (also serves the 404 -- None thread_activity means the id does not exist).
+    `latest_message_at` is MAX(messages.created_at) for the conversation (a new inbound customer
+    message OR a new AI reply both move it). `paused_until` is carried SEPARATELY, never folded
+    into a single GREATEST with the activity stamps: it is a FUTURE timestamp while a handoff is
+    active, so a GREATEST would let it mask a genuinely newer customer message (created now, which
+    is < a future paused_until) -- the router compares the two components independently instead.
+    """
+
+    user_id: str
+    latest_message_at: datetime | None
+    paused_until: datetime | None
+
+
+@dataclass(frozen=True)
 class OutboundEntry:
     dedupe_key: str
     kind: str
@@ -344,6 +363,28 @@ class IngestStore(Protocol):
 
     async def find_mirrored_orders_by_phone(self, phone_e164: str) -> list[Order]: ...
 
+    # Page-wide batched sibling of find_mirrored_orders_by_phone for the admin thread LIST, which
+    # only needs each order's name + customer name (never line items / fulfillments -- the thread
+    # DETAIL still calls the single-phone method for those). Groups results by the queried phone
+    # (an order is listed under BOTH its o.phone and o.shipping_phone when either is in `phones`,
+    # matching the single-phone OR predicate), capped at 10 orders per phone like the single-phone
+    # method. Returned Order objects deliberately carry EMPTY line_items/fulfillments -- this is a
+    # list-tailored read, not a full-order load. An empty `phones` returns {}.
+    async def find_mirrored_orders_by_phones(
+        self, phones: list[str]
+    ) -> dict[str, list[Order]]: ...
+
+    # One-scalar "latest activity" signal for the admin chat cheap-poll (2026-08-29 egress work):
+    # MAX(created_at) across this customer's outbound_messages / order_actions / inbound_images and
+    # MAX(mirror-sync stamp) across their orders + fulfillments, in ONE round trip. `wa_ids` is the
+    # raw+normalized actor-id candidate set (order_actions.actor_wa_id is written RAW). Returns the
+    # single greatest timestamp, or None when this customer has no such activity. Resilient to the
+    # inbound_images table being absent (pre-migration): that contribution degrades to nothing, the
+    # rest of the signal still computes -- never raises for a missing optional table.
+    async def latest_activity_for_phone(
+        self, phone_e164: str, wa_ids: list[str]
+    ) -> datetime | None: ...
+
 
 class MessageStore(Protocol):
     """Dedupe authority for inbound Meta messages (sibling of processed_webhooks)."""
@@ -378,6 +419,21 @@ class ConversationStore(Protocol):
     """Windowed chat history + handoff state per WhatsApp sender."""
 
     async def get_or_create(self, user_id: str) -> int: ...
+
+    # Page-wide batched get_or_create for the admin thread LIST (2026-08-29 egress work):
+    # materializes a conversation id for every user_id in ONE round trip (single ON CONFLICT
+    # upsert), returning {user_id: conversation_id}. Same display-only semantics as get_or_create --
+    # the conflict branch is a self-assignment, so an existing row's last_active_at is NOT bumped.
+    # An empty list -> {}.
+    async def get_or_create_batch(self, user_ids: list[str]) -> dict[str, int]: ...
+
+    # Batched preview lookup for the admin thread LIST: the single most-recent message per user_id
+    # (the single-row analogue of find_messages_by_user_id(..., limit=1)), in ONE round trip via
+    # DISTINCT ON. A user_id with no messages is simply absent from the returned dict. Read-only --
+    # never creates a conversation row. An empty list -> {}.
+    async def last_messages_by_user_ids(
+        self, user_ids: list[str]
+    ) -> dict[str, StoredMessage]: ...
 
     # Explicit "genuine customer activity just happened" bump. This is the ONLY place
     # last_active_at is written to now() after the row is first created -- get_or_create no longer
@@ -470,6 +526,27 @@ class ConversationStore(Protocol):
     # so it starts at 0, not a flood of pre-existing history.
     async def count_unread_messages(self, conversation_id: int) -> int: ...
 
+    # Page-wide batched count_unread_messages for the admin thread LIST (2026-08-29 egress work):
+    # {conversation_id: unread_count} for every id, in ONE round trip. Ids with zero unread are
+    # still present (value 0) so the caller never has to distinguish "no row" from "zero unread".
+    # An empty list -> {}.
+    async def count_unread_messages_batch(
+        self, conversation_ids: list[int]
+    ) -> dict[int, int]: ...
+
+    # Page-wide batched get_paused_until for the admin thread LIST: {conversation_id: paused_until}
+    # for every id, in ONE round trip. A conversation with no pause maps to None. An empty list ->
+    # {}.
+    async def get_paused_until_batch(
+        self, conversation_ids: list[int]
+    ) -> dict[int, datetime | None]: ...
+
+    # Cheap "has this thread changed" signal for the admin chat poll (2026-08-29 egress work): the
+    # thread's user_id + MAX(messages.created_at) + paused_until in ONE round trip. None means the
+    # conversation id does not exist (the endpoint maps that to 404). See ThreadActivity for why
+    # paused_until is carried separately from the message stamp rather than folded into a GREATEST.
+    async def thread_activity(self, conversation_id: int) -> ThreadActivity | None: ...
+
 
 class ExchangeStore(Protocol):
     """Size-exchange requests: create, look up by customer phone, advance status/tracking.
@@ -484,6 +561,20 @@ class ExchangeStore(Protocol):
     ) -> ExchangeRequest: ...
 
     async def list_for_phone(self, phone_e164: str) -> list[ExchangeRequest]: ...
+
+    # Page-wide batched list_for_phone for the admin thread LIST (2026-08-29 egress work):
+    # {phone_e164: [ExchangeRequest, ...]} for every phone, in ONE round trip. A phone with no
+    # exchange requests is absent from the dict. An empty list -> {}.
+    async def list_for_phones(
+        self, phones: list[str]
+    ) -> dict[str, list[ExchangeRequest]]: ...
+
+    # One-scalar "latest exchange activity" signal for the admin chat cheap-poll: MAX(updated_at)
+    # over this customer's exchange_requests (updated_at is bumped by set_status /
+    # set_return_tracking_url / set_replacement_tracking_url, so a status change moves it), or None
+    # when the customer has none. Folded into the thread's activity signature so an exchange-status
+    # change refreshes an open thread.
+    async def latest_activity_for_phone(self, phone_e164: str) -> datetime | None: ...
 
     async def get(self, id: int) -> ExchangeRequest | None: ...
 

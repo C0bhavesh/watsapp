@@ -4,7 +4,12 @@ from datetime import UTC, datetime, timedelta
 
 from app.channels.shopify_orders import order_from_webhook_payload
 from app.store.base import MappingUpsert, OutboundDraft
-from app.store.memory import InMemoryConversationStore, InMemoryIngestStore, _parse_iso
+from app.store.memory import (
+    InMemoryConversationStore,
+    InMemoryExchangeStore,
+    InMemoryIngestStore,
+    _parse_iso,
+)
 from app.store.postgres import _parse_cursor
 
 # --- ConversationStore.find_messages_by_user_id ---
@@ -797,3 +802,200 @@ async def test_get_inbound_image_returns_bytes() -> None:
 async def test_get_inbound_image_missing_id_returns_none() -> None:
     store = InMemoryIngestStore()
     assert await store.get_inbound_image(999) is None
+
+
+# --- Batched thread-list enrichment (2026-08-29 egress work) ---
+
+async def test_find_mirrored_orders_by_phones_groups_by_queried_phone() -> None:
+    store = InMemoryIngestStore()
+    await _mirror_order(
+        store, "gid://shopify/Order/1", "tavas1", "+919384880222", "Amita", "Chadha",
+        "2026-08-15T10:00:00+05:30",
+    )
+    await _mirror_order(
+        store, "gid://shopify/Order/2", "tavas2", "+917000000000", "Other", "Person",
+        "2026-08-16T10:00:00+05:30",
+    )
+
+    by_phone = await store.find_mirrored_orders_by_phones(
+        ["+919384880222", "+917000000000", "+910000000000"]
+    )
+
+    assert set(by_phone) == {"+919384880222", "+917000000000"}
+    assert [o.name for o in by_phone["+919384880222"]] == ["tavas1"]
+    amita = by_phone["+919384880222"][0]
+    assert amita.customer is not None and amita.customer.first_name == "Amita"
+
+
+async def test_find_mirrored_orders_by_phones_matches_shipping_phone() -> None:
+    store = InMemoryIngestStore()
+    order = order_from_webhook_payload({
+        "admin_graphql_api_id": "gid://shopify/Order/9",
+        "name": "tavas9",
+        "phone": None,
+        "shipping_address": {"phone": "+919384880222"},
+        "updated_at": "2026-08-15T10:00:00+05:30",
+    })
+    assert order is not None
+    await store.upsert_order_mirror(order)
+
+    by_phone = await store.find_mirrored_orders_by_phones(["+919384880222"])
+
+    assert [o.name for o in by_phone["+919384880222"]] == ["tavas9"]
+
+
+async def test_find_mirrored_orders_by_phones_empty_input_returns_empty() -> None:
+    store = InMemoryIngestStore()
+    assert await store.find_mirrored_orders_by_phones([]) == {}
+
+
+async def test_get_or_create_batch_returns_ids_without_bumping() -> None:
+    store = InMemoryConversationStore()
+    a = await store.get_or_create("+919384880222")
+    await store.append_message(a, "user", "hi")
+    before = (await store.recent_conversations())[0].last_active_at
+
+    batch = await store.get_or_create_batch(["+919384880222", "+917000000000"])
+
+    assert batch["+919384880222"] == a
+    assert "+917000000000" in batch and isinstance(batch["+917000000000"], int)
+    # A display-only batch lookup must NOT bump recency on an existing row (same rule as
+    # get_or_create -- see error_learnings 2026-08-17).
+    after = (await store.recent_conversations())[0].last_active_at
+    assert before is not None and before == after
+
+
+async def test_get_or_create_batch_empty_returns_empty() -> None:
+    store = InMemoryConversationStore()
+    assert await store.get_or_create_batch([]) == {}
+
+
+async def test_last_messages_by_user_ids_returns_most_recent_per_user() -> None:
+    store = InMemoryConversationStore()
+    a = await store.get_or_create("+919384880222")
+    await store.append_message(a, "user", "first")
+    await store.append_message(a, "assistant", "latest")
+    b = await store.get_or_create("+917000000000")
+    await store.append_message(b, "user", "only")
+
+    previews = await store.last_messages_by_user_ids(
+        ["+919384880222", "+917000000000", "+910000000000"]
+    )
+
+    assert previews["+919384880222"].content == "latest"
+    assert previews["+917000000000"].content == "only"
+    # A user with no messages is simply absent (no create side effect).
+    assert "+910000000000" not in previews
+
+
+async def test_count_unread_messages_batch_matches_per_row() -> None:
+    store = InMemoryConversationStore()
+    a = await store.get_or_create("+919384880222")
+    await store.mark_read(a, datetime(2020, 1, 1, tzinfo=UTC))
+    await store.append_message(a, "user", "unread1")
+    await store.append_message(a, "user", "unread2")
+    b = await store.get_or_create("+917000000000")
+    await store.append_message(b, "assistant", "outbound only, not unread")
+
+    counts = await store.count_unread_messages_batch([a, b])
+
+    assert counts == {a: 2, b: 0}
+
+
+async def test_get_paused_until_batch_matches_per_row() -> None:
+    store = InMemoryConversationStore()
+    a = await store.get_or_create("+919384880222")
+    b = await store.get_or_create("+917000000000")
+    future = datetime(2099, 1, 1, tzinfo=UTC)
+    await store.pause_until(a, future)
+
+    paused = await store.get_paused_until_batch([a, b])
+
+    assert paused == {a: future, b: None}
+
+
+# --- Cheap "has this thread changed" signal (2026-08-29 egress work) ---
+
+async def test_thread_activity_returns_user_message_and_pause() -> None:
+    store = InMemoryConversationStore()
+    conv = await store.get_or_create("+919384880222")
+    await store.append_message(conv, "user", "hi")
+    future = datetime(2099, 1, 1, tzinfo=UTC)
+    await store.pause_until(conv, future)
+
+    activity = await store.thread_activity(conv)
+
+    assert activity is not None
+    assert activity.user_id == "+919384880222"
+    assert activity.latest_message_at is not None
+    assert activity.paused_until == future
+
+
+async def test_thread_activity_unknown_thread_returns_none() -> None:
+    store = InMemoryConversationStore()
+    assert await store.thread_activity(999) is None
+
+
+async def test_thread_activity_latest_message_moves_on_new_message() -> None:
+    store = InMemoryConversationStore()
+    conv = await store.get_or_create("+919384880222")
+    await store.append_message(conv, "user", "first")
+    before = (await store.thread_activity(conv)).latest_message_at  # type: ignore[union-attr]
+    import time as _t
+    _t.sleep(0.01)
+    await store.append_message(conv, "assistant", "reply")
+    after = (await store.thread_activity(conv)).latest_message_at  # type: ignore[union-attr]
+
+    assert before is not None and after is not None and after >= before
+
+
+async def test_ingest_latest_activity_reflects_outbound_tap_image_and_order() -> None:
+    store = InMemoryIngestStore()
+    phone = "+919384880222"
+    assert await store.latest_activity_for_phone(phone, [phone, phone.lstrip("+")]) is None
+
+    await store.record_order_action(
+        "gid://shopify/Order/1", "confirm", "919384880222", "m", "ok", None
+    )
+    after_tap = await store.latest_activity_for_phone(phone, [phone, "919384880222"])
+    assert after_tap is not None
+
+    await store.save_inbound_image(phone, "wamid.img", "image/png", b"x")
+    after_image = await store.latest_activity_for_phone(phone, [phone, "919384880222"])
+    assert after_image is not None and after_image >= after_tap
+
+
+async def test_ingest_latest_activity_reflects_order_mirror_write() -> None:
+    store = InMemoryIngestStore()
+    phone = "+919384880222"
+    await _mirror_order(
+        store, "gid://shopify/Order/1", "tavas1", phone, "Amita", "Chadha",
+        "2026-08-15T10:00:00+05:30",
+    )
+    assert await store.latest_activity_for_phone(phone, [phone]) is not None
+
+
+async def test_exchange_list_for_phones_groups_and_latest_activity() -> None:
+    store = InMemoryExchangeStore()
+    r1 = await store.create("gid://shopify/Order/1", "tavas1", "+919384880222", "M")
+    await store.create("gid://shopify/Order/2", "tavas2", "+917000000000", "L")
+
+    by_phone = await store.list_for_phones(
+        ["+919384880222", "+917000000000", "+910000000000"]
+    )
+    assert set(by_phone) == {"+919384880222", "+917000000000"}
+    assert [r.order_name for r in by_phone["+919384880222"]] == ["tavas1"]
+
+    before = await store.latest_activity_for_phone("+919384880222")
+    assert before is not None
+    import time as _t
+    _t.sleep(0.01)
+    await store.set_status(r1.id, "return_picked_up")
+    after = await store.latest_activity_for_phone("+919384880222")
+    assert after is not None and after >= before
+
+
+async def test_exchange_list_for_phones_empty_returns_empty() -> None:
+    store = InMemoryExchangeStore()
+    assert await store.list_for_phones([]) == {}
+    assert await store.latest_activity_for_phone("+910000000000") is None

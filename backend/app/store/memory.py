@@ -20,6 +20,7 @@ from app.store.base import (
     OutboundView,
     StoredInboundImage,
     StoredMessage,
+    ThreadActivity,
 )
 from app.store.postgres import MAX_MIRROR_FULFILLMENTS, _e164, _search_name_patterns
 
@@ -182,6 +183,11 @@ class InMemoryIngestStore:
         # incrementing int id mirrors this class's other "_by_id" tables (e.g. _outbound_by_id).
         self._inbound_images: dict[int, tuple[str, str, str, bytes, datetime]] = {}
         self._inbound_images_next_id = 1
+        # order_gid -> last mirror-write timestamp (the in-memory analogue of orders.synced_at /
+        # fulfillments.updated_at, both stamped now() on every upsert in Postgres). Re-stamped on
+        # every upsert_order_mirror AND upsert_fulfillment so latest_activity_for_phone can detect a
+        # mirror refresh for this customer's orders, matching the Postgres MAX(synced_at) signal.
+        self._order_mirror_synced_at: dict[str, datetime] = {}
 
     async def ingest_order_created(
         self,
@@ -250,6 +256,7 @@ class InMemoryIngestStore:
             await self.upsert_customer(order.customer)
         self.orders[order.gid] = order
         self.order_items[order.gid] = order.line_items
+        self._order_mirror_synced_at[order.gid] = datetime.now(UTC)
         # Persist any fulfillments the order carries (the backfill attaches them from the separate
         # live fetch); webhook-mirrored orders carry none so this is a no-op. The order row now
         # exists, so upsert_fulfillment's existence check passes and its guard applies.
@@ -276,6 +283,7 @@ class InMemoryIngestStore:
         ):
             fulfillment = replace(fulfillment, delivered_at=existing.delivered_at)
         self.fulfillments.setdefault(order_gid, {})[fulfillment.gid] = fulfillment
+        self._order_mirror_synced_at[order_gid] = datetime.now(UTC)
 
     def _with_fulfillments(self, order: Order | None) -> Order | None:
         if order is None:
@@ -312,6 +320,50 @@ class InMemoryIngestStore:
             o for o in self.orders.values() if phone_e164 in (o.phone, o.shipping_phone)
         ]
         return [self._with_fulfillments(o) or o for o in matches[:10]]
+
+    async def find_mirrored_orders_by_phones(
+        self, phones: list[str]
+    ) -> dict[str, list[Order]]:
+        # Batched sibling of find_mirrored_orders_by_phone for the admin thread LIST. Groups by the
+        # queried phone (an order is listed under BOTH its o.phone and o.shipping_phone when either
+        # is in `phones`, matching the single-phone OR predicate), capped at 10 per phone. Returned
+        # orders carry no fulfillments/line-items -- the list only reads name + customer.
+        wanted = set(phones)
+        result: dict[str, list[Order]] = {}
+        for order in self.orders.values():
+            for key in {order.phone, order.shipping_phone} & wanted:
+                if key is None:
+                    continue
+                bucket = result.setdefault(key, [])
+                if len(bucket) < 10:
+                    bucket.append(order)
+        return result
+
+    async def latest_activity_for_phone(
+        self, phone_e164: str, wa_ids: list[str]
+    ) -> datetime | None:
+        # In-memory analogue of the single-scalar activity signal: MAX(created_at) across this
+        # customer's outbound sends, button taps, inbound images, plus the mirror-write stamp for
+        # any of their orders. Parses the isoformat stamps that some tables store as strings.
+        candidates: list[datetime] = []
+        for key, draft in self.outbound.items():
+            if draft.phone_e164 == phone_e164:
+                candidates.append(self._outbound_meta[key].created_at)
+        wa_set = set(wa_ids)
+        for row in self.order_actions:
+            if row.get("actor_wa_id") in wa_set:
+                created = _parse_iso(row.get("created_at"))
+                if created is not None:
+                    candidates.append(created)
+        for _phone, _wamid, _mime, _bytes, created_at in self._inbound_images.values():
+            if _phone == phone_e164:
+                candidates.append(created_at)
+        for gid, order in self.orders.items():
+            if phone_e164 in (order.phone, order.shipping_phone):
+                synced = self._order_mirror_synced_at.get(gid)
+                if synced is not None:
+                    candidates.append(synced)
+        return max(candidates) if candidates else None
 
     async def recent_mappings(self, limit: int) -> list[MappingView]:
         views = [
@@ -914,6 +966,29 @@ class InMemoryConversationStore:
         if conversation_id is not None:
             self._last_active_at[conversation_id] = datetime.now(UTC)
 
+    async def get_or_create_batch(self, user_ids: list[str]) -> dict[str, int]:
+        # Batched get_or_create: creates missing rows (display-only, so no recency bump on an
+        # existing row -- same rule as get_or_create). Reuses get_or_create so the two cannot drift.
+        result: dict[str, int] = {}
+        for user_id in user_ids:
+            result[user_id] = await self.get_or_create(user_id)
+        return result
+
+    async def last_messages_by_user_ids(
+        self, user_ids: list[str]
+    ) -> dict[str, StoredMessage]:
+        # Most-recent message per user_id (the single-row analogue of find_messages(..., limit=1)).
+        # A user with no messages is absent from the dict; never creates a row.
+        result: dict[str, StoredMessage] = {}
+        for user_id in user_ids:
+            conversation_id = self._conversations.get(user_id)
+            if conversation_id is None:
+                continue
+            rows = self._messages.get(conversation_id, [])
+            if rows:
+                result[user_id] = _message_view(rows[-1])
+        return result
+
     async def get_user_id(self, conversation_id: int) -> str | None:
         for user_id, conv_id in self._conversations.items():
             if conv_id == conversation_id:
@@ -1068,6 +1143,26 @@ class InMemoryConversationStore:
     async def get_paused_until(self, conversation_id: int) -> datetime | None:
         return self._paused_until.get(conversation_id)
 
+    async def get_paused_until_batch(
+        self, conversation_ids: list[int]
+    ) -> dict[int, datetime | None]:
+        return {cid: self._paused_until.get(cid) for cid in conversation_ids}
+
+    async def thread_activity(self, conversation_id: int) -> ThreadActivity | None:
+        user_id = await self.get_user_id(conversation_id)
+        if user_id is None:
+            return None
+        latest: datetime | None = None
+        for row in self._messages.get(conversation_id, []):
+            created = _parse_iso(row.created_at)
+            if created is not None and (latest is None or created > latest):
+                latest = created
+        return ThreadActivity(
+            user_id=user_id,
+            latest_message_at=latest,
+            paused_until=self._paused_until.get(conversation_id),
+        )
+
     async def mark_handoff_attempted(self, conversation_id: int, at: datetime) -> None:
         self._handoff_attempted_at[conversation_id] = at
 
@@ -1087,6 +1182,13 @@ class InMemoryConversationStore:
             if created is not None and created > last_read:
                 count += 1
         return count
+
+    async def count_unread_messages_batch(
+        self, conversation_ids: list[int]
+    ) -> dict[int, int]:
+        return {
+            cid: await self.count_unread_messages(cid) for cid in conversation_ids
+        }
 
 
 class InMemoryExchangeStore:
@@ -1110,6 +1212,25 @@ class InMemoryExchangeStore:
 
     async def list_for_phone(self, phone_e164: str) -> list[ExchangeRequest]:
         return [r for r in self._rows.values() if r.phone_e164 == phone_e164]
+
+    async def list_for_phones(
+        self, phones: list[str]
+    ) -> dict[str, list[ExchangeRequest]]:
+        wanted = set(phones)
+        result: dict[str, list[ExchangeRequest]] = {}
+        for r in self._rows.values():
+            if r.phone_e164 in wanted:
+                result.setdefault(r.phone_e164, []).append(r)
+        return result
+
+    async def latest_activity_for_phone(self, phone_e164: str) -> datetime | None:
+        stamps = [
+            _parse_iso(r.updated_at)
+            for r in self._rows.values()
+            if r.phone_e164 == phone_e164
+        ]
+        present = [s for s in stamps if s is not None]
+        return max(present) if present else None
 
     async def get(self, id: int) -> ExchangeRequest | None:
         return self._rows.get(id)

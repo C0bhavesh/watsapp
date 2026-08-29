@@ -112,6 +112,12 @@
 - **Response:** `{"messages": [{"id": "wamid..."}]}` → `SendResult(ok=True, wamid=...)`; >=400 → `SendResult(ok=False, status_code, error=body[:500])`; transport error → `WhatsAppSendError`.
 - **Notes:** access token is a Fernet-encrypted secret (`whatsapp:access_token`), never logged. Timeout default 20s.
 
+## [external] ad2ship public tracking page (RTO-aware delivery status, Task 1)
+- **Caller:** backend/app/shopify/ad2ship.py (`fetch_tracking`)
+- **Endpoint:** `GET https://ad2ship.com/track-order/{awb}` — public, unauthenticated HTML page (NO API key/token). Header `User-Agent: Mozilla/5.0`, `follow_redirects=False`, `timeout=4.0`s default.
+- **Response:** HTML page parsed with stdlib `re` → `Ad2shipTracking | None`. `None` on httpx error, non-200, a page with no `status-badge` node, or any parse failure — `fetch_tracking` never raises.
+- **Notes:** no credentials of any kind; failure log carries only `type=%s` (exception class name) — never the awb, URL, or `str(exc)`. Consumed by the later delivery sweep job + order-tracking agent (Tasks 2+) to distinguish a genuine customer delivery from an RTO. See component_registry "ad2ship tracking-page parser".
+
 ## [external] Shopify webhook subscription management — REMOVED (2026-08-15)
 - **Status:** the app-managed self-heal that CREATED/UPDATED Shopify webhook subscriptions
   (`ensure_subscription`, `webhookSubscriptionCreate`/`webhookSubscriptionUpdate`, the

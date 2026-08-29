@@ -37,6 +37,19 @@ class Customer:
 
 
 @dataclass(frozen=True)
+class FulfillmentEvent:
+    """One entry in a fulfillment's Shopify tracking timeline (Admin GraphQL `FulfillmentEvent`).
+
+    Live-read path only (`Fulfillment.events`). The RTO-aware "genuinely delivered?" rule scans
+    these to tell a real delivery from an attempted/returned one. Both fields are stored raw --
+    `status` is Shopify's own `FulfillmentEventStatus` enum, `happened_at` the raw ISO-8601 stamp.
+    """
+
+    status: str
+    happened_at: str
+
+
+@dataclass(frozen=True)
 class Fulfillment:
     """One Shopify fulfillment (shipment) of an order, carrying its courier/tracking details.
 
@@ -64,6 +77,18 @@ class Fulfillment:
     # path; the REST webhook payload carries no delivery-date field, so a webhook-parsed
     # Fulfillment always leaves this None. Capture-and-store only (no customer-facing use yet).
     delivered_at: str | None = None
+    # Shopify's `FulfillmentDisplayStatus` (e.g. DELIVERED, ATTEMPTED_DELIVERY, OUT_FOR_DELIVERY).
+    # Populated ONLY on the live GraphQL read path; the RTO-aware delivery rule reads it to decide
+    # if a shipment is genuinely delivered vs attempted/returned. None on any webhook/mirror parse.
+    display_status: str | None = None
+    # The fulfillment's Shopify tracking timeline, newest-relevant first (see FulfillmentEvent).
+    # GraphQL-read-path only; empty on webhook/mirror parses. The delivery rule scans this for an
+    # ATTEMPTED/failure event AFTER a DELIVERED to catch a marked-delivered-then-returned shipment.
+    events: tuple[FulfillmentEvent, ...] = ()
+    # Our OWN normalized delivery-state mirror column (Task 4 populates it from ad2ship/the events
+    # rule). Not a Shopify field -- distinct from display_status. Left defaulted on every read path
+    # here; only the mirror write path sets it.
+    shipment_status: str | None = None
 
     def has_tracking(self) -> bool:
         return bool(self.tracking_number or self.tracking_url)

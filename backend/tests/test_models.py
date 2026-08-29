@@ -4,6 +4,7 @@ from app.shopify.models import (
     AuthorizedOrder,
     Customer,
     Fulfillment,
+    FulfillmentEvent,
     Money,
     Order,
     normalize_order_name,
@@ -189,3 +190,37 @@ def test_fulfillment_carries_delivered_at() -> None:
         delivered_at="2026-08-14T09:00:00+00:00",
     )
     assert f.delivered_at == "2026-08-14T09:00:00+00:00"
+
+
+def test_fulfillment_carries_display_status_and_events() -> None:
+    # displayStatus + the events timeline (Admin GraphQL, live-read path only): the RTO-aware
+    # "genuinely delivered?" rule reads these to distinguish a real delivery from an attempted /
+    # returned shipment. Both round-trip verbatim (raw Shopify enum + raw ISO-8601 timestamps).
+    f = Fulfillment(
+        gid="gid://shopify/Fulfillment/4",
+        status="SUCCESS",
+        tracking_company=None,
+        tracking_number=None,
+        tracking_url=None,
+        display_status="DELIVERED",
+        events=(FulfillmentEvent("DELIVERED", "2026-08-29T08:45:37Z"),),
+    )
+    assert f.display_status == "DELIVERED"
+    assert f.events == (FulfillmentEvent("DELIVERED", "2026-08-29T08:45:37Z"),)
+    assert f.events[0].status == "DELIVERED"
+    assert f.events[0].happened_at == "2026-08-29T08:45:37Z"
+
+
+def test_fulfillment_new_fields_default_for_old_style_construction() -> None:
+    # Backward compatibility: an existing call site that never passes the new fields still
+    # constructs, with display_status / events / shipment_status all at their defaults.
+    f = Fulfillment(
+        gid="gid://shopify/Fulfillment/5",
+        status=None,
+        tracking_company=None,
+        tracking_number=None,
+        tracking_url=None,
+    )
+    assert f.display_status is None
+    assert f.events == ()
+    assert f.shipment_status is None

@@ -229,6 +229,84 @@ async def test_get_order_fulfillment_delivered_at_is_none_until_delivered(
     assert order.fulfillments[0].delivered_at is None
 
 
+# displayStatus + a 3-event tracking timeline (OUT_FOR_DELIVERY -> DELIVERED -> ATTEMPTED): the
+# RTO case where Shopify marked a shipment delivered but a later attempted-delivery event shows it
+# came back. The delivery rule (Task 3) needs both the enum and the ordered events.
+_RTO_FULFILLMENTS_PAYLOAD = [
+    {
+        "id": "gid://shopify/Fulfillment/333",
+        "status": "SUCCESS",
+        "displayStatus": "ATTEMPTED_DELIVERY",
+        "trackingInfo": [
+            {"company": "Delhivery", "number": "AWB333", "url": "https://track/AWB333"},
+        ],
+        "createdAt": "2026-08-29T05:00:00Z",
+        "updatedAt": "2026-08-29T10:40:00Z",
+        "deliveredAt": None,
+        "events": {
+            "nodes": [
+                {"status": "OUT_FOR_DELIVERY", "happenedAt": "2026-08-29T07:00:00Z"},
+                {"status": "DELIVERED", "happenedAt": "2026-08-29T08:45:00Z"},
+                {"status": "ATTEMPTED_DELIVERY", "happenedAt": "2026-08-29T10:40:00Z"},
+            ]
+        },
+    },
+]
+
+
+async def test_get_order_query_selects_display_status_and_events(settings, master_key) -> None:
+    queries: list[str] = []
+
+    def gql(request: httpx.Request) -> httpx.Response:
+        query = json.loads(request.content)["query"]
+        queries.append(query)
+        if "fulfillments(first: 5)" in query:
+            return httpx.Response(200, json={"data": {"order": {"fulfillments": []}}})
+        return httpx.Response(200, json={"data": {"node": _FULFILLED_ORDER_NODE}})
+
+    client, config = make_client(settings, master_key, grant_or(gql))
+    await seed(config)
+    await client.get_order("gid://shopify/Order/12187547894128")
+    # The isolated fulfillments query must now request displayStatus + the events timeline.
+    ful_q = next(q for q in queries if "fulfillments(first: 5)" in q)
+    assert "displayStatus" in ful_q
+    assert "events(first: 250, sortKey: HAPPENED_AT)" in ful_q
+
+
+async def test_get_order_parses_display_status_and_events(settings, master_key) -> None:
+    handler = _split_order_handler(
+        {"data": {"order": {"fulfillments": _RTO_FULFILLMENTS_PAYLOAD}}}
+    )
+    client, config = make_client(settings, master_key, grant_or(handler))
+    await seed(config)
+    order = await client.get_order("gid://shopify/Order/12187547894128")
+    assert order is not None
+    assert len(order.fulfillments) == 1
+    f = order.fulfillments[0]
+    assert f.display_status == "ATTEMPTED_DELIVERY"
+    assert len(f.events) == 3
+    assert [(e.status, e.happened_at) for e in f.events] == [
+        ("OUT_FOR_DELIVERY", "2026-08-29T07:00:00Z"),
+        ("DELIVERED", "2026-08-29T08:45:00Z"),
+        ("ATTEMPTED_DELIVERY", "2026-08-29T10:40:00Z"),
+    ]
+
+
+async def test_get_order_fulfillment_without_events_parses_empty_tuple(
+    settings, master_key
+) -> None:
+    # Backward-compat: the existing tracking payload carries no displayStatus/events keys, so both
+    # must degrade to their defaults (None / ()) rather than crash.
+    handler = _split_order_handler({"data": {"order": {"fulfillments": _FULFILLMENTS_PAYLOAD}}})
+    client, config = make_client(settings, master_key, grant_or(handler))
+    await seed(config)
+    order = await client.get_order("gid://shopify/Order/12187547894128")
+    assert order is not None
+    f = order.fulfillments[0]
+    assert f.display_status is None
+    assert f.events == ()
+
+
 async def test_get_order_without_fulfillments_has_empty_tuple(settings, master_key) -> None:
     handler = _split_order_handler({"data": {"order": {"fulfillments": []}}})
     client, config = make_client(settings, master_key, grant_or(handler))

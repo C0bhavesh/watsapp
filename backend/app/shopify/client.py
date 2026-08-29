@@ -21,6 +21,7 @@ from app.shopify.models import (
     CancelRequested,
     Customer,
     Fulfillment,
+    FulfillmentEvent,
     LineItem,
     Money,
     Order,
@@ -85,9 +86,15 @@ ORDER_FIELDS = (
 # `deliveredAt` is the actual delivery timestamp (capture-and-store only -- the REST webhook
 # payload carries no equivalent field, so this GraphQL read is the ONLY path that can populate
 # Fulfillment.delivered_at).
+# `displayStatus` + the `events` timeline (both GraphQL-only, no webhook equivalent) drive the
+# RTO-aware "genuinely delivered?" rule: displayStatus distinguishes DELIVERED from
+# ATTEMPTED_DELIVERY, and events (oldest-first by HAPPENED_AT) reveals a delivered-then-returned
+# shipment. `first: 250` covers a courier's full scan history in one page (no timeline paginates
+# that far in practice).
 FULFILLMENT_FIELDS = (
-    "fulfillments(first: 5) { id status trackingInfo(first: 3) { company number url } "
-    "createdAt updatedAt deliveredAt }"
+    "fulfillments(first: 5) { id status displayStatus "
+    "trackingInfo(first: 3) { company number url } createdAt updatedAt deliveredAt "
+    "events(first: 250, sortKey: HAPPENED_AT) { nodes { status happenedAt } } }"
 )
 
 
@@ -149,6 +156,17 @@ def _fulfillments_from_node(node: dict[str, Any]) -> tuple[Fulfillment, ...]:
         # Keep the first tracking entry (a fulfillment rarely has more than one), matching the
         # single-tracking-per-row mirror schema.
         info = info_list[0] if info_list and isinstance(info_list[0], dict) else {}
+        # events is a connection ({ nodes: [...] }); guard every level so a missing/short payload
+        # (or a webhook-parsed node, which never carries it) degrades to an empty tuple.
+        event_nodes = (f.get("events") or {}).get("nodes") or []
+        events = tuple(
+            FulfillmentEvent(
+                status=str(e.get("status") or ""),
+                happened_at=str(e.get("happenedAt") or ""),
+            )
+            for e in event_nodes
+            if isinstance(e, dict)
+        )
         result.append(
             Fulfillment(
                 gid=str(f.get("id") or ""),
@@ -159,6 +177,8 @@ def _fulfillments_from_node(node: dict[str, Any]) -> tuple[Fulfillment, ...]:
                 created_at=f.get("createdAt"),
                 updated_at=f.get("updatedAt"),
                 delivered_at=f.get("deliveredAt"),
+                display_status=f.get("displayStatus"),
+                events=events,
             )
         )
     return tuple(result)

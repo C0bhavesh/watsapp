@@ -6,6 +6,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from app.deps import Container, get_container
+from app.jobs.delivery_confirm import run_delivery_confirm
 from app.jobs.outbox_drain import run_outbox_drain
 from app.jobs.reconcile import run_reconcile_cancels
 from app.jobs.reminders import run_send_reminders
@@ -22,6 +23,7 @@ JOBS: dict[str, JobFn] = {
     "outbox_drain": run_outbox_drain,
     "reconcile_cancels": run_reconcile_cancels,
     "send_reminders": run_send_reminders,
+    "delivery_confirm": run_delivery_confirm,
 }
 
 

@@ -1,0 +1,163 @@
+"""Delivery-confirmation sweep job — the RTO-aware gate before `order_delivered` is sent.
+
+A `fulfillments/update` webhook whose ``shipment_status`` is exactly "delivered" no longer sends
+``order_delivered`` immediately: Delhivery stamps that same status on an RTO's final "delivered back
+to origin" scan exactly as it does on a genuine customer delivery (the tavas3908 bug). Task 5
+instead parks a ``pending_delivery_confirmations`` row due ~2h later. This job sweeps the DUE rows
+and decides, per shipment, whether the customer was really delivered to:
+
+1. Primary signal — the ad2ship public tracking page (``fetch_tracking``): it distinguishes a
+   genuine customer delivery from an RTO, which Shopify's own status cannot.
+2. Fallback — used ONLY when ad2ship can't be read (returns ``None``): the intentionally leaky
+   Shopify heuristic (``fulfillment_is_genuinely_delivered``). It still marks some RTOs as
+   DELIVERED, but it only has to beat blindly sending.
+
+Outcomes: a confirmed genuine delivery sends ``order_delivered`` and marks the row ``sent``; an RTO
+is recorded (``state=rto``, ``shipment_status=rto``) and NEVER messaged; anything inconclusive
+leaves the row ``pending`` for the next run; a row older than ``_ABANDON_AFTER`` is abandoned. One
+row's unexpected failure never aborts the batch (mirrors ``jobs.reconcile.run_reconcile_cancels``).
+The ``send_mode`` kill switch is enforced downstream inside the inline send, not here.
+"""
+
+import logging
+import traceback
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from app.channels.shopify_orders import customer_display_name
+from app.channels.shopify_webhook import (
+    TEMPLATE_NAME_DELIVERED,
+    _enqueue_and_send_fulfillment_notification,
+)
+from app.core.delivery_outcome import fulfillment_is_genuinely_delivered
+from app.deps import Container
+from app.shopify.ad2ship import fetch_tracking
+from app.shopify.models import Order
+from app.store.base import PendingDeliveryConfirmation
+
+logger = logging.getLogger("app.jobs.delivery_confirm")
+
+_BATCH_LIMIT = 50
+_ABANDON_AFTER = timedelta(days=7)
+
+
+async def _send(c: Container, row: PendingDeliveryConfirmation, order: Order) -> None:
+    """Enqueue + inline-send ONE ``order_delivered`` notification, then mark the row ``sent``.
+
+    ``_enqueue_and_send_fulfillment_notification`` never raises and enforces the ``send_mode`` kill
+    switch downstream (a suppressed send leaves the queued row untouched, zero Meta calls). The
+    confirmation state is advanced regardless so a suppressed/kill-switched shipment is not re-swept
+    forever — parity with reconcile, where the tag/status write proceeds even when the send is
+    suppressed.
+    """
+    await _enqueue_and_send_fulfillment_notification(
+        c,
+        order_gid=row.order_gid,
+        dedupe_key=f"fulfillment_delivered:{row.fulfillment_gid}",
+        phone=row.phone_e164,
+        template=TEMPLATE_NAME_DELIVERED,
+        body_params=[customer_display_name(order), order.name],
+    )
+    await c.ingest.set_delivery_confirmation_state(row.fulfillment_gid, "sent")
+
+
+def _log_row_failure(fulfillment_gid: str, exc: BaseException) -> None:
+    """PII-free per-row failure log: exception TYPE + last-frame location only.
+
+    Never ``str(exc)`` (its text can echo a tracking number/URL) and never the awb/phone/tracking
+    text — mirrors ``shopify_webhook._log_notify_failure``. The fulfillment gid is an opaque Shopify
+    id (not PII) and makes a genuine future bug locatable in production.
+    """
+    frames = traceback.extract_tb(exc.__traceback__)
+    location = f"{frames[-1].filename}:{frames[-1].lineno}" if frames else "unknown"
+    logger.error(
+        "delivery confirm: row failed gid=%s type=%s at=%s",
+        fulfillment_gid, type(exc).__name__, location,
+    )
+
+
+async def run_delivery_confirm(c: Container) -> dict[str, Any]:
+    now = datetime.now(UTC)
+    due_rows = await c.ingest.due_delivery_confirmations(now, limit=_BATCH_LIMIT)
+    sent = rto = pending = abandoned = errors = 0
+    for row in due_rows:
+        # One row's unexpected failure (store hiccup, programming bug) must degrade to a logged skip
+        # + errors counter, never abort the batch or crash the sweep (mirrors reconcile_cancels).
+        try:
+            if now - row.due_at > _ABANDON_AFTER:
+                # Parked far too long to still be actionable -> stop retrying it.
+                await c.ingest.set_delivery_confirmation_state(row.fulfillment_gid, "abandoned")
+                abandoned += 1
+                continue
+
+            order = await c.ingest.get_mirrored_order(row.order_gid)
+            if order is None:
+                # Mirror miss (order not mirrored yet / raced): nothing to render or send. Leave
+                # the row pending so the next run retries once the mirror catches up. gid-only log.
+                logger.info(
+                    "delivery confirm: no mirrored order for %s; left pending", row.order_gid
+                )
+                errors += 1
+                continue
+
+            fulfillment = next(
+                (f for f in order.fulfillments if f.gid == row.fulfillment_gid), None
+            )
+            awb = fulfillment.tracking_number if fulfillment else None
+
+            # ad2ship is the reliable RTO signal. fetch_tracking never raises: any transport/parse
+            # failure or missing awb yields None, which routes to the Shopify fallback below.
+            tracking = await fetch_tracking(c.http, awb) if awb else None
+
+            if tracking is not None and tracking.is_delivered_to_customer():
+                await _send(c, row, order)
+                sent += 1
+                await c.ingest.set_fulfillment_shipment_status(
+                    row.fulfillment_gid, "delivered",
+                    tracking_city=tracking.current_city, tracking_hub=tracking.current_hub,
+                    last_scan=tracking.last_scan_remark or tracking.last_scan,
+                    expected_date=tracking.expected_date, checked_at=now,
+                )
+            elif tracking is not None and tracking.is_rto():
+                # A returned shipment: record it and NEVER congratulate the customer.
+                await c.ingest.set_delivery_confirmation_state(row.fulfillment_gid, "rto")
+                await c.ingest.set_fulfillment_shipment_status(
+                    row.fulfillment_gid, "rto",
+                    tracking_city=tracking.current_city, tracking_hub=tracking.current_hub,
+                    last_scan=tracking.last_scan_remark or tracking.last_scan,
+                    expected_date=tracking.expected_date, checked_at=now,
+                )
+                rto += 1
+            else:
+                # ad2ship unreadable (None) or a non-terminal state -> Shopify fallback.
+                if tracking is not None:
+                    # Persist whatever ad2ship DID give us (real but non-terminal movement) so Task
+                    # 7's agent enrichment sees the freshest snapshot even though we're not acting.
+                    await c.ingest.set_fulfillment_shipment_status(
+                        row.fulfillment_gid, tracking.status,
+                        tracking_city=tracking.current_city, tracking_hub=tracking.current_hub,
+                        last_scan=tracking.last_scan_remark or tracking.last_scan,
+                        expected_date=tracking.expected_date, checked_at=now,
+                    )
+                # get_order_fulfillments already swallows ShopifyError into () internally, so an
+                # empty tuple (scope missing/outage) OR no gid match is simply "fallback
+                # inconclusive" -> leave the row pending for the next run.
+                shopify_fulfillments = await c.shopify.get_order_fulfillments(row.order_gid)
+                shopify_f = next(
+                    (f for f in shopify_fulfillments if f.gid == row.fulfillment_gid), None
+                )
+                if shopify_f is not None and fulfillment_is_genuinely_delivered(shopify_f):
+                    await _send(c, row, order)
+                    sent += 1
+                    await c.ingest.set_fulfillment_shipment_status(
+                        row.fulfillment_gid, "delivered", checked_at=now
+                    )
+                else:
+                    pending += 1
+        except Exception as exc:  # noqa: BLE001 — one row never fails the whole run (see reconcile)
+            errors += 1
+            _log_row_failure(row.fulfillment_gid, exc)
+    return {
+        "swept": len(due_rows), "sent": sent, "rto": rto,
+        "pending": pending, "abandoned": abandoned, "errors": errors,
+    }

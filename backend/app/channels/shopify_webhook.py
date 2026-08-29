@@ -254,13 +254,16 @@ async def _enqueue_and_send_fulfillment_notification(
     it NEVER raises past this call, so one notification failing never prevents a sibling (shipped
     vs delivered) from being attempted, and never turns the signed webhook's ack into a 500.
 
-    Returns ``True`` when a durable outbound row now exists — ``enqueue_outbound`` returned a
-    non-None id, so the row is queued and ``send_inline_outbound`` (best-effort, kill-switch aware)
-    will deliver it now or the backstop drain later. Returns ``False`` when ``enqueue_outbound``
-    itself raised or returned ``None`` before any row was created, so a caller that tracks state
-    (the delivery-confirm sweep) can leave its row pending and retry rather than silently losing the
-    notification. A FAILURE of only the inline send (a row exists) is still ``True`` — the row is
-    durable and retryable, not lost.
+    Returns ``True`` whenever a durable outbound row exists for this dedupe_key — either
+    ``enqueue_outbound`` inserted one now (non-None id, sent inline best-effort / drained later) OR
+    it returned ``None`` because a row with this dedupe_key ALREADY existed (``ON CONFLICT
+    (dedupe_key) DO NOTHING RETURNING id`` yields ``None`` on the conflict — the durable row is
+    already there, delivered by whoever created it, NOT a failure). Returns ``False`` ONLY
+    when ``enqueue_outbound`` itself raised, i.e. no row exists at all. This lets a caller that
+    tracks state (the delivery-confirm sweep) advance to ``sent`` in both success shapes and retry
+    only on a genuine enqueue failure, never re-processing an already-durable notification forever.
+    A failure of only the inline send (a row exists) is still ``True`` — the row is durable and
+    retryable, not lost.
     """
     try:
         draft = OutboundDraft(
@@ -277,7 +280,9 @@ async def _enqueue_and_send_fulfillment_notification(
         _log_notify_failure(order_gid, exc)
         return False
     if outbound_id is None:
-        return False
+        # Dedupe conflict: a durable row for this dedupe_key already exists (nothing to send here —
+        # its own creator / the backstop drain owns delivery). Success, not failure.
+        return True
     try:
         await send_inline_outbound(
             c, outbound_id, timeout=_FULFILLMENT_INLINE_SEND_TIMEOUT_SECONDS

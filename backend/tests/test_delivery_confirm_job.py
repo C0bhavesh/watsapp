@@ -354,6 +354,40 @@ async def test_second_run_does_not_resend(monkeypatch: pytest.MonkeyPatch) -> No
     assert len(sender.calls) == 1  # the WhatsApp send fired exactly once across both runs
 
 
+async def test_preexisting_outbound_row_still_marks_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A durable fulfillment_delivered:{gid} row already exists (a re-swept run / stray earlier
+    # enqueue). enqueue_outbound's ON CONFLICT DO NOTHING RETURNING id yields None on that conflict
+    # -- which is confirmation the row is already there, NOT a failure. The sweep must still advance
+    # the confirmation row to state="sent" (not re-count it errors forever), with no duplicate row.
+    import json
+
+    from app.store.base import OutboundDraft
+
+    c = get_container()
+    _install_sender(monkeypatch)
+    _install_ad2ship(monkeypatch, _tracking("delivered"))
+    await _seed()
+    pre_id = await c.ingest.enqueue_outbound(
+        OutboundDraft(
+            dedupe_key=DEDUPE, kind="fulfillment_delivered", phone_e164=PHONE,
+            payload_json=json.dumps(
+                {"template": "order_delivered", "language": "en",
+                 "body_params": ["X", "tavas3908"]}
+            ),
+        )
+    )
+    assert pre_id is not None  # the pre-existing durable row
+
+    result = await run_delivery_confirm(c)
+
+    assert result["sent"] == 1
+    assert result["errors"] == 0
+    assert _confirmation_state(FUL_GID) == "sent"
+    assert len(await _outbound_rows(DEDUPE)) == 1  # dedupe held -> no duplicate row
+
+
 async def test_kill_switch_suppresses_actual_send(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

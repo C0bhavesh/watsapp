@@ -1,0 +1,959 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Track Details</title><link rel="icon" type="image/png"
+        href="https://ad2ship.com/assets/images/logo-dark-200X200.png"><link rel="shortcut icon"
+        href="https://ad2ship.com/assets/images/logo-dark-200X200.png"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
+        rel="stylesheet"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"><style>
+        :root {
+            --bg-body: #f8fafc;
+            --brand-primary: #487FFF;
+            --brand-primary-light: #6A9CFF;
+            --text-main: #1f2937;
+            --text-muted: #6b7280;
+            --border-color: #e5e7eb;
+            --card-bg: #ffffff;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Inter', sans-serif;
+        }
+
+        html,
+        body {
+            background-color: var(--bg-body);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow-x: hidden;
+            width: 100%;
+            max-width: 100%;
+        }
+
+        /* Banner Logo */
+        .logo-strip {
+            background: #fff;
+            text-align: center;
+            margin-bottom: 12px;
+            margin-top: 10px;
+        }
+
+        .logo-strip img {
+            width: 100% !important;
+            max-width: 100%;
+            height: auto;
+            max-height: none;
+            object-fit: contain;
+            display: block;
+        }
+
+        /* Purple Header */
+        .purple-header {
+            background: linear-gradient(135deg, var(--brand-primary) 0%, var(--brand-primary-light) 100%);
+            color: #fff;
+            text-align: center;
+            padding: 60px 20px 100px;
+            margin-top: 10px;
+            position: relative;
+            overflow: hidden;
+            width: 100%;
+        }
+
+        .purple-header h1 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 12px;
+        }
+
+        .purple-header p {
+            font-size: 1rem;
+            opacity: 0.9;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .header-curve {
+            position: absolute;
+            bottom: -1px;
+            left: 0;
+            width: 100%;
+            line-height: 0;
+        }
+
+        .header-curve svg {
+            display: block;
+            width: 100%;
+            height: 40px;
+        }
+
+        /* ---------- Payment advisory ---------- */
+        .payment-advisory {
+            position: relative;
+            z-index: 10;
+            background: #fff7ed;
+            border-top: 1px solid rgba(217, 119, 6, 0.14);
+            border-bottom: 1px solid rgba(217, 119, 6, 0.18);
+            overflow: hidden;
+            padding: 10px 0;
+            width: 100%;
+            max-width: 100%;
+        }
+
+        .marquee-track {
+            display: flex;
+            width: max-content;
+            animation: tk-marquee 38s linear infinite;
+        }
+
+        .payment-advisory:hover .marquee-track {
+            animation-play-state: paused;
+        }
+
+        @keyframes tk-marquee {
+            from {
+                transform: translateX(0);
+            }
+
+            to {
+                transform: translateX(-50%);
+            }
+        }
+
+        .marquee-item {
+            display: flex;
+            align-items: center;
+            color: #7c2d12;
+            font-size: 13.5px;
+            font-weight: 500;
+            padding-right: 80px;
+            white-space: nowrap;
+        }
+
+        .marquee-item strong {
+            color: #9a3412;
+        }
+
+        /* Main Container */
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 0 20px;
+            position: relative;
+            z-index: 10;
+        }
+
+        .with-purple-header {
+            margin-top: -60px;
+        }
+
+        .with-logo-only {
+            margin-top: 40px;
+        }
+
+        /* Top Tracking Card */
+        .tracking-card {
+            background: var(--card-bg);
+            border-radius: 16px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05);
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            border-top: 4px solid var(--brand-primary);
+        }
+
+        @media (min-width: 768px) {
+            .tracking-card {
+                flex-direction: row;
+            }
+        }
+
+        .tc-left {
+            flex: 1;
+            padding: 30px;
+            border-right: 1px dashed var(--border-color);
+        }
+
+        .tc-right {
+            flex: 0.8;
+            padding: 30px;
+            background: #fafafa;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* Status Badge */
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--brand-primary);
+            color: #fff;
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin-bottom: 24px;
+        }
+
+        .status-badge.delivered {
+            background: #10b981;
+        }
+
+        .status-badge.cancelled {
+            background: #ef4444;
+        }
+
+        .status-badge.ndr,
+        .status-badge.undelivered {
+            background: #ef4444;
+        }
+
+        /* Dates Row */
+        .dates-row {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .date-box {
+            flex: 1;
+            background: #f9fafb;
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 16px;
+        }
+
+        .date-box span {
+            display: block;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .date-box strong {
+            display: block;
+            font-size: 1.25rem;
+            color: var(--text-main);
+            margin-bottom: 4px;
+        }
+
+        .date-box small {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+
+        /* Info List */
+        .info-list {
+            list-style: none;
+        }
+
+        .info-list li {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px 0;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 0.9rem;
+        }
+
+        .info-list li:last-child {
+            border-bottom: none;
+        }
+
+        .info-label {
+            color: var(--text-main);
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .info-label i {
+            color: var(--brand-primary);
+            width: 16px;
+            text-align: center;
+        }
+
+        .info-value {
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        /* Right Side: Courier */
+        .courier-circle {
+            width: 100px;
+            height: 100px;
+            border-radius: 50%;
+            background: #fff;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 16px;
+            padding: 15px;
+            border: 1px solid var(--border-color);
+        }
+
+        .courier-circle img {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+        }
+
+        .courier-name {
+            font-weight: 700;
+            font-size: 1.1rem;
+            margin-bottom: 4px;
+        }
+
+        .courier-awb {
+            color: var(--brand-primary);
+            font-weight: 600;
+            font-size: 1.1rem;
+            margin-bottom: 20px;
+        }
+
+        .action-btns {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+
+        .action-btn {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: #fff;
+            border: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--brand-primary);
+            cursor: pointer;
+            transition: 0.2s;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.02);
+        }
+
+        .action-btn:hover {
+            background: var(--brand-primary);
+            color: #fff;
+        }
+
+        /* Address Card */
+        .address-card {
+            background: #fff;
+            border-radius: 12px;
+            padding: 16px;
+            text-align: center;
+            width: 100%;
+            border: 1px solid var(--border-color);
+        }
+
+        .address-card strong {
+            display: block;
+            font-size: 0.9rem;
+            margin-bottom: 8px;
+            color: var(--text-main);
+        }
+
+        .address-card p {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            line-height: 1.5;
+            display: flex;
+            align-items: flex-start;
+            justify-content: center;
+            gap: 6px;
+        }
+
+        .address-card p i {
+            color: var(--brand-primary);
+            margin-top: 3px;
+        }
+
+        /* Shipment Progress Timeline */
+        .timeline-card {
+            background: #fff;
+            border-radius: 16px;
+            padding: 30px;
+            margin-top: 24px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05);
+        }
+
+        .timeline-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+        }
+
+        .timeline-head h2 {
+            font-size: 1.3rem;
+            color: #ef4444;
+            /* Match screenshot pink/red heading */
+            font-weight: 700;
+        }
+
+        .live-tracking-badge {
+            background: #f0fdf4;
+            color: #16a34a;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            border: 1px solid #dcfce7;
+        }
+
+        .live-tracking-badge i {
+            font-size: 0.5rem;
+        }
+
+        .steps-scroll-wrapper {
+            width: 100%;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        /* Horizontal Steps */
+        .horizontal-steps {
+            display: flex;
+            justify-content: space-between;
+            position: relative;
+            margin-bottom: 40px;
+            padding: 0 10px;
+        }
+
+        .horizontal-steps::before {
+            content: '';
+            position: absolute;
+            top: 20px;
+            left: 5%;
+            right: 5%;
+            height: 3px;
+            background: #e5e7eb;
+            z-index: 0;
+        }
+
+        .horizontal-steps::after {
+            content: '';
+            position: absolute;
+            top: 20px;
+            left: 5%;
+            width: calc((100% - 10%) * var(--progress-pct, 0));
+            height: 3px;
+            background: #3b82f6;
+            /* Blue for all progress */
+            z-index: 0;
+            transition: width 0.5s ease;
+        }
+
+        .step-item {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+            flex: 1;
+        }
+
+        .step-circle {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: #fff;
+            border: 2px solid #e5e7eb;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            color: #9ca3af;
+        }
+
+        .step-item.completed .step-circle {
+            background: #3b82f6;
+            border-color: #3b82f6;
+            color: #fff;
+        }
+
+        .step-item.active .step-circle {
+            background: #3b82f6;
+            border-color: #3b82f6;
+            color: #fff;
+        }
+
+        .step-label {
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: #9ca3af;
+            text-align: center;
+        }
+
+        .step-item.completed .step-label {
+            color: #3b82f6;
+        }
+
+        .step-item.active .step-label {
+            color: #3b82f6;
+        }
+
+        /* Delivered Node Special Color (Green) */
+        .step-item.is-delivered.completed .step-circle,
+        .step-item.is-delivered.active .step-circle {
+            background: #10b981;
+            border-color: #10b981;
+            color: #fff;
+        }
+
+        .step-item.is-delivered.completed .step-label,
+        .step-item.is-delivered.active .step-label {
+            color: #10b981;
+        }
+
+        /* Cancelled & Undelivered Special Color (Red) */
+        .step-item.is-cancelled.completed .step-circle,
+        .step-item.is-cancelled.active .step-circle,
+        .step-item.is-undelivered.completed .step-circle,
+        .step-item.is-undelivered.active .step-circle {
+            background: #ef4444;
+            border-color: #ef4444;
+            color: #fff;
+        }
+
+        .step-item.is-cancelled.completed .step-label,
+        .step-item.is-cancelled.active .step-label,
+        .step-item.is-undelivered.completed .step-label,
+        .step-item.is-undelivered.active .step-label {
+            color: #ef4444;
+        }
+
+        /* Vertical History */
+        .history-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .history-item {
+            background: #fff;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 16px 20px;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            border-left: 4px solid var(--border-color);
+        }
+
+        .history-item:first-child {
+            border-left-color: var(--brand-primary);
+        }
+
+        .history-item:first-child .h-date strong {
+            color: #1f2937;
+        }
+
+        .history-item:first-child .h-time {
+            color: var(--brand-primary);
+        }
+
+        .history-item:first-child .h-status strong {
+            color: #1f2937;
+        }
+
+        .h-date {
+            min-width: 90px;
+        }
+
+        .h-date strong {
+            display: block;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+        }
+
+        .h-time {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+
+        .h-status {
+            flex: 1;
+        }
+
+        .h-status strong {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.95rem;
+            color: var(--text-muted);
+            margin-bottom: 4px;
+        }
+
+        .history-item:first-child .h-status strong i {
+            color: #10b981;
+        }
+
+        .h-status strong i {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+
+        .h-remarks {
+            font-size: 0.85rem;
+            color: var(--text-main);
+            margin-top: 4px;
+            margin-bottom: 4px;
+        }
+
+        .h-location {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .h-location i {
+            color: var(--brand-primary);
+        }
+
+        /* Support Cards */
+        .support-cards {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 20px;
+            margin-top: 24px;
+            margin-bottom: 40px;
+        }
+
+        .sup-card {
+            background: #fff;
+            border-radius: 12px;
+            padding: 24px;
+            text-align: center;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.03);
+            border: 1px solid var(--border-color);
+        }
+
+        .sup-icon {
+            width: 50px;
+            height: 50px;
+            background: #f0f5ff;
+            color: var(--brand-primary);
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2rem;
+            margin-bottom: 16px;
+        }
+
+        .sup-card h3 {
+            font-size: 1.05rem;
+            color: var(--text-main);
+            margin-bottom: 8px;
+        }
+
+        .sup-card p {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        /* Footer */
+        .site-footer {
+            background: #0f172a;
+            color: #94a3b8;
+            padding: 50px 20px 20px;
+            margin-top: auto;
+        }
+
+        .footer-grid {
+            max-width: 1000px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: 2fr 1fr 1.5fr;
+            gap: 40px;
+            margin-bottom: 40px;
+        }
+
+        .f-col h4 {
+            color: #fff;
+            font-size: 1.1rem;
+            margin-bottom: 20px;
+        }
+
+        .f-col p {
+            font-size: 0.9rem;
+            line-height: 1.6;
+            margin-bottom: 20px;
+        }
+
+        .social-links {
+            display: flex;
+            gap: 12px;
+        }
+
+        .social-links a {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-decoration: none;
+            transition: 0.3s;
+        }
+
+        .social-links a:hover {
+            background: var(--brand-primary);
+        }
+
+        .f-links {
+            list-style: none;
+        }
+
+        .f-links li {
+            margin-bottom: 12px;
+        }
+
+        .f-links a {
+            color: #94a3b8;
+            text-decoration: none;
+            font-size: 0.9rem;
+            transition: 0.2s;
+        }
+
+        .f-links a:hover {
+            color: #fff;
+        }
+
+        .f-contact {
+            list-style: none;
+        }
+
+        .f-contact li {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 16px;
+            font-size: 0.9rem;
+            line-height: 1.5;
+        }
+
+        .f-contact i {
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+
+        .footer-bottom {
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            text-align: center;
+            padding-top: 20px;
+            font-size: 0.85rem;
+        }
+
+        .footer-bottom strong {
+            color: #fff;
+        }
+
+        @media (max-width: 768px) {
+
+            html,
+            body {
+                overflow-x: hidden !important;
+                width: 100% !important;
+                max-width: 100% !important;
+                min-width: 0 !important;
+            }
+
+            .payment-advisory,
+            .purple-header,
+            .container,
+            .tracking-card,
+            .tc-left,
+            .tc-right,
+            .timeline-card,
+            .steps-scroll-wrapper,
+            .history-list,
+            .history-item,
+            .support-cards,
+            .sup-card,
+            footer.site-footer,
+            .footer-grid,
+            .f-col {
+                min-width: 0 !important;
+                max-width: 100% !important;
+            }
+
+            .purple-header {
+                padding: 40px 15px 80px;
+                margin-top: 0;
+            }
+
+            .purple-header h1 {
+                font-size: 1.75rem;
+            }
+
+            .with-purple-header {
+                margin-top: -45px;
+            }
+
+            .tc-left {
+                padding: 20px 15px;
+                border-right: none;
+                border-bottom: 1px dashed var(--border-color);
+            }
+
+            .tc-right {
+                padding: 20px 15px;
+                min-width: 100%;
+                width: 100%;
+            }
+
+            .timeline-card {
+                padding: 20px 15px;
+            }
+
+            .timeline-head {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 12px;
+                margin-bottom: 20px;
+            }
+
+            .steps-scroll-wrapper {
+                margin: 0 -15px 20px -15px;
+                padding: 0 15px 10px 15px;
+            }
+
+            .horizontal-steps {
+                min-width: 550px;
+                margin-bottom: 10px;
+            }
+
+            .horizontal-steps::before {
+                left: 20px;
+                right: 20px;
+                min-width: auto;
+            }
+
+            .horizontal-steps::after {
+                left: 20px;
+                width: calc((100% - 40px) * var(--progress-pct, 0));
+                min-width: auto;
+            }
+
+            .step-item {
+                min-width: 85px;
+            }
+
+            .history-item {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 10px;
+                padding: 14px 16px;
+                word-break: break-word;
+            }
+
+            .h-date {
+                min-width: 100%;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                border-bottom: 1px solid #f1f5f9;
+                padding-bottom: 6px;
+            }
+
+            .support-cards {
+                grid-template-columns: 1fr;
+            }
+
+            .footer-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .dates-row {
+                flex-direction: column;
+            }
+        }
+    </style></head><body><div class="payment-advisory"><div class="marquee-track"><div class="marquee-item"><svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 512 512" height="18"
+                        width="18" xmlns="http://www.w3.org/2000/svg"
+                        style="color: rgb(245, 128, 62); flex-shrink: 0; margin-right: 8px;"><path
+                            d="M466.5 83.7l-192-80a48.15 48.15 0 0 0-36.9 0l-192 80C27.7 91.1 16 108.6 16 128c0 198.5 114.5 335.7 221.5 380.3 11.8 4.9 25.1 4.9 36.9 0C360.1 472.6 496 349.3 496 128c0-19.4-11.7-36.9-29.5-44.3zM256.1 446.3l-.1-381 175.9 73.3c-3.3 151.4-82.1 261.1-175.8 307.7z"></path></svg><strong>Payment Safety Advisory :</strong>&nbsp;Do not respond to payment requests from unverified
+                    sources.
+                    <strong>&nbsp;Never share your payment details.</strong>&nbsp;Block and report any suspicious messages
+                    immediately.
+                </div><div class="marquee-item"><svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 512 512" height="18"
+                        width="18" xmlns="http://www.w3.org/2000/svg"
+                        style="color: rgb(245, 128, 62); flex-shrink: 0; margin-right: 8px;"><path
+                            d="M466.5 83.7l-192-80a48.15 48.15 0 0 0-36.9 0l-192 80C27.7 91.1 16 108.6 16 128c0 198.5 114.5 335.7 221.5 380.3 11.8 4.9 25.1 4.9 36.9 0C360.1 472.6 496 349.3 496 128c0-19.4-11.7-36.9-29.5-44.3zM256.1 446.3l-.1-381 175.9 73.3c-3.3 151.4-82.1 261.1-175.8 307.7z"></path></svg><strong>Payment Safety Advisory :</strong>&nbsp;Do not respond to payment requests from unverified
+                    sources.
+                    <strong>&nbsp;Never share your payment details.</strong>&nbsp;Block and report any suspicious messages
+                    immediately.
+                </div></div></div><div class="purple-header"><h1>Track Your Order</h1><p>Follow your package's journey in real-time with our advanced tracking system</p><div class="header-curve"><svg viewBox="0 0 1440 120" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M0 120L1440 120V0C1440 0 1140 120 720 120C300 120 0 0 0 0V120Z" fill="#f8fafc" /></svg></div></div><div class="container with-purple-header"><div class="tracking-card"><div class="tc-left"><div class="status-badge in_transit"><i class="fas fa-truck"></i>
+                        In Transit
+                    </div><div class="dates-row"><div class="date-box"><span>Expected Delivery</span><strong>Aug 29, 2026</strong><small>Saturday</small></div><div class="date-box"><span>ORDER DATE</span><strong>Aug 26, 2026</strong><small>07:50</small></div></div><ul class="info-list"><li><span class="info-label"><i class="fas fa-box"></i> Order ID</span><span class="info-value"
+                                style="color:var(--brand-primary);font-weight:600;">tavas4622</span></li><li><span class="info-label"><i class="fas fa-barcode"></i> Tracking ID</span><span class="info-value">41332234103855</span></li><li><span class="info-label"><i class="fas fa-truck"></i> Courier</span><span class="info-value">Delhivery</span></li><li><span class="info-label"><i class="far fa-credit-card"></i> Payment Mode</span><span class="info-value">COD</span></li><li><span class="info-label"><i class="far fa-credit-card"></i> Oder Type</span><span class="info-value">FORWARD</span></li></ul></div><div class="tc-right"><div class="courier-circle"><img src="https://ad2ship.com/assets/images/partners/delhivery.png" alt="Courier"></div><div class="courier-name">Delhivery</div><div class="courier-awb" id="tracking-id-text">41332234103855</div><div class="address-card"><strong>Delivery Address</strong><p><i class="fas fa-map-marker-alt"></i><span>
+                                Mumbai, Maharashtra
+                                - 400053
+                            </span></p></div></div></div><div class="timeline-card"><div class="timeline-head"><h2>Shipment Progress</h2><div class="live-tracking-badge"><i class="fas fa-circle"></i> Live Tracking
+                        </div></div><div class="steps-scroll-wrapper"><div class="horizontal-steps" style="--progress-pct: 0.5"><div
+                                    class="step-item completed   "><div class="step-circle"><i class="fas fa-check"></i></div><div class="step-label">Pickup Scheduled</div></div><div
+                                    class="step-item completed   "><div class="step-circle"><i class="fas fa-check"></i></div><div class="step-label">Picked Up</div></div><div
+                                    class="step-item active   "><div class="step-circle"><i class="fas fa-truck"></i></div><div class="step-label">In Transit</div></div><div
+                                    class="step-item    "><div class="step-circle">
+                                                                                    4
+                                                                            </div><div class="step-label">Out for Delivery</div></div><div
+                                    class="step-item  is-delivered  "><div class="step-circle">
+                                                                                    5
+                                                                            </div><div class="step-label">Delivered</div></div></div></div><div class="history-list"><div class="history-item"><div class="h-date"><strong>Aug 29, 2026</strong><span class="h-time">12:46</span></div><div class="h-status"><strong><i class="far fa-dot-circle"></i> BAG RECEIVED AT FACILITY</strong><div class="h-remarks">In Transit</div><div class="h-location"><i class="fas fa-map-marker-alt"></i> Mumbai_AzadNagar_D (Maharashtra)
+                                    </div></div></div><div class="history-item"><div class="h-date"><strong>Aug 29, 2026</strong><span class="h-time">12:21</span></div><div class="h-status"><strong><i class="far fa-dot-circle"></i> TRIP ARRIVED</strong><div class="h-remarks">In Transit</div><div class="h-location"><i class="fas fa-map-marker-alt"></i> Mumbai_AzadNagar_D (Maharashtra)
+                                    </div></div></div><div class="history-item"><div class="h-date"><strong>Aug 29, 2026</strong><span class="h-time">11:51</span></div><div class="h-status"><strong><i class="far fa-dot-circle"></i> VEHICLE DEPARTED</strong><div class="h-remarks">In Transit</div><div class="h-location"><i class="fas fa-map-marker-alt"></i> Mumbai_GoregaonTemp_I (Maharashtra)
+                                    </div></div></div><div class="history-item"><div class="h-date"><strong>Aug 29, 2026</strong><span class="h-time">11:36</span></div><div class="h-status"><strong><i class="far fa-dot-circle"></i> BAG ADDED TO TRIP</strong><div class="h-remarks">In Transit</div><div class="h-location"><i class="fas fa-map-marker-alt"></i> Mumbai_GoregaonTemp_I (Maharashtra)
+                                    </div></div></div><div class="history-item"><div class="h-date"><strong>Aug 29, 2026</strong><span class="h-time">10:13</span></div><div class="h-status"><strong><i class="far fa-dot-circle"></i> ADDED TO BAG</strong><div class="h-remarks">In Transit</div><div class="h-location"><i class="fas fa-map-marker-alt"></i> Mumbai_GoregaonTemp_I (Maharashtra)
+                                    </div></div></div><div class="history-item"><div class="h-date"><strong>Aug 29, 2026</strong><span class="h-time">09:58</span></div><div class="h-status"><strong><i class="far fa-dot-circle"></i> SHIPMENT RECEIVED AT FACILITY</strong><div class="h-remarks">In Transit</div><div class="h-location"><i class="fas fa-map-marker-alt"></i> Mumbai_GoregaonTemp_I (Maharashtra)
+                                    </div></div></div><div class="history-item"><div class="h-date"><strong>Aug 29, 2026</strong><span class="h-time">09:29</span></div><div class="h-status"><strong><i class="far fa-dot-circle"></i> BAG RECEIVED AT FACILITY</strong><div class="h-remarks">In Transit</div><div class="h-location"><i class="fas fa-map-marker-alt"></i> Mumbai_GoregaonTemp_I (Maharashtra)
+                                    </div></div></div><div class="history-item"><div class="h-date"><strong>Aug 29, 2026</strong><span class="h-time">09:13</span></div><div class="h-status"><strong><i class="far fa-dot-circle"></i> TRIP ARRIVED</strong><div class="h-remarks">In Transit</div><div class="h-location"><i class="fas fa-map-marker-alt"></i> Mumbai_GoregaonTemp_I (Maharashtra)
+                                    </div></div></div><div class="history-item"><div class="h-date"><strong>Aug 29, 2026</strong><span class="h-time">06:51</span></div><div class="h-status"><strong><i class="far fa-dot-circle"></i> VEHICLE DEPARTED</strong><div class="h-remarks">In Transit</div><div class="h-location"><i class="fas fa-map-marker-alt"></i> Bhiwandi_Lonad_GW (Maharashtra)
+                                    </div></div></div><div class="history-item"><div class="h-date"><strong>Aug 29, 2026</strong><span class="h-time">05:47</span></div><div class="h-status"><strong><i class="far fa-dot-circle"></i> BAG ADDED TO TRIP</strong><div class="h-remarks">In Transit</div><div class="h-location"><i class="fas fa-map-marker-alt"></i> Bhiwandi_Lonad_GW (Maharashtra)
+                                    </div></div></div><div class="history-item"><div class="h-date"><strong>Aug 29, 2026</strong><span class="h-time">00:53</span></div><div class="h-status"><strong><i class="far fa-dot-circle"></i> BAG RECEIVED AT FACILITY</strong><div class="h-remarks">In Transit</div><div class="h-location"><i class="fas fa-map-marker-alt"></i> Bhiwandi_Lonad_GW (Maharashtra)
+                                    </div></div></div><div class="history-item"><div class="h-date"><strong>Aug 28, 2026</strong><span class="h-time">16:06</span></div><div class="h-status"><strong><i class="far fa-dot-circle"></i> TRIP ARRIVED</strong><div class="h-remarks">In Transit</div><div class="h-location"><i class="fas fa-map-marker-alt"></i> Bhiwandi_Lonad_GW (Maharashtra)
+                                    </div></div></div><div class="history-item"><div class="h-date"><strong>Aug 28, 2026</strong><span class="h-time">06:10</span></div><div class="h-status"><strong><i class="far fa-dot-circle"></i> VEHICLE DEPARTED</strong><div class="h-remarks">In Transit</div><div class="h-location"><i class="fas fa-map-marker-alt"></i> Surat_Kacholi_GW (Gujarat)
+                                    </div></div></div><div class="history-item"><div class="h-date"><strong>Aug 27, 2026</strong><span class="h-time">15:23</span></div><div class="h-status"><strong><i class="far fa-dot-circle"></i> BAG ADDED TO TRIP</strong><div class="h-remarks">In Transit</div><div class="h-location"><i class="fas fa-map-marker-alt"></i> Surat_Kacholi_GW (Gujarat)
+                                    </div></div></div><div class="history-item"><div class="h-date"><strong>Aug 26, 2026</strong><span class="h-time">21:43</span></div><div class="h-status"><strong><i class="far fa-dot-circle"></i> ADDED TO BAG</strong><div class="h-remarks">In Transit</div><div class="h-location"><i class="fas fa-map-marker-alt"></i> Surat_Kacholi_GW (Gujarat)
+                                    </div></div></div><div class="history-item"><div class="h-date"><strong>Aug 26, 2026</strong><span class="h-time">21:24</span></div><div class="h-status"><strong><i class="far fa-dot-circle"></i> WEIGHT CAPTURED</strong><div class="h-remarks">In Transit</div><div class="h-location"><i class="fas fa-map-marker-alt"></i> Surat_Kacholi_GW (Gujarat)
+                                    </div></div></div><div class="history-item"><div class="h-date"><strong>Aug 26, 2026</strong><span class="h-time">15:45</span></div><div class="h-status"><strong><i class="far fa-dot-circle"></i> SHIPMENT PICKED UP</strong><div class="h-remarks">Picked Up</div><div class="h-location"><i class="fas fa-map-marker-alt"></i> Surat_Laldarwaja1_C (Gujarat)
+                                    </div></div></div><div class="history-item"><div class="h-date"><strong>Aug 26, 2026</strong><span class="h-time">11:46</span></div><div class="h-status"><strong><i class="far fa-dot-circle"></i> OUT FOR PICKUP</strong><div class="h-remarks">Pickup Scheduled</div><div class="h-location"><i class="fas fa-map-marker-alt"></i> Surat_Laldarwaja1_C (Gujarat)
+                                    </div></div></div><div class="history-item"><div class="h-date"><strong>Aug 26, 2026</strong><span class="h-time">07:50</span></div><div class="h-status"><strong><i class="far fa-dot-circle"></i> PINCODE UPDATED BY ADDFIX</strong><div class="h-remarks">Pickup Scheduled</div><div class="h-location"><i class="fas fa-map-marker-alt"></i> Surat_Laldarwaja1_C (Gujarat)
+                                    </div></div></div><div class="history-item"><div class="h-date"><strong>Aug 26, 2026</strong><span class="h-time">07:50</span></div><div class="h-status"><strong><i class="far fa-dot-circle"></i> PICKUP SCHEDULED</strong><div class="h-remarks">Pickup Scheduled</div><div class="h-location"><i class="fas fa-map-marker-alt"></i> Surat_Laldarwaja1_C (Gujarat)
+                                    </div></div></div><div class="history-item"><div class="h-date"><strong>Aug 26, 2026</strong><span class="h-time">07:50</span></div><div class="h-status"><strong><i class="far fa-dot-circle"></i> MANIFEST UPLOADED</strong><div class="h-remarks">Pickup Scheduled</div><div class="h-location"><i class="fas fa-map-marker-alt"></i> Surat_Laldarwaja1_C (Gujarat)
+                                    </div></div></div></div></div><div class="support-cards"><div class="sup-card"><div class="sup-icon"><i class="fas fa-headset"></i></div><h3>24/7 Support</h3><p>Need help? Our team is always here for you</p></div><div class="sup-card"><div class="sup-icon"><i class="fas fa-bell"></i></div><h3>Get Updates</h3><p>Subscribe to SMS & Email notifications</p></div><div class="sup-card"><div class="sup-icon"><i class="fas fa-shield-alt"></i></div><h3>Secure Delivery</h3><p>Your package is insured and protected</p></div></div></div><script>
+            function copyTrackingId() {
+                const trackingId = document.getElementById('tracking-id-text').innerText;
+                navigator.clipboard.writeText(trackingId).then(() => {
+                    alert("Tracking ID Copied: " + trackingId);
+                });
+            }
+            function shareTracking() {
+                if (navigator.share) {
+                    navigator.share({
+                        title: 'Track My Order',
+                        text: 'Check out my order tracking details!',
+                        url: window.location.href
+                    });
+                } else {
+                    copyTrackingId();
+                }
+            }
+        </script></body></html>

@@ -284,29 +284,29 @@ copied to this new read on first pass). Feature is now fully deployed and unbloc
        `order_delivered` deferral. No customer fulfillment messages go out at all until the migration
        runs. The signed webhook still 200-acks (no 500, no torn-down subscription), and there is no
        data loss, but the feature is fully inert and normal shipped notifications are suppressed.
-  2. **⚠ Vercel Cron NOT usable — account is Hobby (daily-only crons).** A `"crons"` entry with
-     `*/15 * * * *` was tried in `backend/vercel.json` and the deploy **failed** with
-     `Hobby accounts are limited to daily cron jobs`; the entry was reverted so the branch deploys.
-     `delivery_confirm` must be triggered by the **same external scheduler the repo already uses for
-     its sub-daily jobs — cron-job.org** (see `docs/architecture-decisions.md`; `outbox_drain` is
-     driven the same way). **OWNER ACTION, not yet done:** in the cron-job.org account, add a job:
-     - URL: `https://thetavas-bot.vercel.app/internal/jobs/delivery_confirm`
-     - Method: `POST`, header `X-Cron-Secret: <CRON_SECRET>` (value from Vercel → Settings → Env Vars)
-       — OR Method `GET`, header `Authorization: Bearer <CRON_SECRET>`.
-     - Schedule: every 15 min (`*/15`). Any cadence up to hourly is fine — it only widens the
-       delivery-confirm tail (2h at `*/15`, up to ~3h hourly).
-     Alternative if you'd rather not depend on cron-job.org: upgrade Vercel to Pro and re-add the
-     `"crons"` entry to `backend/vercel.json` (one-line change), or add a GitHub Actions scheduled
-     workflow that curls the endpoint. Until SOMETHING pings it, `pending_delivery_confirmations`
-     rows accumulate and no `order_delivered` is sent (the webpage-deferral has no consumer).
-     Manual test any time: `curl -H "X-Cron-Secret: $CRON_SECRET" -X POST https://thetavas-bot.vercel.app/internal/jobs/delivery_confirm`.
+  2. **✅ Scheduler set up 2026-08-31 — Supabase `pg_cron`, NOT Vercel Cron.** Vercel account is
+     Hobby (daily-only crons): a `"crons"` entry with `*/15 * * * *` was tried in `backend/vercel.json`
+     and the deploy failed with `Hobby accounts are limited to daily cron jobs`; that entry was
+     reverted (commit `10a8e66`). Instead, the sweep is triggered from inside the Supabase database:
+     - `pg_cron` + `pg_net` extensions enabled on project `vuqxcysnqhytmpfpcbet`.
+     - `CRON_SECRET` stored in Supabase Vault as `delivery_confirm_cron_secret`.
+     - `cron.job` `delivery-confirm-sweep` (jobid 1), `*/15 * * * *`, `active`, runs as `postgres`:
+       `net.http_post` → `POST https://thetavas-bot.vercel.app/internal/jobs/delivery_confirm` with
+       `X-Cron-Secret` from the Vault secret.
+     Verified: a manual `net.http_post` returned `status_code 200`,
+     `{"job":"delivery_confirm","result":{"swept":0,...}}` in `net._http_response`. No third-party
+     scheduler (cron-job.org not used), no Vercel plan change. To inspect:
+     `select * from cron.job_run_details where jobid=1 order by start_time desc limit 5;` and
+     `select status_code, content, created from net._http_response order by created desc limit 5;`.
+     To change cadence: `select cron.schedule('delivery-confirm-sweep', '<expr>', <same command>);`.
+     Manual test any time: `curl.exe -H "X-Cron-Secret: <CRON_SECRET>" -X POST https://thetavas-bot.vercel.app/internal/jobs/delivery_confirm`.
 
-  **Code is live once `main` deploys; scheduling is the only open item.** The migration is applied
-  (columns exist, mirror reads succeed) and the feature code is on `main`. The deferring webhook and
-  the manually-callable `delivery_confirm` endpoint work as soon as Vercel serves the new build; the
-  automatic ~2h send only happens once the external scheduler is pointed at the endpoint (owner
-  action above). See the "RTO-aware delivery status — ALL 8 TASKS COMPLETE" row above for the full
-  feature summary.
+  **Feature is fully live.** Migration applied, code deployed (`vercel --prod`, 2026-08-31,
+  `thetavas-bot.vercel.app`), and the Supabase pg_cron sweep runs every 15 min. `delivered`
+  webhooks park a `pending_delivery_confirmations` row; the sweep confirms against ad2ship ~2h
+  later and sends `order_delivered` only for a genuine customer delivery — an RTO gets a silent
+  `shipment_status='rto'` and nothing sent. See the "RTO-aware delivery status — ALL 8 TASKS
+  COMPLETE" row above for the full feature summary.
 
 - ~~[CHECKPOINT] Inbound image product lookup — `inbound_images` table — schema migration.~~
   **RESOLVED (2026-08-24): owner confirmed running the migration directly against production

@@ -116,7 +116,7 @@
 - **Caller:** backend/app/shopify/ad2ship.py (`fetch_tracking`)
 - **Endpoint:** `GET https://ad2ship.com/track-order/{awb}` — public, unauthenticated HTML page (NO API key/token). Header `User-Agent: Mozilla/5.0`, `follow_redirects=False`, `timeout=4.0`s default.
 - **Response:** HTML page parsed with stdlib `re` → `Ad2shipTracking | None`. `None` on httpx error, non-200, a page with no `status-badge` node, or any parse failure — `fetch_tracking` never raises.
-- **Notes:** no credentials of any kind; failure log carries only `type=%s` (exception class name) — never the awb, URL, or `str(exc)`. Consumed by the later delivery sweep job + order-tracking agent (Tasks 2+) to distinguish a genuine customer delivery from an RTO. See component_registry "ad2ship tracking-page parser".
+- **Notes:** no credentials of any kind; failure log carries only `type=%s` (exception class name) — never the awb, URL, or `str(exc)`. Consumed by the `delivery_confirm` sweep job (Task 6) and, since Task 7 (2026-08-31), the order-tracking agent — `order_tracking._live_tracking_for` calls `fetch_tracking` to enrich a "where is my order" answer with live status/location/expected-date, cache-gated to ≤1 call per fulfillment per 30 min and skipped entirely for terminal shipment states. See component_registry "ad2ship tracking-page parser" + the `order_tracking.py` agent entry.
 
 ## [external] Shopify webhook subscription management — REMOVED (2026-08-15)
 - **Status:** the app-managed self-heal that CREATED/UPDATED Shopify webhook subscriptions

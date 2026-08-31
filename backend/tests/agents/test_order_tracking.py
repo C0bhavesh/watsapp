@@ -1,10 +1,16 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
+import httpx
+import pytest
+
+import app.agents.order_tracking as ot_module
 from app.agents.base import DEFAULT_REVEAL_FIELDS, AgentContext
 from app.agents.order_tracking import _format_money, run
 from app.core.conversation import _recover_order_by_name
 from app.providers.base import CompletionResult, Message, ProviderError, ProviderErrorKind
+from app.shopify.ad2ship import Ad2shipTracking
 from app.shopify.models import AuthorizedOrder, Customer, Fulfillment, LineItem, Money, Order
+from app.store.memory import InMemoryIngestStore
 
 
 def _order(
@@ -569,3 +575,187 @@ async def test_order_line_omits_estimated_delivery_when_status_not_revealed() ->
     )
     prompt = _system_prompt(provider)
     assert "Estimated delivery:" not in prompt
+
+
+# --- Task 7: live ad2ship tracking enrichment ---------------------------------------------
+
+_IN_TRANSIT = Ad2shipTracking(
+    status="in_transit",
+    status_label="In Transit",
+    current_city="Maharashtra",
+    current_hub="Mumbai_Hub",
+    last_scan="In Transit",
+    last_scan_remark="Shipment in transit",
+    last_scan_at="2026-08-31 10:00",
+    expected_date="2026-09-02",
+)
+
+
+class _StubFetch:
+    """Records call count and returns a canned result, standing in for fetch_tracking."""
+
+    def __init__(self, result: Ad2shipTracking | None) -> None:
+        self._result = result
+        self.calls = 0
+
+    async def __call__(
+        self, http: httpx.AsyncClient, awb: str, *, timeout: float = 4.0
+    ) -> Ad2shipTracking | None:
+        self.calls += 1
+        return self._result
+
+
+def _dead_client() -> httpx.AsyncClient:
+    # A real HTTP hit would 500 -- proving the live path only ever goes through the monkeypatched
+    # fetch_tracking, never the transport directly.
+    return httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(500)))
+
+
+async def _run_with_live(
+    provider: _CapturingProvider,
+    user_text: str,
+    orders: list[AuthorizedOrder],
+    stub: _StubFetch,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    reveal_fields: tuple[str, ...] = DEFAULT_REVEAL_FIELDS,
+    ingest: InMemoryIngestStore | None = None,
+) -> InMemoryIngestStore:
+    monkeypatch.setattr(ot_module, "fetch_tracking", stub)
+    store = ingest if ingest is not None else InMemoryIngestStore()
+    async with _dead_client() as http:
+        await run(_context(provider, user_text, orders, reveal_fields), http, store)
+    return store
+
+
+async def test_live_tracking_fetched_and_rendered_for_in_flight_fulfillment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _CapturingProvider(text='{"reply": "On its way."}')
+    order = _order(
+        "tavas1", "+919999999999", fulfillment_status="FULFILLED", fulfillments=(_TRACKED,)
+    )
+    ingest = InMemoryIngestStore()
+    await ingest.upsert_order_mirror(order)
+    await ingest.upsert_fulfillment(order.gid, _TRACKED)
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+    stub = _StubFetch(_IN_TRANSIT)
+
+    store = await _run_with_live(
+        provider, "where is my order", [authorized], stub, monkeypatch, ingest=ingest
+    )
+
+    prompt = _system_prompt(provider)
+    assert "Current status: In Transit" in prompt
+    assert "Currently at: Mumbai_Hub" in prompt
+    assert stub.calls == 1
+    # The fetched snapshot was persisted onto the mirror fulfillment.
+    stored = store.fulfillments[order.gid][_TRACKED.gid]
+    assert stored.shipment_status == "in_transit"
+    assert stored.tracking_city == "Maharashtra"
+
+
+async def test_live_tracking_uses_fresh_cache_without_http_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fresh = Fulfillment(
+        gid="gid://f/1", status="SUCCESS", tracking_company="Delhivery",
+        tracking_number="AWB0099887766", tracking_url="https://track/AWB0099887766",
+        shipment_status="in_transit",
+        tracking_checked_at=(datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
+        tracking_city="Pune", tracking_hub="Pune_Hub",
+        tracking_last_scan="Reached hub", tracking_expected_date="2026-09-01",
+    )
+    provider = _CapturingProvider(text='{"reply": "On its way."}')
+    order = _order(
+        "tavas1", "+919999999999", fulfillment_status="FULFILLED", fulfillments=(fresh,)
+    )
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+    stub = _StubFetch(_IN_TRANSIT)
+
+    await _run_with_live(provider, "where is my order", [authorized], stub, monkeypatch)
+
+    prompt = _system_prompt(provider)
+    assert stub.calls == 0  # fresh cache -> no live courier call
+    assert "Current status: In Transit" in prompt
+    assert "Currently at: Pune_Hub" in prompt
+    assert "Expected delivery: 2026-09-01" in prompt
+
+
+async def test_live_tracking_none_result_leaves_static_line_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _CapturingProvider(text='{"reply": "Here is your tracking."}')
+    order = _order(
+        "tavas1", "+919999999999", fulfillment_status="FULFILLED", fulfillments=(_TRACKED,)
+    )
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+    stub = _StubFetch(None)
+
+    await _run_with_live(provider, "where is my order", [authorized], stub, monkeypatch)
+
+    prompt = _system_prompt(provider)
+    assert "Current status:" not in prompt
+    # The existing static Shopify tracking line is untouched.
+    assert "AWB0099887766" in prompt
+    assert "https://track/AWB0099887766" in prompt
+
+
+async def test_live_tracking_skipped_when_tracking_not_revealed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _CapturingProvider(text='{"reply": "Let me check."}')
+    order = _order(
+        "tavas1", "+919999999999", fulfillment_status="FULFILLED", fulfillments=(_TRACKED,)
+    )
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+    stub = _StubFetch(_IN_TRANSIT)
+
+    await _run_with_live(
+        provider, "where is my order", [authorized], stub, monkeypatch,
+        reveal_fields=("order_number", "status"),
+    )
+
+    prompt = _system_prompt(provider)
+    assert stub.calls == 0
+    assert "Current status:" not in prompt
+
+
+async def test_live_tracking_skipped_for_terminal_shipment_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rto = Fulfillment(
+        gid="gid://f/1", status="SUCCESS", tracking_company="Delhivery",
+        tracking_number="AWB0099887766", tracking_url="https://track/AWB0099887766",
+        shipment_status="rto",
+        tracking_city="Surat", tracking_hub="Surat_Hub",
+        tracking_last_scan="Returned to origin",
+    )
+    provider = _CapturingProvider(text='{"reply": "Let me check."}')
+    order = _order(
+        "tavas1", "+919999999999", fulfillment_status="FULFILLED", fulfillments=(rto,)
+    )
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+    stub = _StubFetch(_IN_TRANSIT)
+
+    await _run_with_live(provider, "where is my order", [authorized], stub, monkeypatch)
+
+    prompt = _system_prompt(provider)
+    assert stub.calls == 0  # terminal -> answered from stored state, no live call
+    assert "Currently at: Surat_Hub" in prompt
+    assert "AWB0099887766" in prompt
+
+
+async def test_no_live_lines_when_http_and_ingest_absent() -> None:
+    # Calling run(context) exactly like the 29 existing call sites: no live enrichment at all.
+    provider = _CapturingProvider(text='{"reply": "Here is your tracking."}')
+    order = _order(
+        "tavas1", "+919999999999", fulfillment_status="FULFILLED", fulfillments=(_TRACKED,)
+    )
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+
+    await run(_context(provider, "where is my order", [authorized]))
+
+    prompt = _system_prompt(provider)
+    assert "Current status:" not in prompt
+    assert "AWB0099887766" in prompt  # static line unchanged

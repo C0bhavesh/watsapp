@@ -110,7 +110,7 @@ OWNER_ALERT_TEMPLATE = (
 
 async def _run_agent(context: AgentContext, intent: Intent, c: Container) -> AgentReply:
     if intent == "order_tracking":
-        return await order_tracking.run(context)
+        return await order_tracking.run(context, c.http, c.ingest)
     if intent == "product_search":
         return await product_search.run(context, c.shopify)
     if intent == "policy":

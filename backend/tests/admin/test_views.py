@@ -1914,6 +1914,42 @@ def test_send_template_kill_switch_off_leaves_it_queued_not_failed(
     assert len(fake.calls) == 0  # never reached Meta -- send_mode="off" left the row queued
 
 
+def test_send_template_mirror_read_failure_returns_503_no_send(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The template-resend read GATES a send (incl. cod_confirmation's live Confirm/Cancel buttons).
+    A store-level failure on the mirror read (e.g. UndefinedColumnError pre-migration) must surface
+    as a clean 503 -- distinct from the 404 for a genuinely-absent order -- and never enqueue/send.
+    """
+    from app.admin.controls import AdminControls, save_controls
+    from app.channels.whatsapp_sender import SendResult
+
+    login(client)
+    _seed_whatsapp_config()
+    thread_id = _seed_order_for_thread(
+        order_name="tavas5006", phone="+919876500057", fulfilled=True,
+    )
+    asyncio.run(save_controls(get_container().config, AdminControls(send_mode="live")))
+
+    fake = _FakeTemplateSender(
+        SendResult(ok=True, status_code=200, wamid="wamid.TPL5", error=None)
+    )
+    monkeypatch.setattr("app.jobs.outbox_drain.send_template", fake)
+
+    async def _boom(phone: str, limit: int = 100) -> list[object]:
+        raise RuntimeError("mirror column missing")
+
+    monkeypatch.setattr(get_container().ingest, "find_mirrored_orders_by_phone", _boom)
+
+    resp = client.post(
+        f"/admin/conversations/{thread_id}/templates",
+        json={"order_name": "tavas5006", "template": "order_delivered", "values": {}},
+    )
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "order store unavailable"
+    assert len(fake.calls) == 0  # gated before any enqueue/send
+
+
 def test_send_template_allowlist_miss_reports_success_not_failure(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

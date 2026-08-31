@@ -1382,15 +1382,20 @@ async def send_admin_template(
         raise HTTPException(status_code=400, detail="unknown template")
 
     # Mirror read pulls Task-4's new fulfillment columns; pre-migration asyncpg raises
-    # UndefinedColumnError. Degrade to "no orders" -> the resolve below 404s exactly as it does when
-    # this customer genuinely has no matching order, rather than 500ing the resend.
+    # UndefinedColumnError. Unlike the display-only reads above (sites 1-3, degraded to empty), this
+    # read GATES a send (incl. cod_confirmation's live Confirm/Cancel buttons) -- degrading to `[]`
+    # would 404 "order not found" for a merely-unreadable store and write a misleading audit row.
+    # A read gating a mutation propagates as a clean 503 (distinct from 404 not-found), matching
+    # update_exchange's precedent and error_learnings.md 2026-08-21 ("degrade a READ, propagate a
+    # WRITE"). The store sits behind the IngestStore Protocol -- the failure is caught as Exception.
     try:
         orders = await c.ingest.find_mirrored_orders_by_phone(user_id)
     except Exception as exc:
         logger.warning(
-            "admin mirror lookup degraded (template resend): type=%s", type(exc).__name__
+            "admin mirror lookup failed (template resend): type=%s", type(exc).__name__
         )
-        orders = []
+        _audit("admin_template_resend", "failure", resource=f"thread:{thread_id}")
+        raise HTTPException(status_code=503, detail="order store unavailable") from exc
     order = next((o for o in orders if o.name == body.order_name), None)
     if order is None:
         _audit("admin_template_resend", "failure", resource=f"thread:{thread_id}")

@@ -82,14 +82,24 @@ async def test_timeout_returns_none() -> None:
 
 
 @pytest.mark.asyncio
-async def test_awb_with_space_is_quoted_and_never_raises() -> None:
-    # A free-text AWB with a space would make httpx raise InvalidURL if interpolated raw; quoting it
-    # keeps the "never raises" contract. Against the delivered fixture the quoted request parses
-    # normally rather than raising.
-    html = (FIX / "delivered_tavas4464.html").read_text(encoding="utf-8")
-    async with _client(html) as c:
-        t = await fetch_tracking(c, "AWB 123 45")
-    assert t is not None and t.status == "delivered"
+async def test_structural_awb_chars_are_percent_encoded() -> None:
+    # quote(awb, safe="") must encode the STRUCTURAL chars `/ ? #` so a free-text AWB cannot alter
+    # the URL's path/query shape (httpx never raises InvalidURL either). This fails pre-`quote()`:
+    # a raw `/` would add a path segment and a raw `?` would start a query string.
+    captured: dict[str, httpx.URL] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = request.url
+        return httpx.Response(200, text="")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+        assert await fetch_tracking(c, "AB/CD?x") is None  # empty body -> no badge -> None
+
+    url = captured["url"]
+    raw_path = url.raw_path  # bytes, preserves percent-encoding (url.path is decoded)
+    assert b"%2F" in raw_path  # `/` encoded, not a new path segment
+    assert b"%3F" in raw_path  # `?` encoded, not a query delimiter
+    assert url.query == b""  # no query string leaked out of the awb
 
 
 @pytest.mark.asyncio

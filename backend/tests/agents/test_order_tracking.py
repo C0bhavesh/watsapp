@@ -898,3 +898,99 @@ async def test_live_tracking_skipped_for_unfulfilled_order(
     await _run_with_live(provider, "where is my order", [authorized], stub, monkeypatch)
 
     assert stub.calls == 0
+
+
+async def test_cancelled_order_still_renders_terminal_stored_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The order-level fetch gate must NOT suppress zero-cost stored-state rendering: an RTO'd order
+    # that was later cancelled/refunded still tells the customer "Returned to sender" from stored
+    # columns, with NO courier call. This is the whole point of Phase B.
+    rto = Fulfillment(
+        gid="gid://f/1", status="SUCCESS", tracking_company="Delhivery",
+        tracking_number="AWB0099887766", tracking_url="https://track/AWB0099887766",
+        shipment_status="rto",
+        tracking_city="Surat", tracking_hub="Surat_Hub",
+        tracking_last_scan="Returned to origin",
+    )
+    provider = _CapturingProvider(text='{"reply": "Let me check."}')
+    order = _order(
+        "tavas1", "+919999999999", fulfillment_status="FULFILLED",
+        cancelled_at="2026-08-30T10:00:00Z", fulfillments=(rto,),
+    )
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+    stub = _StubFetch(_IN_TRANSIT)
+
+    await _run_with_live(provider, "where is my order", [authorized], stub, monkeypatch)
+
+    prompt = _system_prompt(provider)
+    assert stub.calls == 0  # terminal stored state -> never a live call
+    # Label map (Minor 4a): the normalized "rto" token renders as a customer-safe phrase.
+    assert "Current status: Returned to sender" in prompt
+    assert "Currently at: Surat_Hub" in prompt
+
+
+async def test_stored_only_render_not_counted_against_fetch_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Five already-delivered (stored-only, zero-cost) fulfillments plus one genuinely in-flight
+    # one: the cap must bound only real fetches, so the one live fulfillment is NOT crowded out.
+    delivered = tuple(
+        Fulfillment(
+            gid=f"gid://d/{i}", status="SUCCESS", tracking_company="Delhivery",
+            tracking_number=f"AWBd{i}", tracking_url=f"https://track/d{i}",
+            shipment_status="delivered", tracking_hub=f"Hub{i}",
+            tracking_last_scan="Delivered",
+        )
+        for i in range(5)
+    )
+    in_flight = Fulfillment(
+        gid="gid://live/1", status="SUCCESS", tracking_company="Delhivery",
+        tracking_number="AWBlive", tracking_url="https://track/live",
+    )
+    provider = _CapturingProvider(text='{"reply": "On its way."}')
+    order = _order(
+        "tavas1", "+919999999999", fulfillment_status="FULFILLED",
+        fulfillments=(*delivered, in_flight),
+    )
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+    stub = _StubFetch(_IN_TRANSIT)
+
+    await _run_with_live(provider, "where is my order", [authorized], stub, monkeypatch)
+
+    prompt = _system_prompt(provider)
+    assert stub.calls == 1  # only the one live fulfillment fetched; delivered ones cost nothing
+    assert "Current status: In Transit" in prompt  # the live one rendered
+
+
+_RTO_DELIVERED = Ad2shipTracking(
+    status="rto_delivered",  # raw ad2ship badge -- is_rto() True (startswith "rto")
+    status_label="RTO Delivered",
+    current_city="Gujarat", current_hub="Surat_Hub",
+    last_scan="RTO Delivered", last_scan_remark="Returned to sender",
+    last_scan_at="2026-08-31 12:00", expected_date=None,
+)
+
+
+async def test_raw_rto_badge_is_normalized_to_rto_on_persist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A raw ad2ship "rto_delivered" badge must be persisted as the normalized terminal token "rto"
+    # (not the raw string) -- otherwise the store's monotonic guard + the agent's own terminal
+    # skip-gate would never fire for it.
+    provider = _CapturingProvider(text='{"reply": "Let me check."}')
+    order = _order(
+        "tavas1", "+919999999999", fulfillment_status="FULFILLED", fulfillments=(_TRACKED,)
+    )
+    ingest = InMemoryIngestStore()
+    await ingest.upsert_order_mirror(order)
+    await ingest.upsert_fulfillment(order.gid, _TRACKED)
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+    stub = _StubFetch(_RTO_DELIVERED)
+
+    store = await _run_with_live(
+        provider, "where is my order", [authorized], stub, monkeypatch, ingest=ingest
+    )
+
+    stored = store.fulfillments[order.gid][_TRACKED.gid]
+    assert stored.shipment_status == "rto"  # normalized, not "rto_delivered"

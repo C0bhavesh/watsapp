@@ -30,22 +30,19 @@ from app.channels.shopify_webhook import (
     TEMPLATE_NAME_DELIVERED,
     _enqueue_and_send_fulfillment_notification,
 )
-from app.core.delivery_outcome import fulfillment_is_genuinely_delivered
+from app.core.delivery_outcome import (
+    fulfillment_is_genuinely_delivered,
+    normalized_shipment_status,
+)
 from app.deps import Container
 from app.shopify.ad2ship import fetch_tracking
-from app.shopify.models import TERMINAL_SHIPMENT_STATES, Order
+from app.shopify.models import Order
 from app.store.base import PendingDeliveryConfirmation
 
 logger = logging.getLogger("app.jobs.delivery_confirm")
 
 _BATCH_LIMIT = 50
 _ABANDON_AFTER = timedelta(days=7)
-# The store's monotonic-guard terminal tokens (shared TERMINAL_SHIPMENT_STATES, parity with
-# IngestStore.set_fulfillment_shipment_status' CASE). Only the two we CONFIRM upstream via
-# is_delivered_to_customer()/is_rto() are ever written as terminal; a non-terminal ad2ship badge
-# that merely happens to equal one of these literally is a data anomaly, not a confirmed fact, and
-# must not be persisted (it would wrongly pin the monotonic guard). See the fallback write below.
-_TERMINAL_SHIPMENT_TOKENS = TERMINAL_SHIPMENT_STATES
 
 
 async def _send(c: Container, row: PendingDeliveryConfirmation, order: Order) -> bool:
@@ -146,15 +143,19 @@ async def run_delivery_confirm(c: Container) -> dict[str, Any]:
                 rto += 1
             else:
                 # ad2ship unreadable (None) or a non-terminal state -> Shopify fallback.
-                if tracking is not None and tracking.status not in _TERMINAL_SHIPMENT_TOKENS:
+                # normalized_shipment_status (shared with the agent) returns the pass-through
+                # non-terminal token here (is_delivered/is_rto already both False above), or None
+                # for a raw badge that literally equals a terminal token without upstream
+                # confirmation -- a data anomaly that must not wrongly pin the monotonic guard.
+                normalized = (
+                    normalized_shipment_status(tracking) if tracking is not None else None
+                )
+                if tracking is not None and normalized is not None:
                     # Persist whatever ad2ship DID give us (real but non-terminal movement) so
                     # Task 7's agent enrichment sees the freshest snapshot even though we're not
-                    # acting. The _TERMINAL_SHIPMENT_TOKENS guard above skips the write for a
-                    # non-terminal badge that literally equals a terminal token (delivered/failure/
-                    # rto) but was NOT confirmed upstream by is_delivered_to_customer()/is_rto() --
-                    # a data anomaly that must not wrongly pin the store's monotonic terminal guard.
+                    # acting.
                     await c.ingest.set_fulfillment_shipment_status(
-                        row.fulfillment_gid, tracking.status,
+                        row.fulfillment_gid, normalized,
                         tracking_city=tracking.current_city, tracking_hub=tracking.current_hub,
                         last_scan=tracking.last_scan_remark or tracking.last_scan,
                         expected_date=tracking.expected_date, checked_at=now,

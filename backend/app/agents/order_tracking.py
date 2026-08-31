@@ -17,6 +17,7 @@ from app.agents.base import (
 )
 from app.channels.copy import copy_for
 from app.core.delivery_estimate import estimate_delivery
+from app.core.delivery_outcome import normalized_shipment_status
 from app.providers.base import Message, ProviderError
 from app.shopify.ad2ship import Ad2shipTracking, fetch_tracking
 from app.shopify.models import (
@@ -205,25 +206,6 @@ def _stored_tracking(f: Fulfillment) -> Ad2shipTracking | None:
     )
 
 
-def _normalized_shipment_status(t: Ad2shipTracking) -> str | None:
-    """Map a live ad2ship snapshot to the store's normalized shipment_status token, or None to skip.
-
-    Mirrors ``jobs/delivery_confirm.py``: only an upstream-CONFIRMED terminal outcome
-    (``is_delivered_to_customer()`` / ``is_rto()``) may be persisted as a terminal token. A raw
-    badge that merely equals a terminal token (e.g. a stray ``"failure"`` / ``"rto"`` /
-    ``"delivered"`` string not backed by the ``is_*`` checks) is a data anomaly that must not pin
-    the store's monotonic guard, so the status write is skipped (None). Genuine non-terminal
-    movement (``in_transit`` / ``out_for_delivery`` / ``attempted_delivery``) passes through.
-    """
-    if t.is_delivered_to_customer():
-        return "delivered"
-    if t.is_rto():
-        return "rto"
-    if t.status in TERMINAL_SHIPMENT_STATES:
-        return None
-    return t.status
-
-
 def _tracking_is_fresh(checked_at_iso: str | None, now: datetime) -> bool:
     """True when a stored ad2ship snapshot is recent enough to reuse without a live call."""
     if checked_at_iso is None:
@@ -264,8 +246,8 @@ async def _live_tracking_for(
         # Persist the NORMALIZED status (delivered/rto/pass-through non-terminal), never the raw
         # ad2ship badge -- an un-normalized "rto_delivered" would never match the store's terminal
         # set, so the monotonic guard + our own terminal skip-gate would never fire for it. None =
-        # an anomalous raw-terminal badge we won't pin (mirrors jobs/delivery_confirm.py).
-        normalized = _normalized_shipment_status(tracking)
+        # an anomalous raw-terminal badge we won't pin. Shared with jobs/delivery_confirm.py.
+        normalized = normalized_shipment_status(tracking)
         if normalized is not None:
             try:
                 await ingest.set_fulfillment_shipment_status(
@@ -393,19 +375,45 @@ def _order_is_enrichable(order: AuthorizedOrder) -> bool:
     return o.fulfillment_status not in (None, "UNFULFILLED")
 
 
-def _enrichable_fulfillments(orders: list[AuthorizedOrder]) -> list[Fulfillment]:
-    """Collect the tracked fulfillments worth a live lookup, gated per-order and hard-capped."""
-    candidates: list[Fulfillment] = []
+def _is_stored_only(f: Fulfillment, now: datetime) -> bool:
+    """True when this fulfillment renders from stored columns alone -- no ``fetch_tracking`` call.
+
+    A terminal ``shipment_status`` (delivered/rto/failure) or a snapshot still inside the
+    freshness window is answered from what we already hold. Rendering it is ZERO cost, so it
+    happens for EVERY order regardless of ``_order_is_enrichable`` -- the whole point of Phase B
+    is that an RTO'd (then perhaps cancelled/refunded) order still tells the customer "Returned to
+    sender" from stored data.
+    """
+    return (
+        f.shipment_status in TERMINAL_SHIPMENT_STATES
+        or _tracking_is_fresh(f.tracking_checked_at, now)
+    )
+
+
+def _select_for_enrichment(
+    orders: list[AuthorizedOrder], now: datetime
+) -> list[Fulfillment]:
+    """Choose the tracked fulfillments to build ``live`` for, per the gate/cap split.
+
+    Zero-cost stored-state renders (``_is_stored_only``) are ALWAYS included, uncapped and
+    ungated. A fulfillment that would actually call ``fetch_tracking`` is included only when its
+    order ``_order_is_enrichable`` (something is genuinely in flight) AND the live-fetch budget
+    (``_MAX_LIVE_FULFILLMENTS``) is not yet spent -- so a customer's many already-delivered orders
+    can never crowd out the one shipment they need live info on, nor fan out unbounded fetches.
+    """
+    selected: list[Fulfillment] = []
+    fetch_budget = _MAX_LIVE_FULFILLMENTS
     for order in orders:
-        if not _order_is_enrichable(order):
-            continue
+        enrichable = _order_is_enrichable(order)
         for f in order.order.fulfillments:
             if not f.has_tracking():
                 continue
-            candidates.append(f)
-            if len(candidates) >= _MAX_LIVE_FULFILLMENTS:
-                return candidates
-    return candidates
+            if _is_stored_only(f, now):
+                selected.append(f)  # free render, never gated or capped
+            elif enrichable and fetch_budget > 0:
+                fetch_budget -= 1  # cap counts only real fetches
+                selected.append(f)
+    return selected
 
 
 async def _enrich_live_tracking(
@@ -414,21 +422,21 @@ async def _enrich_live_tracking(
     orders: list[AuthorizedOrder],
     now: datetime,
 ) -> dict[str, Ad2shipTracking]:
-    """Fetch (or reuse cached) ad2ship snapshots for the gated+capped set of tracked fulfillments.
+    """Build the ``{gid: Ad2shipTracking}`` map for the selected fulfillments, keyed by gid.
 
     Fetches run CONCURRENTLY (``asyncio.gather``, ``return_exceptions=True``) rather than serially,
     so N shipments cost one round-trip's wall-time, not N. Each ``_live_tracking_for`` already
-    degrades to None on error; the ``return_exceptions`` is belt-and-suspenders. Keyed by gid.
+    degrades to None on error; the ``return_exceptions`` is belt-and-suspenders.
     """
-    candidates = _enrichable_fulfillments(orders)
-    if not candidates:
+    selected = _select_for_enrichment(orders, now)
+    if not selected:
         return {}
     results = await asyncio.gather(
-        *(_live_tracking_for(http, ingest, f, now=now) for f in candidates),
+        *(_live_tracking_for(http, ingest, f, now=now) for f in selected),
         return_exceptions=True,
     )
     live: dict[str, Ad2shipTracking] = {}
-    for f, result in zip(candidates, results, strict=True):
+    for f, result in zip(selected, results, strict=True):
         if isinstance(result, Ad2shipTracking):
             live[f.gid] = result
     return live
@@ -445,9 +453,13 @@ async def run(
     On provider error, returns a safe fallback message.
 
     When ``http`` and ``ingest`` are supplied AND the admin approved the ``tracking`` field,
-    each shipped fulfillment is enriched with a live ad2ship snapshot (current location, latest
-    scan, expected date). Without those dependencies -- or with ``tracking`` withheld -- the
-    reply falls back to today's static Shopify tracking line only. Enrichment never raises.
+    shipped fulfillments are enriched with an ad2ship snapshot (current location, latest scan,
+    expected date). A terminal/freshly-cached fulfillment renders from stored columns at zero cost
+    for EVERY order; a fulfillment needing a live ``fetch_tracking`` call is gated to orders with
+    something in flight (``_order_is_enrichable``) and hard-capped at ``_MAX_LIVE_FULFILLMENTS``,
+    with all fetches run concurrently under an ``asyncio.wait_for`` total wall-clock cap
+    (``_ENRICH_TIMEOUT_SECONDS``). On timeout/any error, or without the deps / with ``tracking``
+    withheld, the reply falls back to today's static Shopify tracking line only. Never raises.
     """
     fallback = copy_for("error_fallback", context.language)
     format_hint = (

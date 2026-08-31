@@ -33,19 +33,19 @@ from app.channels.shopify_webhook import (
 from app.core.delivery_outcome import fulfillment_is_genuinely_delivered
 from app.deps import Container
 from app.shopify.ad2ship import fetch_tracking
-from app.shopify.models import Order
+from app.shopify.models import TERMINAL_SHIPMENT_STATES, Order
 from app.store.base import PendingDeliveryConfirmation
 
 logger = logging.getLogger("app.jobs.delivery_confirm")
 
 _BATCH_LIMIT = 50
 _ABANDON_AFTER = timedelta(days=7)
-# The store's monotonic-guard terminal tokens (parity with IngestStore.set_fulfillment_shipment_
-# status' CASE / _TERMINAL_SHIPMENT_STATES). Only the two we CONFIRM upstream via
+# The store's monotonic-guard terminal tokens (shared TERMINAL_SHIPMENT_STATES, parity with
+# IngestStore.set_fulfillment_shipment_status' CASE). Only the two we CONFIRM upstream via
 # is_delivered_to_customer()/is_rto() are ever written as terminal; a non-terminal ad2ship badge
 # that merely happens to equal one of these literally is a data anomaly, not a confirmed fact, and
 # must not be persisted (it would wrongly pin the monotonic guard). See the fallback write below.
-_TERMINAL_SHIPMENT_TOKENS = frozenset({"delivered", "failure", "rto"})
+_TERMINAL_SHIPMENT_TOKENS = TERMINAL_SHIPMENT_STATES
 
 
 async def _send(c: Container, row: PendingDeliveryConfirmation, order: Order) -> bool:

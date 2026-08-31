@@ -759,3 +759,142 @@ async def test_no_live_lines_when_http_and_ingest_absent() -> None:
     prompt = _system_prompt(provider)
     assert "Current status:" not in prompt
     assert "AWB0099887766" in prompt  # static line unchanged
+
+
+class _RaisingIngest:
+    """An ingest whose persist call always raises -- proves a store hiccup can't lose the answer."""
+
+    async def set_fulfillment_shipment_status(
+        self, *args: object, **kwargs: object
+    ) -> None:
+        raise RuntimeError("db down")
+
+
+class _RaisingFetch:
+    """A fetch_tracking that raises (not just returns None) -- proves a clean degrade, no crash."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(
+        self, http: httpx.AsyncClient, awb: str, *, timeout: float = 4.0
+    ) -> Ad2shipTracking | None:
+        self.calls += 1
+        raise httpx.ConnectError("boom")
+
+
+async def test_persist_failure_does_not_lose_the_fetched_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The store write raises, but the live snapshot was already fetched -- the customer's answer
+    # (and its live lines) must survive; run() returns a normal reply, not the fallback.
+    monkeypatch.setattr(ot_module, "fetch_tracking", _StubFetch(_IN_TRANSIT))
+    provider = _CapturingProvider(text='{"reply": "On its way."}')
+    order = _order(
+        "tavas1", "+919999999999", fulfillment_status="FULFILLED", fulfillments=(_TRACKED,)
+    )
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+
+    async with _dead_client() as http:
+        result = await run(
+            _context(provider, "where is my order", [authorized]), http, _RaisingIngest()
+        )
+
+    assert result.text == "On its way."  # persist blew up, the answer did not
+    assert "Current status: In Transit" in _system_prompt(provider)
+
+
+async def test_fetch_raising_degrades_to_static_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = _RaisingFetch()
+    monkeypatch.setattr(ot_module, "fetch_tracking", stub)
+    provider = _CapturingProvider(text='{"reply": "Let me check."}')
+    order = _order(
+        "tavas1", "+919999999999", fulfillment_status="FULFILLED", fulfillments=(_TRACKED,)
+    )
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+
+    result = await _run_with_live_result(
+        provider, "where is my order", [authorized], stub, monkeypatch
+    )
+
+    assert stub.calls == 1
+    assert result.text == "Let me check."  # no crash, normal reply
+    prompt = _system_prompt(provider)
+    assert "Current status:" not in prompt
+    assert "AWB0099887766" in prompt  # static line intact
+
+
+async def _run_with_live_result(
+    provider: _CapturingProvider,
+    user_text: str,
+    orders: list[AuthorizedOrder],
+    stub: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> object:
+    monkeypatch.setattr(ot_module, "fetch_tracking", stub)
+    async with _dead_client() as http:
+        return await run(_context(provider, user_text, orders), http, InMemoryIngestStore())
+
+
+def _tracked(gid: str) -> Fulfillment:
+    return Fulfillment(
+        gid=gid, status="SUCCESS", tracking_company="Delhivery",
+        tracking_number=f"AWB{gid[-2:]}", tracking_url=f"https://track/{gid[-2:]}",
+    )
+
+
+async def test_live_tracking_fetches_run_concurrently_and_are_capped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Six tracked fulfillments on a shipped order -> the hard cap (_MAX_LIVE_FULFILLMENTS=5) must
+    # bound the fetch count, and gather (not a serial loop) must run them concurrently.
+    fulfillments = tuple(_tracked(f"gid://f/{i}") for i in range(6))
+    provider = _CapturingProvider(text='{"reply": "On its way."}')
+    order = _order(
+        "tavas1", "+919999999999", fulfillment_status="FULFILLED", fulfillments=fulfillments
+    )
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+    stub = _StubFetch(_IN_TRANSIT)
+
+    await _run_with_live(provider, "where is my order", [authorized], stub, monkeypatch)
+
+    assert stub.calls == 5  # capped at _MAX_LIVE_FULFILLMENTS, never all six
+
+
+async def test_live_tracking_skipped_for_cancelled_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A shipped-then-cancelled order carries a tracked fulfillment, but the order-level gate must
+    # skip it entirely -- no courier call for an order with nothing in flight to track.
+    provider = _CapturingProvider(text='{"reply": "Let me check."}')
+    order = _order(
+        "tavas1", "+919999999999", fulfillment_status="FULFILLED",
+        cancelled_at="2026-08-30T10:00:00Z", fulfillments=(_TRACKED,),
+    )
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+    stub = _StubFetch(_IN_TRANSIT)
+
+    await _run_with_live(provider, "where is my order", [authorized], stub, monkeypatch)
+
+    prompt = _system_prompt(provider)
+    assert stub.calls == 0
+    assert "Current status:" not in prompt
+
+
+async def test_live_tracking_skipped_for_unfulfilled_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Nothing dispatched (UNFULFILLED) -> the gate skips the fetch even if a stray tracked
+    # fulfillment is attached.
+    provider = _CapturingProvider(text='{"reply": "Not shipped yet."}')
+    order = _order(
+        "tavas1", "+919999999999", fulfillment_status="UNFULFILLED", fulfillments=(_TRACKED,)
+    )
+    authorized = AuthorizedOrder(order=order, verified_phone="+919999999999")
+    stub = _StubFetch(_IN_TRANSIT)
+
+    await _run_with_live(provider, "where is my order", [authorized], stub, monkeypatch)
+
+    assert stub.calls == 0

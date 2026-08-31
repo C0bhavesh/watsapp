@@ -3,7 +3,14 @@ from datetime import UTC, datetime, timedelta
 
 from app.core.delivery_status import should_apply_delivery_status
 from app.core.exchange_models import ExchangeRequest, ExchangeStatus
-from app.shopify.models import Customer, Fulfillment, LineItem, Order, normalize_order_name
+from app.shopify.models import (
+    TERMINAL_SHIPMENT_STATES,
+    Customer,
+    Fulfillment,
+    LineItem,
+    Order,
+    normalize_order_name,
+)
 from app.store.base import (
     ConversationSummary,
     DeletionResult,
@@ -24,11 +31,6 @@ from app.store.base import (
     ThreadActivity,
 )
 from app.store.postgres import MAX_MIRROR_FULFILLMENTS, _e164, _search_name_patterns
-
-# Terminal normalized shipment states: once a fulfillment reaches one of these, an incoming
-# set_fulfillment_shipment_status must NOT regress it to a non-terminal state (the tracking_*
-# snapshot still updates). Mirrors the Postgres CASE guard so the two impls agree.
-_TERMINAL_SHIPMENT_STATES = frozenset({"delivered", "failure", "rto"})
 
 
 def _parse_iso(value: str | None) -> datetime | None:
@@ -341,7 +343,7 @@ class InMemoryIngestStore:
                 continue
             new_status = (
                 existing.shipment_status
-                if existing.shipment_status in _TERMINAL_SHIPMENT_STATES
+                if existing.shipment_status in TERMINAL_SHIPMENT_STATES
                 else shipment_status
             )
             fmap[fulfillment_gid] = replace(

@@ -103,6 +103,16 @@ class Fulfillment:
         return bool(self.tracking_number or self.tracking_url)
 
 
+# The normalized `shipment_status` tokens past which no further movement is expected. The single
+# source of truth shared by every Python reader/writer of `Fulfillment.shipment_status` -- the
+# store's monotonic guard (`store/memory.py`), the delivery sweep (`jobs/delivery_confirm.py`),
+# and the order-tracking agent (`agents/order_tracking.py`) -- so the set can never drift between
+# them. `"failure"` is currently unreachable (no writer produces it) but kept for forward-compat.
+# NOTE: `store/postgres.py` re-states these as a SQL literal (`IN ('delivered','failure','rto')`)
+# because SQL cannot import a Python frozenset -- keep the two in sync by hand if this changes.
+TERMINAL_SHIPMENT_STATES = frozenset({"delivered", "failure", "rto"})
+
+
 @dataclass(frozen=True)
 class Order:
     gid: str

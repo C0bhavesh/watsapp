@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -18,15 +19,37 @@ from app.channels.copy import copy_for
 from app.core.delivery_estimate import estimate_delivery
 from app.providers.base import Message, ProviderError
 from app.shopify.ad2ship import Ad2shipTracking, fetch_tracking
-from app.shopify.models import AuthorizedOrder, Fulfillment, LineItem, Money, Order
+from app.shopify.models import (
+    TERMINAL_SHIPMENT_STATES,
+    AuthorizedOrder,
+    Fulfillment,
+    LineItem,
+    Money,
+    Order,
+)
 
 logger = logging.getLogger(__name__)
 
-# ad2ship shipment states past which no further movement is expected -- answered from stored
-# state, never re-fetched live. Mirrors the store's monotonic-terminal guard.
-_TERMINAL_SHIPMENT_STATES = frozenset({"delivered", "failure", "rto"})
 # How recent a cached ad2ship snapshot must be to reuse without a fresh courier call.
 _FRESH_TRACKING_WINDOW = timedelta(minutes=30)
+# Hard total wall-clock cap for ALL live courier fetches in one turn (enforced with
+# asyncio.wait_for, not a per-op httpx float -- see error_learnings 2026-08-15/2026-08-24). Sits
+# well under the 55s turn budget shared with router classify + resolve + the ~20s completion call.
+_ENRICH_TIMEOUT_SECONDS = 8.0
+# Safety net: never fetch more than this many fulfillments in one turn regardless of gating, so a
+# customer with many shipped orders can't fan out an unbounded number of courier calls.
+_MAX_LIVE_FULFILLMENTS = 5
+# Customer-safe display labels for the CACHED/stored path (the live ad2ship snapshot carries its
+# own human-readable status_label). A normalized token with no mapping (e.g. an unexpected value)
+# yields "" -> the "Current status" line is omitted rather than showing a raw jargon token.
+_STORED_STATUS_LABELS: dict[str, str] = {
+    "delivered": "Delivered",
+    "rto": "Returned to sender",
+    "failure": "Delivery unsuccessful",
+    "in_transit": "In Transit",
+    "out_for_delivery": "Out for Delivery",
+    "attempted_delivery": "Delivery attempted",
+}
 
 
 class TrackingStore(Protocol):
@@ -48,6 +71,7 @@ class TrackingStore(Protocol):
         expected_date: str | None = None,
         checked_at: datetime | None = None,
     ) -> None: ...
+
 
 _SYSTEM_TEMPLATE = """{personality}
 
@@ -159,21 +183,45 @@ def _stored_tracking(f: Fulfillment) -> Ad2shipTracking | None:
     """Build an Ad2shipTracking from the fulfillment's OWN cached tracking_* columns.
 
     Used when a live courier call is unnecessary (terminal shipment_status, or a snapshot still
-    inside the freshness window). Returns None if there is no stored status to describe.
+    inside the freshness window). Returns None if there is no stored status to describe. The
+    status_label is mapped to a customer-safe phrase (never a raw normalized token like "rto");
+    an unmapped token yields "" so ``_live_tracking_lines`` omits the "Current status" line.
     """
     status = f.shipment_status
     if status is None:
         return None
     return Ad2shipTracking(
         status=status,
-        status_label=status.replace("_", " ").title(),
+        status_label=_STORED_STATUS_LABELS.get(status, ""),
         current_city=f.tracking_city,
         current_hub=f.tracking_hub,
-        last_scan=f.tracking_last_scan,
+        # last_scan is left None on the cached path: only tracking_last_scan is stored, and
+        # _live_tracking_lines reads `last_scan_remark or last_scan`, so populating both from the
+        # one column would be a redundant duplicate. Carry the single stored value as the remark.
+        last_scan=None,
         last_scan_remark=f.tracking_last_scan,
         last_scan_at=None,
         expected_date=f.tracking_expected_date,
     )
+
+
+def _normalized_shipment_status(t: Ad2shipTracking) -> str | None:
+    """Map a live ad2ship snapshot to the store's normalized shipment_status token, or None to skip.
+
+    Mirrors ``jobs/delivery_confirm.py``: only an upstream-CONFIRMED terminal outcome
+    (``is_delivered_to_customer()`` / ``is_rto()``) may be persisted as a terminal token. A raw
+    badge that merely equals a terminal token (e.g. a stray ``"failure"`` / ``"rto"`` /
+    ``"delivered"`` string not backed by the ``is_*`` checks) is a data anomaly that must not pin
+    the store's monotonic guard, so the status write is skipped (None). Genuine non-terminal
+    movement (``in_transit`` / ``out_for_delivery`` / ``attempted_delivery``) passes through.
+    """
+    if t.is_delivered_to_customer():
+        return "delivered"
+    if t.is_rto():
+        return "rto"
+    if t.status in TERMINAL_SHIPMENT_STATES:
+        return None
+    return t.status
 
 
 def _tracking_is_fresh(checked_at_iso: str | None, now: datetime) -> bool:
@@ -206,28 +254,34 @@ async def _live_tracking_for(
     try:
         if not f.has_tracking() or f.tracking_number is None:
             return None
-        if f.shipment_status in _TERMINAL_SHIPMENT_STATES:
+        if f.shipment_status in TERMINAL_SHIPMENT_STATES:
             return _stored_tracking(f)
         if _tracking_is_fresh(f.tracking_checked_at, now):
             return _stored_tracking(f)
         tracking = await fetch_tracking(http, f.tracking_number)
         if tracking is None:
             return None
-        try:
-            await ingest.set_fulfillment_shipment_status(
-                f.gid,
-                tracking.status,
-                tracking_city=tracking.current_city,
-                tracking_hub=tracking.current_hub,
-                last_scan=(tracking.last_scan_remark or tracking.last_scan),
-                expected_date=tracking.expected_date,
-                checked_at=now,
-            )
-        except Exception as exc:  # best-effort persist -- never block the reply
-            logger.warning(
-                "live tracking persist failed in _live_tracking_for: type=%s",
-                type(exc).__name__,
-            )
+        # Persist the NORMALIZED status (delivered/rto/pass-through non-terminal), never the raw
+        # ad2ship badge -- an un-normalized "rto_delivered" would never match the store's terminal
+        # set, so the monotonic guard + our own terminal skip-gate would never fire for it. None =
+        # an anomalous raw-terminal badge we won't pin (mirrors jobs/delivery_confirm.py).
+        normalized = _normalized_shipment_status(tracking)
+        if normalized is not None:
+            try:
+                await ingest.set_fulfillment_shipment_status(
+                    f.gid,
+                    normalized,
+                    tracking_city=tracking.current_city,
+                    tracking_hub=tracking.current_hub,
+                    last_scan=(tracking.last_scan_remark or tracking.last_scan),
+                    expected_date=tracking.expected_date,
+                    checked_at=now,
+                )
+            except Exception as exc:  # best-effort persist -- never block the reply
+                logger.warning(
+                    "live tracking persist failed in _live_tracking_for: type=%s",
+                    type(exc).__name__,
+                )
         return tracking
     except Exception as exc:
         logger.warning(
@@ -324,21 +378,59 @@ def _order_context(
     return "\n".join(_order_line(o, reveal_fields, live) for o in orders)
 
 
+def _order_is_enrichable(order: AuthorizedOrder) -> bool:
+    """True only for an order that could plausibly have a live courier status worth fetching.
+
+    A cancelled order, or one with nothing dispatched (``fulfillment_status`` None/UNFULFILLED),
+    has no shipment in flight -- fetching ad2ship for it is pure latency on the customer-facing
+    turn path (error_learnings 2026-08-14: gate a best-effort sub-fetch on the parent's own
+    state). ``shipment_status`` alone can't gate this: it is NULL for any fulfillment the sweep
+    job never touched, so an old already-delivered order would otherwise miss every skip.
+    """
+    o = order.order
+    if o.is_cancelled():
+        return False
+    return o.fulfillment_status not in (None, "UNFULFILLED")
+
+
+def _enrichable_fulfillments(orders: list[AuthorizedOrder]) -> list[Fulfillment]:
+    """Collect the tracked fulfillments worth a live lookup, gated per-order and hard-capped."""
+    candidates: list[Fulfillment] = []
+    for order in orders:
+        if not _order_is_enrichable(order):
+            continue
+        for f in order.order.fulfillments:
+            if not f.has_tracking():
+                continue
+            candidates.append(f)
+            if len(candidates) >= _MAX_LIVE_FULFILLMENTS:
+                return candidates
+    return candidates
+
+
 async def _enrich_live_tracking(
     http: httpx.AsyncClient,
     ingest: TrackingStore,
     orders: list[AuthorizedOrder],
     now: datetime,
 ) -> dict[str, Ad2shipTracking]:
-    """Fetch (or reuse cached) ad2ship snapshots for every tracked fulfillment, keyed by gid."""
+    """Fetch (or reuse cached) ad2ship snapshots for the gated+capped set of tracked fulfillments.
+
+    Fetches run CONCURRENTLY (``asyncio.gather``, ``return_exceptions=True``) rather than serially,
+    so N shipments cost one round-trip's wall-time, not N. Each ``_live_tracking_for`` already
+    degrades to None on error; the ``return_exceptions`` is belt-and-suspenders. Keyed by gid.
+    """
+    candidates = _enrichable_fulfillments(orders)
+    if not candidates:
+        return {}
+    results = await asyncio.gather(
+        *(_live_tracking_for(http, ingest, f, now=now) for f in candidates),
+        return_exceptions=True,
+    )
     live: dict[str, Ad2shipTracking] = {}
-    for order in orders:
-        for f in order.order.fulfillments:
-            if not f.has_tracking():
-                continue
-            tracking = await _live_tracking_for(http, ingest, f, now=now)
-            if tracking is not None:
-                live[f.gid] = tracking
+    for f, result in zip(candidates, results, strict=True):
+        if isinstance(result, Ad2shipTracking):
+            live[f.gid] = result
     return live
 
 
@@ -363,7 +455,20 @@ async def run(
     )
     live: dict[str, Ad2shipTracking] = {}
     if http is not None and ingest is not None and "tracking" in context.reveal_fields:
-        live = await _enrich_live_tracking(http, ingest, context.orders, datetime.now(UTC))
+        # A hard total wall-clock cap around ALL courier fetches (asyncio.wait_for, NOT a per-op
+        # httpx float -- error_learnings 2026-08-15/2026-08-24): a slow courier can never eat into
+        # the completion call's own budget. On timeout / any error, degrade to no live enrichment
+        # this turn (today's static line) rather than block or raise.
+        try:
+            live = await asyncio.wait_for(
+                _enrich_live_tracking(http, ingest, context.orders, datetime.now(UTC)),
+                timeout=_ENRICH_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            logger.warning(
+                "live tracking enrichment aborted in run: type=%s", type(exc).__name__
+            )
+            live = {}
     system_prompt = _SYSTEM_TEMPLATE.format(
         personality=personality_for(context),
         order_context=_order_context(context.orders, context.reveal_fields, live),

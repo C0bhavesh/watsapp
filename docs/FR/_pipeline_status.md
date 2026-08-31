@@ -245,9 +245,14 @@ copied to this new read on first pass). Feature is now fully deployed and unbloc
 
 > All client questions are consolidated in `client-decisions-all.md`. Send that one doc.
 
-- **[CHECKPOINT] RTO-aware delivery status (all 8 tasks REVIEW-complete, 2026-08-31) — TWO owner
-  actions required before this feature does anything in production, NOT YET DONE.**
-  1. **Schema migration, NOT YET RUN.** Run `python -m scripts.apply_schema` (applies the full
+- **[CHECKPOINT] RTO-aware delivery status (all 8 tasks REVIEW-complete, 2026-08-31) — both owner
+  actions DONE; only `git push` of `main` remains.**
+  1. **✅ Schema migration APPLIED 2026-08-31** to production Postgres (`thetavas-bot`, project
+     `vuqxcysnqhytmpfpcbet`) via the Supabase MCP `apply_migration` (`rto_aware_delivery_status`) —
+     verified: `pending_delivery_confirmations` table + partial index present, all 6 new
+     `fulfillments` columns present. The deploy-ordering hazard below is now resolved (columns exist,
+     mirror reads succeed). Original migration SQL, for the record:
+  1. ~~**Schema migration, NOT YET RUN.**~~ Run `python -m scripts.apply_schema` (applies the full
      `schema.sql`) against production Postgres BEFORE this branch is pushed/deployed:
      ```sql
      CREATE TABLE IF NOT EXISTS pending_delivery_confirmations (
@@ -279,29 +284,23 @@ copied to this new read on first pass). Feature is now fully deployed and unbloc
        `order_delivered` deferral. No customer fulfillment messages go out at all until the migration
        runs. The signed webhook still 200-acks (no 500, no torn-down subscription), and there is no
        data loss, but the feature is fully inert and normal shipped notifications are suppressed.
-  2. **Vercel Cron entry, NOT YET ADDED.** `backend/vercel.json` currently has no `crons` array
-     driving `delivery_confirm` (existing jobs are driven by an external scheduler / other
-     mechanisms — confirm where `send_reminders` is scheduled and add alongside it):
-     ```json
-     { "crons": [
-       { "path": "/internal/jobs/delivery_confirm", "schedule": "*/15 * * * *" }
-     ] }
-     ```
-     Until scheduled, `delivered` webhooks accumulate `pending_delivery_confirmations` rows and
-     **no `order_delivered` messages are sent at all** — Task 5's deferral has no consumer. After
-     scheduling, they send 2h-2h15m after the delivered scan. The endpoint is already testable by
-     hand: `curl -H "X-Cron-Secret: $CRON_SECRET" -X POST https://<deployment>/internal/jobs/delivery_confirm`.
+  2. **✅ Vercel Cron entry ADDED 2026-08-31** — `backend/vercel.json` now carries
+     `"crons": [{ "path": "/internal/jobs/delivery_confirm", "schedule": "*/15 * * * *" }]`
+     (committed to `main`). It becomes ACTIVE on the next Vercel deploy (i.e. the next push of
+     `main`) — not before. GET auth: Vercel Cron fires GET and auto-injects
+     `Authorization: Bearer $CRON_SECRET` (env var already set); the `/internal/jobs/{name}` GET path
+     reads exactly that header. After it goes live, `order_delivered` sends 2h–2h15m after the
+     delivered scan. Manual test any time: `curl -H "X-Cron-Secret: $CRON_SECRET" -X POST https://<deployment>/internal/jobs/delivery_confirm`.
+     Note: `*/15` (every 15 min) requires a Vercel plan above Hobby; if the deploy rejects the cron
+     frequency, drop it to a coarser schedule (e.g. `7 */2 * * *`) — the ~2h latency target is
+     unaffected by a 2-hourly sweep, only the tail widens to ~2h–4h.
 
-  **Both are required together** — the schema migration alone leaves the sweep with nothing to
-  read from a live deploy's writes going nowhere useful without the cron, and the cron alone would
-  502 every run against a missing table. See the "RTO-aware delivery status — ALL 8 TASKS COMPLETE"
-  row above for the full feature summary. Blocking: `push`. The migration is a HARD ordering
-  prerequisite (NOT a deploy-anytime nicety): deploying this branch before it runs makes every
-  mirror read raise `UndefinedColumnError` — admin thread list / thread detail / template pages
-  render without mirrored-order info (guarded this fix wave, log a warning, no 500), and
-  `_notify_fulfillment_events` suppresses BOTH `order_shipped` and `order_delivered` (its shared
-  mirror read returns before both branches). The signed webhook still 200-acks and no data is lost,
-  but no fulfillment notifications go out until the migration runs.
+  **Only `git push` of `main` remains.** Both prerequisites are done: the migration is applied
+  (columns exist, mirror reads succeed, deploy-ordering hazard resolved), and the cron is committed
+  (activates on deploy). `main` is 21 commits ahead of `origin/main`, NOT pushed — owner reviews the
+  commits, then pushes; Vercel auto-deploys from `main`, which activates the cron and makes the
+  feature fully live. See the "RTO-aware delivery status — ALL 8 TASKS COMPLETE" row above for the
+  full feature summary.
 
 - ~~[CHECKPOINT] Inbound image product lookup — `inbound_images` table — schema migration.~~
   **RESOLVED (2026-08-24): owner confirmed running the migration directly against production

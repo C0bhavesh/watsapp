@@ -77,7 +77,7 @@ Shopify store: thetavas.myshopify.com
 | Gemini via LiteLLM | ✅ CONFIRMED | Client direction + proven in cafe prod (vertex gemini-3.5-flash). |
 | Shopify Admin GraphQL access | ✅ CONFIRMED | Client-credentials grant verified against shopify.dev; token flow already working (client's own curls). |
 | Shopflo as order producer | ✅ CONFIRMED it exists (theme scan) / 🔴 its order-JSON shape unverified — must inspect one real order. |
-| a2ship | ⏸ OUT OF SCOPE v1 | Client answer (9): "no idea", held. |
+| a2ship | ⏸ OUT OF SCOPE v1 (full shipping integration — creating/managing shipments) still holds. **✅ Narrow exception added 2026-08-29 (owner-directed, RTO-aware delivery status):** a READ-ONLY, unauthenticated parse of ad2ship's PUBLIC `/track-order/<awb>` page (`app/shopify/ad2ship.py::fetch_tracking`, no API/credentials) — the only reliable signal distinguishing a genuine customer delivery from an RTO, since Shopify itself has no reliable structured RTO signal (see error_learnings.md 2026-08-29). Consumed by the `delivery_confirm` sweep job and the order-tracking Q&A agent's live enrichment. | Client answer (9): "no idea", held. |
 
 ---
 

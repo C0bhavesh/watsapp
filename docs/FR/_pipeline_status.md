@@ -284,23 +284,29 @@ copied to this new read on first pass). Feature is now fully deployed and unbloc
        `order_delivered` deferral. No customer fulfillment messages go out at all until the migration
        runs. The signed webhook still 200-acks (no 500, no torn-down subscription), and there is no
        data loss, but the feature is fully inert and normal shipped notifications are suppressed.
-  2. **✅ Vercel Cron entry ADDED 2026-08-31** — `backend/vercel.json` now carries
-     `"crons": [{ "path": "/internal/jobs/delivery_confirm", "schedule": "*/15 * * * *" }]`
-     (committed to `main`). It becomes ACTIVE on the next Vercel deploy (i.e. the next push of
-     `main`) — not before. GET auth: Vercel Cron fires GET and auto-injects
-     `Authorization: Bearer $CRON_SECRET` (env var already set); the `/internal/jobs/{name}` GET path
-     reads exactly that header. After it goes live, `order_delivered` sends 2h–2h15m after the
-     delivered scan. Manual test any time: `curl -H "X-Cron-Secret: $CRON_SECRET" -X POST https://<deployment>/internal/jobs/delivery_confirm`.
-     Note: `*/15` (every 15 min) requires a Vercel plan above Hobby; if the deploy rejects the cron
-     frequency, drop it to a coarser schedule (e.g. `7 */2 * * *`) — the ~2h latency target is
-     unaffected by a 2-hourly sweep, only the tail widens to ~2h–4h.
+  2. **⚠ Vercel Cron NOT usable — account is Hobby (daily-only crons).** A `"crons"` entry with
+     `*/15 * * * *` was tried in `backend/vercel.json` and the deploy **failed** with
+     `Hobby accounts are limited to daily cron jobs`; the entry was reverted so the branch deploys.
+     `delivery_confirm` must be triggered by the **same external scheduler the repo already uses for
+     its sub-daily jobs — cron-job.org** (see `docs/architecture-decisions.md`; `outbox_drain` is
+     driven the same way). **OWNER ACTION, not yet done:** in the cron-job.org account, add a job:
+     - URL: `https://thetavas-bot.vercel.app/internal/jobs/delivery_confirm`
+     - Method: `POST`, header `X-Cron-Secret: <CRON_SECRET>` (value from Vercel → Settings → Env Vars)
+       — OR Method `GET`, header `Authorization: Bearer <CRON_SECRET>`.
+     - Schedule: every 15 min (`*/15`). Any cadence up to hourly is fine — it only widens the
+       delivery-confirm tail (2h at `*/15`, up to ~3h hourly).
+     Alternative if you'd rather not depend on cron-job.org: upgrade Vercel to Pro and re-add the
+     `"crons"` entry to `backend/vercel.json` (one-line change), or add a GitHub Actions scheduled
+     workflow that curls the endpoint. Until SOMETHING pings it, `pending_delivery_confirmations`
+     rows accumulate and no `order_delivered` is sent (the webpage-deferral has no consumer).
+     Manual test any time: `curl -H "X-Cron-Secret: $CRON_SECRET" -X POST https://thetavas-bot.vercel.app/internal/jobs/delivery_confirm`.
 
-  **Only `git push` of `main` remains.** Both prerequisites are done: the migration is applied
-  (columns exist, mirror reads succeed, deploy-ordering hazard resolved), and the cron is committed
-  (activates on deploy). `main` is 21 commits ahead of `origin/main`, NOT pushed — owner reviews the
-  commits, then pushes; Vercel auto-deploys from `main`, which activates the cron and makes the
-  feature fully live. See the "RTO-aware delivery status — ALL 8 TASKS COMPLETE" row above for the
-  full feature summary.
+  **Code is live once `main` deploys; scheduling is the only open item.** The migration is applied
+  (columns exist, mirror reads succeed) and the feature code is on `main`. The deferring webhook and
+  the manually-callable `delivery_confirm` endpoint work as soon as Vercel serves the new build; the
+  automatic ~2h send only happens once the external scheduler is pointed at the endpoint (owner
+  action above). See the "RTO-aware delivery status — ALL 8 TASKS COMPLETE" row above for the full
+  feature summary.
 
 - ~~[CHECKPOINT] Inbound image product lookup — `inbound_images` table — schema migration.~~
   **RESOLVED (2026-08-24): owner confirmed running the migration directly against production

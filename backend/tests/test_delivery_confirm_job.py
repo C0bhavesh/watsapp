@@ -174,6 +174,50 @@ async def test_ad2ship_rto_records_rto_and_never_sends(
     assert (await _stored_fulfillment()).shipment_status == "rto"
 
 
+async def test_stored_rto_short_circuits_before_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Task 7's agent may have already written shipment_status='rto' from the reliable ad2ship
+    # signal when the customer asked about the order. The sweep must trust that terminal state and
+    # never let a (now delivered-looking) read or the leaky D5 Shopify fallback re-classify it.
+    c = get_container()
+    _install_sender(monkeypatch)
+    _install_ad2ship(monkeypatch, _tracking("delivered"))  # would otherwise send
+    await _seed()
+    await c.ingest.set_fulfillment_shipment_status(FUL_GID, "rto")
+
+    result = await run_delivery_confirm(c)
+
+    assert result["rto"] == 1
+    assert result["sent"] == 0
+    assert await _outbound_rows(DEDUPE) == []
+    assert _confirmation_state(FUL_GID) == "rto"
+
+
+async def test_stored_delivered_sends_without_shopify_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A prior ad2ship read already confirmed a genuine delivery (shipment_status='delivered'). Even
+    # when ad2ship is unreadable at sweep time, the sweep sends order_delivered from the trusted
+    # stored state and NEVER consults the leaky Shopify fallback.
+    class _NoShopify:
+        async def get_order_fulfillments(self, gid: str) -> tuple[Fulfillment, ...]:
+            raise AssertionError("Shopify fallback must not be consulted for stored 'delivered'")
+
+    c = get_container()
+    _install_sender(monkeypatch)
+    _install_ad2ship(monkeypatch, None)  # unreadable
+    c.shopify = _NoShopify()  # type: ignore[assignment]
+    await _seed()
+    await c.ingest.set_fulfillment_shipment_status(FUL_GID, "delivered")
+
+    result = await run_delivery_confirm(c)
+
+    assert result["sent"] == 1
+    assert len(await _outbound_rows(DEDUPE)) == 1
+    assert _confirmation_state(FUL_GID) == "sent"
+
+
 async def test_ad2ship_none_shopify_delivered_sends(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

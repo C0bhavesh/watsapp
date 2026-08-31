@@ -113,6 +113,23 @@ async def run_delivery_confirm(c: Container) -> dict[str, Any]:
             )
             awb = fulfillment.tracking_number if fulfillment else None
 
+            # Trust our OWN stored ad2ship-derived terminal state BEFORE the leaky Shopify D5
+            # fallback can override it. Task 7's agent writes shipment_status from the SAME reliable
+            # ad2ship signal whenever a customer asks about their order, so in the exact window the
+            # D5 heuristic exists for (ad2ship unreadable now) a shipment we ALREADY positively
+            # identified as RTO must never be re-classified as delivered, and one already confirmed
+            # delivered can be sent without re-fetching. Both stored states are terminal.
+            if fulfillment is not None and fulfillment.shipment_status == "rto":
+                await c.ingest.set_delivery_confirmation_state(row.fulfillment_gid, "rto")
+                rto += 1
+                continue
+            if fulfillment is not None and fulfillment.shipment_status == "delivered":
+                if await _send(c, row, order):
+                    sent += 1
+                else:
+                    errors += 1
+                continue
+
             # ad2ship is the reliable RTO signal. fetch_tracking never raises: any transport/parse
             # failure or missing awb yields None, which routes to the Shopify fallback below.
             tracking = await fetch_tracking(c.http, awb) if awb else None

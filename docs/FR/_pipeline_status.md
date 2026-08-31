@@ -267,11 +267,18 @@ copied to this new read on first pass). Feature is now fully deployed and unbloc
      ```
      (see `schema.sql` for the exact current statement, incl. the partial index on
      `due_at WHERE state='pending'` — the SQL above is a summary, not a copy-paste substitute).
-     Deploy-ordering risk: `_notify_fulfillment_events`'s `is_delivered` branch (Task 5)
-     UNCONDITIONALLY calls `record_pending_delivery_confirmation` — that INSERT is wrapped in
-     `try/except` (degrades to a logged skip, never a 500 on the signed webhook), so a pre-migration
-     deploy does NOT break the webhook, but it silently drops every delivery confirmation until the
-     migration runs (no customer `order_delivered` messages, no data loss risk to the signed ack).
+     Deploy-ordering: this migration is a HARD prerequisite — the branch must NOT deploy before it
+     runs. Task 4 added the 6 new `fulfillments` columns to `_FULFILLMENT_COLUMNS`, which is SELECTed
+     on EVERY mirror read; pre-migration asyncpg raises `UndefinedColumnError` on each one. Concrete
+     effects of a pre-migration deploy:
+     - Admin mirror reads (thread list, thread detail, template list, template resend) are now each
+       wrapped in `try/except Exception` (this fix wave) → those pages render WITHOUT mirrored-order
+       info (no order names / no template rows) and log a PII-free warning, instead of 500ing.
+     - `_notify_fulfillment_events` (Task 5) reads the mirror before branching, so its guard raises
+       and returns BEFORE both branches — it stops sending `order_shipped` too, not just the
+       `order_delivered` deferral. No customer fulfillment messages go out at all until the migration
+       runs. The signed webhook still 200-acks (no 500, no torn-down subscription), and there is no
+       data loss, but the feature is fully inert and normal shipped notifications are suppressed.
   2. **Vercel Cron entry, NOT YET ADDED.** `backend/vercel.json` currently has no `crons` array
      driving `delivery_confirm` (existing jobs are driven by an external scheduler / other
      mechanisms — confirm where `send_reminders` is scheduled and add alongside it):
@@ -288,9 +295,13 @@ copied to this new read on first pass). Feature is now fully deployed and unbloc
   **Both are required together** — the schema migration alone leaves the sweep with nothing to
   read from a live deploy's writes going nowhere useful without the cron, and the cron alone would
   502 every run against a missing table. See the "RTO-aware delivery status — ALL 8 TASKS COMPLETE"
-  row above for the full feature summary. Blocking: `push` + production usefulness (the webhook
-  handler itself is safe to deploy pre-migration, per the deploy-ordering note above, but the
-  feature is inert until both actions are done).
+  row above for the full feature summary. Blocking: `push`. The migration is a HARD ordering
+  prerequisite (NOT a deploy-anytime nicety): deploying this branch before it runs makes every
+  mirror read raise `UndefinedColumnError` — admin thread list / thread detail / template pages
+  render without mirrored-order info (guarded this fix wave, log a warning, no 500), and
+  `_notify_fulfillment_events` suppresses BOTH `order_shipped` and `order_delivered` (its shared
+  mirror read returns before both branches). The signed webhook still 200-acks and no data is lost,
+  but no fulfillment notifications go out until the migration runs.
 
 - ~~[CHECKPOINT] Inbound image product lookup — `inbound_images` table — schema migration.~~
   **RESOLVED (2026-08-24): owner confirmed running the migration directly against production

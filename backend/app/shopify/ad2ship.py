@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from urllib.parse import quote
 
 import httpx
 
@@ -158,12 +159,12 @@ async def fetch_tracking(
     """
     try:
         resp = await http.get(
-            _TRACK_URL.format(awb=awb),
+            _TRACK_URL.format(awb=quote(awb, safe="")),
             headers=_HEADERS,
             timeout=timeout,
             follow_redirects=False,
         )
-    except (httpx.HTTPError, ValueError) as exc:
+    except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
         _log_failure(exc)
         return None
 

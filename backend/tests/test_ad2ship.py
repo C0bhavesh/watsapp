@@ -79,3 +79,22 @@ async def test_http_error_returns_none() -> None:
 async def test_timeout_returns_none() -> None:
     async with _client(None, exc=httpx.TimeoutException) as c:
         assert await fetch_tracking(c, "x") is None
+
+
+@pytest.mark.asyncio
+async def test_awb_with_space_is_quoted_and_never_raises() -> None:
+    # A free-text AWB with a space would make httpx raise InvalidURL if interpolated raw; quoting it
+    # keeps the "never raises" contract. Against the delivered fixture the quoted request parses
+    # normally rather than raising.
+    html = (FIX / "delivered_tavas4464.html").read_text(encoding="utf-8")
+    async with _client(html) as c:
+        t = await fetch_tracking(c, "AWB 123 45")
+    assert t is not None and t.status == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_non_ascii_awb_never_raises() -> None:
+    # A non-ASCII AWB also gets quoted; even if the page 404s, fetch_tracking returns None, never
+    # raises httpx.InvalidURL.
+    async with _client(None, status_code=404) as c:
+        assert await fetch_tracking(c, "abcé123") is None

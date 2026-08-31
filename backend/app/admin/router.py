@@ -826,7 +826,14 @@ async def list_conversations(
     # changes -- the values are identical, just computed in far fewer round trips.
     thread_id_by_phone = await c.conversations.get_or_create_batch(page_phones)
     previews_by_phone = await c.conversations.last_messages_by_user_ids(page_phones)
-    orders_by_phone = await c.ingest.find_mirrored_orders_by_phones(page_phones)
+    # The mirror read now SELECTs Task-4's new fulfillment columns, which do not exist until the
+    # owner runs the schema migration -- pre-migration asyncpg raises UndefinedColumnError. Degrade
+    # to "no order names" (same nature as the exchanges guard below), never 500 the whole list.
+    try:
+        orders_by_phone = await c.ingest.find_mirrored_orders_by_phones(page_phones)
+    except Exception as exc:
+        logger.warning("admin mirror lookup degraded (thread list): type=%s", type(exc).__name__)
+        orders_by_phone = {}
     thread_ids = [thread_id_by_phone[p] for p in page_phones]
     unread_by_thread = await c.conversations.count_unread_messages_batch(thread_ids)
     paused_by_thread = await c.conversations.get_paused_until_batch(thread_ids)
@@ -1017,7 +1024,14 @@ async def get_conversation_thread(thread_id: int) -> dict[str, object]:
     # chronological order. str() keeps the key type mypy-checkable (object -> str).
     entries.sort(key=lambda e: str(e["timestamp"] or ""))
 
-    orders = await c.ingest.find_mirrored_orders_by_phone(user_id)
+    # Mirror read pulls Task-4's new fulfillment columns; pre-migration asyncpg raises
+    # UndefinedColumnError. Degrade to "no orders" (same nature as the exchanges guard below), never
+    # 500 the whole thread detail.
+    try:
+        orders = await c.ingest.find_mirrored_orders_by_phone(user_id)
+    except Exception as exc:
+        logger.warning("admin mirror lookup degraded (thread detail): type=%s", type(exc).__name__)
+        orders = []
     orders_sorted = sorted(orders, key=lambda o: str(o.updated_at or ""), reverse=True)
     # Guarded for the same reason as the mark_read call below: a failure in the exchange lookup
     # (e.g. the exchange_requests table missing in an environment) must never sink the whole
@@ -1303,7 +1317,13 @@ async def list_templates(thread_id: int) -> dict[str, object]:
     user_id = await c.conversations.get_user_id(thread_id)
     if user_id is None:
         raise HTTPException(status_code=404, detail="thread not found")
-    orders = await c.ingest.find_mirrored_orders_by_phone(user_id)
+    # Mirror read pulls Task-4's new fulfillment columns; pre-migration asyncpg raises
+    # UndefinedColumnError. Degrade to "no orders" so the template list renders empty, never 500s.
+    try:
+        orders = await c.ingest.find_mirrored_orders_by_phone(user_id)
+    except Exception as exc:
+        logger.warning("admin mirror lookup degraded (template list): type=%s", type(exc).__name__)
+        orders = []
     order_payloads: list[dict[str, object]] = []
     for order in orders:
         defaults = resolve_template_defaults(order)
@@ -1361,7 +1381,16 @@ async def send_admin_template(
         _audit("admin_template_resend", "failure", resource=f"thread:{thread_id}")
         raise HTTPException(status_code=400, detail="unknown template")
 
-    orders = await c.ingest.find_mirrored_orders_by_phone(user_id)
+    # Mirror read pulls Task-4's new fulfillment columns; pre-migration asyncpg raises
+    # UndefinedColumnError. Degrade to "no orders" -> the resolve below 404s exactly as it does when
+    # this customer genuinely has no matching order, rather than 500ing the resend.
+    try:
+        orders = await c.ingest.find_mirrored_orders_by_phone(user_id)
+    except Exception as exc:
+        logger.warning(
+            "admin mirror lookup degraded (template resend): type=%s", type(exc).__name__
+        )
+        orders = []
     order = next((o for o in orders if o.name == body.order_name), None)
     if order is None:
         _audit("admin_template_resend", "failure", resource=f"thread:{thread_id}")
